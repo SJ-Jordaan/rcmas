@@ -1,0 +1,286 @@
+\documentclass{llncs}
+%\usepackage{fullpage}
+%\usepackage{slashbox}
+\usepackage{relsize}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{oz}
+%\usepackage{lmodern}
+\usepackage{listings} 
+%\usepackage{fixmath}
+\usepackage{csp-oz}
+\usepackage{delarray}
+\usepackage{slashed}
+%\usepackage{graphicx}
+\usepackage{etex}
+\usepackage{pgf}
+\usepackage{tikz}
+\usepackage{dsfont} 
+%\usepackage{arevmath}
+\usepackage{float} 
+%\usepackage{algorithm2e}
+%\usepackage[noend]{algorithm2e}
+%\usepackage[noend,linesnumbered,ruled,vlined]{algorithm2e}
+\usepackage[noend,linesnumbered,ruled,vlined]{algorithm2e}
+%\usepackage[noend]{algorithmic}
+%\usepackage{times}
+\usetikzlibrary{fadings}
+\usetikzlibrary{positioning,automata}
+\usepackage{setspace}
+%\usepackage{bbm}
+%\usepackage{dsfont}
+\usetikzlibrary{arrows,automata,shapes,patterns}
+\usepackage{pgfplots}
+\usepackage{filecontents}
+%\usepackage{bbding}
+\usepackage{pifont}% http://ctan.org/pkg/pifont
+\newcommand{\cmark}{\ding{51}}%
+\newcommand{\xmark}{\ding{55}}%
+%\usepackage{bbold}
+%\usepackage{bbding}
+%\usetikzlibrary{decorations}
+%\usetikzlibrary{snakes}
+\usepackage{stackengine}
+\usetikzlibrary{matrix}
+\usepackage{multirow}
+%\usepackage{turnstile}
+\def\ruleoffset{1pt}
+\newcommand\specialvdash[2]{\mathrel{\ensurestackMath{
+  \mkern2mu\rule[-\dp\strutbox]{.4pt}{\baselineskip}\stackon[\ruleoffset]{
+    \stackunder[\dimexpr\ruleoffset-.5\ht\strutbox+.5\dp\strutbox]{
+      \rule[\dimexpr.5\ht\strutbox-.5\dp\strutbox]{2.5ex}{.4pt}}{
+        \scriptstyle #1}}{\scriptstyle#2}\mkern2mu}}
+}
+\DeclareRobustCommand\model{\mathrel{|}\joinrel\mkern-.5mu\mathrel{-}}
+
+\DeclareRobustCommand{\invE}{\text{\reflectbox{\reflectbox{$\exists$}}}}
+
+    \newcommand{\invertleadsto}{%
+    \mathrel{\reflectbox{\rotatebox[origin=c]{180}{$E$}}}}
+
+\SetAlFnt{\footnotesize}
+\SetAlCapFnt{\footnotesize}
+\SetAlCapNameFnt{\footnotesize}
+
+\newcommand{\coop}[2][]{\langle\!\langle{#2}\rangle\!\rangle_{_{\!\mathit{#1}}}\,}
+
+\SetKwFor{For}{for}{do}{EndLoop}
+\SetKwFor{ForAllP}{loop forever do}{}{end}
+
+\tikzset{
+  treenode/.style = {align=center, inner sep=0pt, text centered,
+    font=\sffamily},
+  arn_o/.style = {thick,minimum height=1.3em,treenode, rectangle font=\sffamily\bfseries, draw=black,
+    fill=orange, text width=1.3em},% arbre rouge noir, noeud noir
+     arn_bo/.style = {thick,minimum height=2.5em,treenode, rectangle font=\sffamily\bfseries, draw=black,
+    fill=orange, text width=2.5em},% arbre rouge noir, noeud noir
+  arn_g/.style = {thick,minimum height=1.3em,treenode, rectangle, fill=mygreen, draw=black, 
+    text width=1.3em },% arbre rouge noir, noeud rouge
+      arn_so/.style = {thick,minimum height=0.75em,treenode, rectangle font=\sffamily\bfseries, draw=black,
+    fill=orange, text width=0.75em},% arbre rouge noir, noeud noir
+  arn_sg/.style = {thick,minimum height=0.75em,treenode, rectangle, fill=mygreen, draw=black, 
+    text width=0.75em },% arbre rouge noir, noeud rouge
+  arn_xg/.style = {fill=mygreen, draw=black,thick,treenode, rectangle, draw=black,
+    minimum width=0.75em, minimum height=0.75em},% arbre rouge noir, nil
+     arn_xo/.style = {fill=orange, draw=black,thick,treenode, rectangle, draw=black,
+    minimum width=1em, minimum height=1em},% arbre rouge noir, nil
+}
+
+
+
+\usepackage{url}
+\urldef{\mails}\path|u18074848@tuks.co.za|
+\urldef{\mailsb}\path|ntimm@cs.up.ac.za|    
+
+
+\usepackage{ntheorem}
+%\newtheorem{theorem}{Theorem}
+\newtheorem*{theorem2}{Theorem 2.}
+%\newtheorem{theorem2}{Theorem 2.}
+%\newtheorem*{theorem2}{Theorem}
+\newtheorem*{theorem3}{Lemma 1.}
+\newtheorem*{theorem4}{Lemma 2.}
+
+\newcommand{\BIGOP}[1]
+{
+\mathop{\mathchoice%
+{\raise-0.22em\hbox{\huge $#1$}}%
+{\raise-0.05em\hbox{\Large $#1$}}{\hbox{\large $#1$}}{#1}}}
+\newcommand{\bigtimes}{\BIGOP{\times}}
+% nur fuer Bigboxplus andere Korrekturen
+\newcommand{\BIGboxplus}{\mathop{\mathchoice%
+{\raise-0.35em\hbox{\huge $\boxplus$}}%
+{\raise-0.15em\hbox{\Large $\boxplus$}}{\hbox{\large $\boxplus$}}{\boxplus}}}
+
+\newcommand{\subscriptedfrac}[3]{%
+ \frac{\,#1\,}{\,#2\,}{}_{#3}%
+}
+
+\newcommand{\at}{$@$}
+
+\newcommand\bigforall{\mbox{\Large $\mathsurround0pt\forall$}} 
+
+\newenvironment{keywords}{
+       \list{}{\advance\topsep by0.35cm\relax\small
+       \leftmargin=0cm
+       \labelwidth=0.35cm
+       \listparindent=0.35cm
+       \itemindent\listparindent
+       \rightmargin\leftmargin}\item[\hskip\labelsep
+                                     \bfseries Keywords:]}
+     {\endlist}
+
+\begin{document}
+\title{Strategy Synthesis for Competitive Region Control via 
+Q-Learning-Assisted Formal Reasoning 
+} 
+
+\author{
+Steven Jordaan\orcidID{0009-0005-2928-2122}  \and
+Nils Timm\orcidID{0000-0002-9656-3240} 
+}
+\institute{Department of Computer Science, University of Pretoria, Pretoria, South Africa \\
+\mails \\ \mailsb
+}
+
+\maketitle
+\begin{abstract}
+\end{abstract}
+
+\section{Introduction} 
+Discussion of real-world mission/safety critical multi-agent problems and the need strategies that guarantee mission success.
+\section{Related Work}
+
+
+\section{Region Control Multi-Agent Systems}
+In our approach we introduce  \emph{region control multi-agent systems} (RCMAS).
+\begin{definition}[Region Control Multi-Agent Systems] 
+A region control multi-agent system is a tuple $M = (Agt, T, o)$ where
+\begin{itemize}
+ \item $Agt = \{a_k \mid 1 \leq k \leq n \}$ is a finite set of agents,
+\item $T \subseteq  \{(i,j) \mid 1 \leq i \leq w,  1 \leq j \leq r,\}$ is a territory of sectors,
+\item $o : Agt \rightarrow \mathbb{N}$ is an objective function that defines minimum size of a cohesive region that each agent needs to control.
+\end{itemize}    
+\end{definition}
+We define $T$ as a \emph{subset} relation in order to exclude sectors from the territory that we regard as \emph{inaccessible} in RCMAS instances.  
+Each agent $a$ has the qualitative mission of controlling a cohesive region at least size $o(a)$ by the time all sectors of the territory are occupied.  
+Moreover, each agent has the quantitative mission of maximising the size of its largest cohesive region.
+The actions that can be performed for this are as follows.
+
+Todo: Formally define a cohesive region $R \subseteq T \ldots$ (see Definition \ref{def:cohesive-regions}). 
+    
+\begin{definition}[Actions]
+Given an RCMAS $M$, the {set of actions}is $Act = \{ act^a_{i,j} \mid a \in Agt,  G(i,j)\}$.
+\end{definition}
+
+\noindent
+Hence,  actions allow agents to take control of units of the territory.
+This gives rise to the notion of \emph{states} of an RCMAS, which we subsequently define. 
+An RCMAS runs in discrete rounds where in each round each agent chooses its next action.  In a round the tuple of chosen actions, one per agent, gets executed simultaneously.  The execution of actions leads to an evolution of the system between different states over time. 
+
+\begin{definition}[States]
+A state of an RCMAS $M$ is a function $s : T \rightarrow Agt^+$ where $Agt^+ = Agt \cup \{a_0\}$ and $a_0$ is a dummy agent.
+If $s(i,j) = a_0$ then sector $r$ is unoccupied in state $s$. 
+If $s(i,j) = a_k$ and $k > 0$ then $(i,j)$ is occupied by agent $a_k$ in $s$.
+We denote by $s_0$ the initial state of $M$, where $s(i,j) = a_0$ for each $(i,j) \in T$, i.e., initially all sectors are unoccupied.
+If we want to express that a sector $(i,j)$ is occupied by agent $a_k$ but the current state is not further specified, then we simply write $(i,j) \leftarrow a_k$.
+We denote by $S$ the set of all possible states of $M$,  
+and we implicitly assume that $S$ comprises the special state $s^x$,
+that indicates mission failure. 
+\end{definition}
+
+\noindent
+Hence, states describe which sectors are currently under the control of which agents.
+
+\begin{definition}[Cohesive Regions]
+\label{def:cohesive-regions}
+Let $M$ be an RCMAS, $a \in Agt$, $s \in S$, and $s(i,j) = a$.
+Then the cohesive region $R$ associated with sector $(i,j)$ 
+is inductively defined as follows:
+\begin{itemize}
+\item $(i,j) \in R$;
+\item if $(i',j') \in R$ and $s(i'+1,j') = a$, then $(i'+1,j') \in R$;
+\item if $(i',j') \in R$ and $s(i'-1,j') = a$, then $(i'-1,j') \in R$;
+\item if $(i',j') \in R$ and $s(i',j'+1) = a$, then $(i',j'+1) \in R$;
+\item if $(i',j') \in R$ and $s(i',j'-1) = a$, then $(i',j'-1) \in R$;
+\end{itemize}
+\end{definition}
+
+
+
+In each state only a subset of actions may be available for execution by an agent, which we define by the protocol:
+
+\begin{definition}[Action Availability Protocol]
+  The {action availability protocol} is a function $P : S \times Agt \rightarrow 2^{Act}$ defined for each $s \in S$ and $a \in Agt$:
+  \[
+  P(s,a) = \{ act^a_{i,j} \mid s(i,j) = a_0\}
+  \]
+\end{definition}
+Thus,  an agent can attempt to occupy a sector that is currently unoccupied.
+  
+  \begin{definition}[Action Profiles]
+  An action profile in an RCMAS $M$ is a mapping $ap : Agt \rightarrow Act$.  $AP$ denotes the set of all action profiles. We say that a profile $ap$ is executable in a state $s \in S$ if for each $a \in Agt$ we have that $ap(a) \in P(s,a)$.
+  \end{definition}
+ Based on action profiles we can formally define the evolution of an RCMAS.
+  
+   \begin{definition}[Evolution]
+The evolution of an RCMAS is a relation $\delta \subseteq S \times AP \times S$ where $(s, ap, s') \in \delta$ iff $ap$ is executable in $s$ and for each $(i,j) \in T$:
+\begin{enumerate}
+\item if $s(i,j) = a_0$ then: %\\
+\begin{enumerate}
+\item if $\neg \exists a : ap(a) = act^a_{i,j}$ then $s'(i,j) = a_0$;
+\item else if $\exists  a : ap(a) = act^a_{i,j} \wedge \forall a' \neq a : ap(a') \neq act^{a'}_{i,j}$ then $s'(i,j) = a$; %\\ 
+\item otherwise $s' = s^x$; %\\
+\end{enumerate}
+\item if $s(i,j) = a$ for some $a \in Agt$ then $s'(i,j) = a$. %\\
+  \end{enumerate}
+  \end{definition}
+  If an action profile is executed in a state of an RCMAS $M$,  this leads to a transition of $M$ into a corresponding successor state, i.e.,
+    a change in the control of sectors according to the actions chosen by the agents. According to the evolution, the attempt to occupy of a currently unoccupied sector $(i,j)$ by an agent $a$ will only be successful if $a$ is the only agent that attempts to occupy $(i,j)$ in the current round. If multiple agents attempt to occupy the same sector at the same time, this will result in a collision an the immediate failure of the mission. 
+Moreover, any occupancy of sectors by agents will persist until the system terminates. 
+
+\section{Strategies}
+We are interested in solving strategy synthesis problems with regard to region control multi-agent systems.
+A strategy is defined as follows:
+  
+         \begin{definition}[Strategy]
+     A strategy  of an agent $a \in Agt$ in an RCMAS is an injective function $\alpha_a : S \rightarrow Act$. 
+A strategy can also be denoted by a relation $\alpha_a \subseteq S \times Act$ where $\alpha_a(s,act^a_{i,j}) = true$ iff $\alpha_a(s) = act^a_{i,j}$. 
+A joint strategy is a tuple of strategies $\alpha_{Agt} = (\alpha_a)_{a \in Agt}$, one for each $a \in Agt$.
+  \end{definition}
+  \noindent
+A strategy determines which action an agent will choose  in which  state.  
+
+\textbf{Comment: We can still consider uniform strategies in our scenario, if we assume that agents can only partially observe states. 
+Then agents may have the same state observation in different states.}
+
+  The outcome of a strategy $\alpha_{Agt}$ in a state $s$ is a path.
+  
+   \begin{definition}[Outcome of a Strategy]
+   Let $M$ be an MRA and $s$ the initial state of $M$. 
+   Moreover, let $\alpha_{Agt}$ be a joint strategy of $Agt$. Then the outcome of $\alpha_{Agt}$ in state $s$ is a path
+  \[
+  \begin{array}{lllll}
+  \pi(s, \alpha_{Agt}) & = & & s_0 \ldots s_m \mid s_0 = s \ \wedge \ \forall  0 \leq t \leq s_m : \vspace*{1.5mm}\ \\
+  & & & \bigg(s_t,\big(\alpha_{a_1}(s_t), \ldots, \alpha_{a_n}(s_t)\big),s_{t+1}\bigg) \in \delta \vspace*{1.5mm}\ \\ 
+  & & & \wedge \ s_m = s^x \ \vee \ \forall (i,j) \in T : s_m(i,j) \neq a_0.
+  \end{array}
+  \]
+   \end{definition}
+   Hence, the outcome of a strategy is a path that either ends in the mission failure state or in a state where all sectors of the territory are occupied.  
+
+\textbf{Todo: Formalise mission objectives/goals, winning/optimal/equilibrium strategies.
+}
+
+\textbf{Todo: Consider extensions where agents have preferences in terms of sectors, and where sectors are associated with numerical rewards.
+}
+
+
+
+\bibliographystyle{splncs03}
+\bibliography{references}
+
+
+
+
+\end{document} 
