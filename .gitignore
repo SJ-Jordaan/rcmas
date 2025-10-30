@@ -58,10 +58,17 @@ docs/_templates/
 # Results and outputs
 results/
 outputs/
-*.png
-*.pdf
 *.log
 
 # Compiled
 *.pyc
 *.pyo
+
+# Conda
+.conda/
+*.conda
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride

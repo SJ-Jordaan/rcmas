@@ -1,0 +1,388 @@
+============================================================
+Model 1
+============================================================
+
+Raw model:
+[sector_1_1 = 0,
+ sector_53_15 = 0,
+ sector_7_14 = 0,
+ sector_61_3 = 0,
+ sector_53_10 = 0,
+ sector_60_12 = 0,
+ sector_41_4 = 0,
+ sector_20_11 = 0,
+ action_4_3 = 26,
+ sector_47_6 = 0,
+ action_4_2 = 4,
+ sector_57_9 = 0,
+ sector_57_15 = 0,
+ sector_19_5 = 0,
+ sector_24_2 = 0,
+ sector_3_7 = 2,
+ sector_19_8 = 0,
+ sector_16_11 = 2,
+ sector_38_6 = 0,
+ sector_47_8 = 0,
+ sector_35_7 = 0,
+ sector_10_5 = 0,
+ sector_29_8 = 0,
+ sector_44_2 = 0,
+ sector_3_6 = 2,
+ sector_37_12 = 0,
+ sector_6_6 = 0,
+ sector_40_6 = 0,
+ sector_51_8 = 0,
+ sector_8_10 = 0,
+ sector_63_11 = 0,
+ sector_36_8 = 3,
+ sector_36_15 = 3,
+ sector_9_7 = 4,
+ sector_25_12 = 0,
+ action_1_4 = 24,
+ action_4_8 = 6,
+ sector_53_1 = 0,
+ sector_40_13 = 0,
+ sector_42_1 = 0,
+ sector_55_2 = 0,
+ sector_34_3 = 0,
+ sector_36_5 = 3,
+ sector_6_16 = 4,
+ sector_26_12 = 4,
+ sector_24_10 = 1,
+ sector_39_12 = 0,
+ action_3_2 = 18,
+ sector_35_16 = 0,
+ sector_20_5 = 0,
+ sector_44_4 = 0,
+ action_4_9 = 4,
+ sector_0_14 = 2,
+ sector_16_8 = 2,
+ sector_0_9 = 2,
+ sector_27_12 = 0,
+ sector_12_13 = 0,
+ sector_32_14 = 0,
+ sector_29_15 = 0,
+ sector_10_14 = 0,
+ sector_46_6 = 0,
+ sector_56_14 = 0,
+ sector_18_8 = 3,
+ sector_6_4 = 0,
+ sector_21_8 = 0,
+ sector_52_16 = 0,
+ sector_61_6 = 0,
+ sector_9_11 = 4,
+ sector_34_8 = 2,
+ sector_14_14 = 1,
+ sector_53_2 = 0,
+ sector_5_13 = 2,
+ sector_11_9 = 3,
+ sector_43_5 = 0,
+ sector_0_5 = 2,
+ sector_44_12 = 0,
+ sector_0_6 = 2,
+ sector_17_14 = 0,
+ sector_38_14 = 0,
+ sector_41_3 = 0,
+ sector_44_16 = 0,
+ sector_55_10 = 4,
+ sector_16_14 = 2,
+ sector_61_1 = 0,
+ sector_13_8 = 0,
+ sector_44_7 = 0,
+ sector_55_8 = 4,
+ action_3_6 = 1,
+ sector_33_9 = 0,
+ sector_1_10 = 0,
+ sector_34_10 = 2,
+ sector_24_5 = 1,
+ sector_20_9 = 0,
+ sector_4_10 = 0,
+ sector_56_7 = 0,
+ sector_19_9 = 0,
+ sector_58_10 = 0,
+ action_3_8 = 1,
+ sector_13_7 = 0,
+ sector_43_15 = 0,
+ sector_17_1 = 0,
+ sector_4_2 = 0,
+ sector_2_9 = 2,
+ sector_14_9 = 1,
+ sector_32_1 = 0,
+ sector_46_2 = 0,
+ sector_55_6 = 4,
+ sector_34_11 = 2,
+ sector_31_3 = 0,
+ action_3_4 = 36,
+ sector_28_10 = 0,
+ sector_36_1 = 0,
+ sector_2_14 = 2,
+ sector_11_5 = 0,
+ sector_62_16 = 0,
+ sector_36_16 = 3,
+ sector_52_2 = 0,
+ sector_3_14 = 2,
+ sector_4_13 = 0,
+ sector_30_14 = 0,
+ sector_22_5 = 0,
+ sector_56_15 = 0,
+ sector_5_3 = 0,
+ sector_9_14 = 4,
+ sector_44_10 = 0,
+ sector_37_1 = 0,
+ sector_45_6 = 0,
+ sector_33_5 = 0,
+ sector_26_11 = 4,
+ ...]
+
+Timestep 0:
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+Actions at t=0:
+  Agent 1 -> sector 5 (row 0, col 5)
+  Agent 2 -> sector 3 (row 0, col 3)
+  Agent 3 -> sector 3 (row 0, col 3)
+  Agent 4 -> sector 5 (row 0, col 5)
+
+Timestep 1:
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+Actions at t=1:
+  Agent 1 -> sector 42 (row 5, col 2)
+  Agent 2 -> sector 0 (row 0, col 0)
+  Agent 3 -> sector 5 (row 0, col 5)
+  Agent 4 -> sector 5 (row 0, col 5)
+
+Timestep 2:
+2 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+Actions at t=2:
+  Agent 1 -> sector 14 (row 1, col 6)
+  Agent 2 -> sector 4 (row 0, col 4)
+  Agent 3 -> sector 18 (row 2, col 2)
+  Agent 4 -> sector 4 (row 0, col 4)
+
+Timestep 3:
+2 0 0 0 0 0 0 0
+0 0 0 0 0 0 1 0
+0 0 3 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+Actions at t=3:
+  Agent 1 -> sector 4 (row 0, col 4)
+  Agent 2 -> sector 34 (row 4, col 2)
+  Agent 3 -> sector 4 (row 0, col 4)
+  Agent 4 -> sector 26 (row 3, col 2)
+
+Timestep 4:
+2 0 0 0 0 0 0 0
+0 0 0 0 0 0 1 0
+0 0 3 0 0 0 0 0
+0 0 4 0 0 0 0 0
+0 0 2 0 0 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0
+Actions at t=4:
+  Agent 1 -> sector 24 (row 3, col 0)
+  Agent 2 -> sector 3 (row 0, col 3)
+  Agent 3 -> sector 36 (row 4, col 4)
+  Agent 4 -> sector 55 (row 6, col 7)
+
+Timestep 5:
+2 0 0 2 0 0 0 0
+0 0 0 0 0 0 1 0
+0 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=5:
+  Agent 1 -> sector 1 (row 0, col 1)
+  Agent 2 -> sector 2 (row 0, col 2)
+  Agent 3 -> sector 1 (row 0, col 1)
+  Agent 4 -> sector 1 (row 0, col 1)
+
+Timestep 6:
+2 0 2 2 0 0 0 0
+0 0 0 0 0 0 1 0
+0 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=6:
+  Agent 1 -> sector 1 (row 0, col 1)
+  Agent 2 -> sector 16 (row 2, col 0)
+  Agent 3 -> sector 1 (row 0, col 1)
+  Agent 4 -> sector 9 (row 1, col 1)
+
+Timestep 7:
+2 0 2 2 0 0 0 0
+0 4 0 0 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=7:
+  Agent 1 -> sector 1 (row 0, col 1)
+  Agent 2 -> sector 1 (row 0, col 1)
+  Agent 3 -> sector 11 (row 1, col 3)
+  Agent 4 -> sector 1 (row 0, col 1)
+
+Timestep 8:
+2 0 2 2 0 0 0 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=8:
+  Agent 1 -> sector 1 (row 0, col 1)
+  Agent 2 -> sector 1 (row 0, col 1)
+  Agent 3 -> sector 1 (row 0, col 1)
+  Agent 4 -> sector 6 (row 0, col 6)
+
+Timestep 9:
+2 0 2 2 0 0 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=9:
+  Agent 1 -> sector 4 (row 0, col 4)
+  Agent 2 -> sector 5 (row 0, col 5)
+  Agent 3 -> sector 5 (row 0, col 5)
+  Agent 4 -> sector 4 (row 0, col 4)
+
+Timestep 10:
+2 0 2 2 0 0 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=10:
+  Agent 1 -> sector 1 (row 0, col 1)
+  Agent 2 -> sector 7 (row 0, col 7)
+  Agent 3 -> sector 7 (row 0, col 7)
+  Agent 4 -> sector 1 (row 0, col 1)
+
+Timestep 11:
+2 0 2 2 0 0 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=11:
+  Agent 1 -> sector 7 (row 0, col 7)
+  Agent 2 -> sector 5 (row 0, col 5)
+  Agent 3 -> sector 5 (row 0, col 5)
+  Agent 4 -> sector 7 (row 0, col 7)
+
+Timestep 12:
+2 0 2 2 0 0 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=12:
+  Agent 1 -> sector 4 (row 0, col 4)
+  Agent 2 -> sector 5 (row 0, col 5)
+  Agent 3 -> sector 4 (row 0, col 4)
+  Agent 4 -> sector 4 (row 0, col 4)
+
+Timestep 13:
+2 0 2 2 0 2 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 0 4
+0 0 0 0 0 0 0 0
+Actions at t=13:
+  Agent 1 -> sector 54 (row 6, col 6)
+  Agent 2 -> sector 8 (row 1, col 0)
+  Agent 3 -> sector 59 (row 7, col 3)
+  Agent 4 -> sector 8 (row 1, col 0)
+
+Timestep 14:
+2 0 2 2 0 2 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 1 4
+0 0 0 3 0 0 0 0
+Actions at t=14:
+  Agent 1 -> sector 8 (row 1, col 0)
+  Agent 2 -> sector 60 (row 7, col 4)
+  Agent 3 -> sector 4 (row 0, col 4)
+  Agent 4 -> sector 8 (row 1, col 0)
+
+Timestep 15:
+2 0 2 2 3 2 4 0
+0 4 0 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 1 4
+0 0 0 3 2 0 0 0
+Actions at t=15:
+  Agent 1 -> sector 7 (row 0, col 7)
+  Agent 2 -> sector 10 (row 1, col 2)
+  Agent 3 -> sector 8 (row 1, col 0)
+  Agent 4 -> sector 7 (row 0, col 7)
+
+Timestep 16:
+2 0 2 2 3 2 4 0
+3 4 2 3 0 0 1 0
+2 0 3 0 0 0 0 0
+1 0 4 0 0 0 0 0
+0 0 2 0 3 0 0 0
+0 0 1 0 0 0 0 0
+0 0 0 0 0 0 1 4
+0 0 0 3 2 0 0 0
+
+
+Total models found: 1
