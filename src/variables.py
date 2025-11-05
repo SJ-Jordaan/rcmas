@@ -1,7 +1,7 @@
 """Z3 variable creation for the RCMAS system."""
 
 from z3 import Int, And, Implies
-from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, NEUTRAL_SECTORS
+from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
 
 
 def create_sector_variables():
@@ -42,8 +42,8 @@ def create_initial_state():
   """
 
   constraints = []
-  for sector_id in range(NUM_SECTORS):
-    if sector_id in NEUTRAL_SECTORS:
+  for sector_id in range(NUM_SECTORS):  # TODO: Use for all sectors helper
+    if sector_id in INACCESSIBLE_SECTORS:
       # Neutral sectors are marked as -1 at all timesteps
       for t in range(NUM_TIMESTEPS + 1):
         constraints.append(Int(f"sector_{sector_id}_{t}") == -1)
