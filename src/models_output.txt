@@ -1,0 +1,42 @@
+============================================================
+Model 1
+============================================================
+
+Raw model:
+[sector_0_1 = 1,
+ sector_1_1 = 2,
+ sector_2_2 = 1,
+ sector_2_1 = 0,
+ action_1_1 = 2,
+ action_1_0 = 0,
+ sector_3_2 = 2,
+ sector_3_1 = 0,
+ action_2_0 = 1,
+ sector_0_2 = 1,
+ sector_1_2 = 2,
+ action_2_1 = 3,
+ sector_3_0 = 0,
+ sector_2_0 = 0,
+ sector_0_0 = 0,
+ sector_1_0 = 0]
+
+Timestep 0:
+0 0
+0 0
+Actions at t=0:
+  Agent 1 -> sector 0 (row 0, col 0)
+  Agent 2 -> sector 1 (row 0, col 1)
+
+Timestep 1:
+1 2
+0 0
+Actions at t=1:
+  Agent 1 -> sector 2 (row 1, col 0)
+  Agent 2 -> sector 3 (row 1, col 1)
+
+Timestep 2:
+1 2
+1 2
+
+
+Total models found: 1

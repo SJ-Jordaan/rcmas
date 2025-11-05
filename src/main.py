@@ -1,5 +1,5 @@
 """
-RCMAS - Resource Constrained Multi-Agent System
+RCMAS - Region Control Multi-Agent System
 
 Main entry point for the system that coordinates all components.
 """
@@ -12,7 +12,7 @@ from src.output import save_all_models
 def main():
     """Main execution function."""
     print("=" * 60)
-    print("RCMAS - Resource Constrained Multi-Agent System")
+    print("RCMAS - Region Control Multi-Agent System")
     print("=" * 60)
     print(f"Grid: {GRID_HEIGHT}x{GRID_WIDTH}")
     print(f"Agents: {NUM_AGENTS}")
@@ -20,9 +20,9 @@ def main():
     print(f"Timesteps: {NUM_TIMESTEPS}")
     print("=" * 60)
     print()
-    
+
     solver = setup_solver()
-    
+
     save_all_models(
         solver=solver,
         output_filename="models_output.txt",
