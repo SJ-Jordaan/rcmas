@@ -1,12 +1,14 @@
 """Visualization and display functions for the RCMAS system."""
 
 from z3 import Int
+from .config import NEUTRAL_SECTORS
 from .utils import calculate_position
 
 
 def format_grid(model, grid_height, grid_width, timestep):
     """
     Format a single timestep grid as a list of strings.
+    Neutral sectors are displayed as 'X'.
     
     Args:
         model: Z3 model containing the solution
@@ -22,12 +24,17 @@ def format_grid(model, grid_height, grid_width, timestep):
         row_values = []
         for col in range(grid_width):
             sector_id = row * grid_width + col
-            sector_var = Int(f"sector_{sector_id}_{timestep}")
-            try:
-                value = model.eval(sector_var, model_completion=True)
-                row_values.append(str(value))
-            except Exception:
-                row_values.append("?")
+            
+            # Mark neutral sectors
+            if sector_id in NEUTRAL_SECTORS:
+                row_values.append("X")
+            else:
+                sector_var = Int(f"sector_{sector_id}_{timestep}")
+                try:
+                    value = model.eval(sector_var, model_completion=True)
+                    row_values.append(str(value))
+                except Exception:
+                    row_values.append("?")
         rows.append(" ".join(row_values))
     return rows
 

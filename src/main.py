@@ -21,10 +21,8 @@ def main():
     print("=" * 60)
     print()
     
-    # Setup solver with all constraints
     solver = setup_solver()
     
-    # Find and save solutions
     save_all_models(
         solver=solver,
         output_filename="models_output.txt",

@@ -164,3 +164,29 @@ def forAllAgentPairs(func):
         else:
             constraints.append(result)
     return constraints
+
+
+def adjacency_pairs(grid_height, grid_width):
+    """
+    Generate all adjacent sector pairs using 4-neighborhood (right and down only).
+    
+    Args:
+        grid_height: Height of the grid
+        grid_width: Width of the grid
+        
+    Returns:
+        list: List of tuples (u, v) representing adjacent sector pairs
+    """
+    pairs = []
+    for r in range(grid_height):
+        for c in range(grid_width):
+            u = r * grid_width + c
+            # Right neighbor
+            if c + 1 < grid_width:
+                v = r * grid_width + (c + 1)
+                pairs.append((u, v))
+            # Down neighbor
+            if r + 1 < grid_height:
+                v = (r + 1) * grid_width + c
+                pairs.append((u, v))
+    return pairs
