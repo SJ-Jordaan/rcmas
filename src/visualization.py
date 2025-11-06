@@ -39,7 +39,6 @@ def format_grid(model, state, grid_height, grid_width, timestep):
     rows.append(" ".join(row_values))
   return rows
 
-
 def format_actions(model, action, grid_width, num_agents, timestep):
   """
   Format agent actions for a given timestep.
@@ -76,22 +75,7 @@ def display_grid(model, state, action, grid_height, grid_width, num_timesteps, n
   """
   Display the grid for all timesteps to the console.
   """
-  for t in range(num_timesteps + 1):
-    print(f"Timestep {t}:")
-
-    # Pass 'state'
-    grid_rows = format_grid(model, state, grid_height, grid_width, t)
-    for row in grid_rows:
-      print(row)
-
-    if t < num_timesteps:
-      print(f"Actions at t={t}:")
-      # Pass 'action'
-      actions = format_actions(model, action, grid_width, num_agents, t)
-      for action in actions:
-        print(action)
-
-    print()
+  print(get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents))
 
 
 def get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents):
