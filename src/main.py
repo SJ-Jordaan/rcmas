@@ -8,7 +8,6 @@ from src.config import GRID_HEIGHT, GRID_WIDTH, NUM_AGENTS, NUM_SECTORS, NUM_TIM
 from src.solver import setup_solver
 from src.output import save_all_models
 
-
 def main():
   """Main execution function."""
   print("=" * 60)

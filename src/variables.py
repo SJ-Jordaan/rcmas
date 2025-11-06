@@ -1,54 +1,31 @@
 """Z3 variable creation for the RCMAS system."""
 
-from z3 import Int, And, Implies
+from z3 import Int
 from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
 
-
-def create_sector_variables():
-  """
-  Create Z3 integer variables for all sectors across all timesteps.
-
-  Returns:
-      list: List of Z3 Int variables for sectors
-  """
-  return [
-    Int(f"sector_{sector_id}_{t}")
-    for t in range(NUM_TIMESTEPS)
-    for sector_id in range(NUM_SECTORS)
+def encode_variables():
+  state = [
+    [Int(f"sector_{s}_{t}") for t in range(NUM_TIMESTEPS + 1)]
+    for s in range(NUM_SECTORS)
   ]
 
-
-def create_action_variables():
-  """
-  Create Z3 integer variables for agent actions across all timesteps.
-
-  Returns:
-      list: List of Z3 Int variables for actions
-  """
-  return [
-    Int(f"action_{agt}_{t}")
-    for t in range(NUM_TIMESTEPS)
-    for agt in range(1, NUM_AGENTS + 1)
+  action = [
+    [Int(f"action_{a}_{t}") for t in range(NUM_TIMESTEPS)]
+    for a in range(NUM_AGENTS)
   ]
 
+  return state, action
 
-def create_initial_state():
-  """
-  Create constraints for the initial state.
-  Regular sectors start empty (0), neutral sectors are marked as -1 (cannot be occupied).
+def encode_initial_state(state):
+  inaccessible_constraints = [
+    state[s][t] == -1
+    for s in INACCESSIBLE_SECTORS
+    for t in range(NUM_TIMESTEPS + 1)
+  ]
 
-  Returns:
-      list: List of constraints setting initial sector states
-  """
+  initial_empty_constraints = [
+    state[s][0] == 0
+    for s in range(NUM_SECTORS) if s not in INACCESSIBLE_SECTORS
+  ]
 
-  constraints = []
-  for sector_id in range(NUM_SECTORS):  # TODO: Use for all sectors helper
-    if sector_id in INACCESSIBLE_SECTORS:
-      # Neutral sectors are marked as -1 at all timesteps
-      for t in range(NUM_TIMESTEPS + 1):
-        constraints.append(Int(f"sector_{sector_id}_{t}") == -1)
-    else:
-      # Regular sectors start empty
-      constraints.append(Int(f"sector_{sector_id}_0") == 0)
-
-  return constraints
+  return inaccessible_constraints + initial_empty_constraints
