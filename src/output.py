@@ -9,7 +9,8 @@ def write_model_to_file(file_handle, model, model_count, state, action):
   file_handle.write(f"{'=' * 60}\n")
   file_handle.write(f"Model {model_count}\n")
   file_handle.write(f"{'=' * 60}\n\n")
-  file_handle.write(f"Raw model:\n{model}\n\n")
+  for d in model.decls():
+    file_handle.write(f"{d.name()} = {model[d]}\n")
   file_handle.write(get_grid_string(model, state, action, GRID_HEIGHT, GRID_WIDTH, NUM_TIMESTEPS, NUM_AGENTS))
   file_handle.write("\n\n")
 

@@ -5,7 +5,9 @@ from z3 import Solver, Optimize, Or, sat, set_option
 from config import NUM_SECTORS, NUM_TIMESTEPS, NUM_AGENTS
 from .variables import (
   encode_variables,
-  encode_initial_state
+  encode_initial_state,
+  encode_adjacency,
+  encode_transitivity
 )
 from .constraints import (
   encode_action_availability,
@@ -17,6 +19,8 @@ def setup_solver(use_soft_constraints=True):
   set_option(verbose=10)
 
   state, action = encode_variables()
+  adjacency = encode_adjacency(state)
+  transitivity = encode_transitivity()
   initial_state = encode_initial_state(state)
   action_availability = encode_action_availability(state, action)
   evolution = encode_evolution(state, action)
@@ -29,6 +33,8 @@ def setup_solver(use_soft_constraints=True):
   if soft_constraints:
     optimizer = Optimize()
     optimizer.add(initial_state)
+    optimizer.add(adjacency)
+    optimizer.add(transitivity)
     optimizer.add(action_availability)
     optimizer.add(evolution)
     optimizer.add(full_board)
@@ -40,7 +46,9 @@ def setup_solver(use_soft_constraints=True):
   else:
     solver = Solver()
     solver.add(initial_state)
+    solver.add(adjacency)
     solver.add(action_availability)
+    solver.add(transitivity)
     solver.add(evolution)
     solver.add(full_board)
     return solver
