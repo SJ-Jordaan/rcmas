@@ -19,5 +19,5 @@ def calculate_position(sector_id, grid_width):
 
 def sector_to_coords(sector):
   row = sector // GRID_WIDTH
-  col = sector % GRID_HEIGHT
+  col = sector % GRID_WIDTH
   return row, col

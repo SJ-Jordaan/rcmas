@@ -1,5 +1,13 @@
 """Visualization and display functions for the RCMAS system."""
-from .config import INACCESSIBLE_SECTORS
+from z3 import Bool
+from itertools import permutations
+from .config import (
+  INACCESSIBLE_SECTORS,
+  NUM_AGENTS,
+  NUM_TIMESTEPS,
+  NUM_SECTORS,
+  GRID_WIDTH,
+)
 from .utils import calculate_position
 
 def format_grid(model, state, grid_height, grid_width, timestep):
@@ -39,6 +47,7 @@ def format_grid(model, state, grid_height, grid_width, timestep):
     rows.append(" ".join(row_values))
   return rows
 
+
 def format_actions(model, action, grid_width, num_agents, timestep):
   """
   Format agent actions for a given timestep.
@@ -71,6 +80,84 @@ def format_actions(model, action, grid_width, num_agents, timestep):
       actions.append(f"  Agent {agt_display_id} -> ?")
   return actions
 
+
+def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, num_agents, num_sectors):
+  """
+  Formats a grid showing the final cohesive regions for each agent.
+  Sectors in the same region will have the same number.
+  """
+  output = ["=" * 60]
+  output.append("Final Cohesion Grid (by Region ID)")
+  output.append("=" * 60)
+
+  for a in range(num_agents):
+    agent_id = a + 1
+    output.append(f"\nAgent {agent_id} Regions:")
+
+    # 1. Build graph adjacency list from TRUE cohesive relations
+    edges = {}
+    nodes = set()
+
+    # Find all sectors this agent occupies
+    for i in range(num_sectors):
+        try:
+            if model.eval(state[i][num_timesteps], model_completion=True).as_long() == agent_id:
+                nodes.add(i)
+        except Exception:
+            pass # Sector not in model or failed eval
+
+    # Find all TRUE cohesion edges
+    for i, j in permutations(range(num_sectors), 2):
+      try:
+        cr_var = Bool(f"cohesive_relation_{i}_{j}_{a}")
+        if model.eval(cr_var, model_completion=True) == True:
+          if i not in edges:
+            edges[i] = []
+          edges[i].append(j)
+      except Exception:
+        pass  # Variable not in model
+
+    # 2. Find connected components (regions) using BFS
+    visited = set()
+    regions = {}  # Map: sector_id -> region_id
+    region_id_counter = 0
+
+    for node in nodes:  # Iterate only over sectors agent 'a' owns
+      if node not in visited:
+        region_id_counter += 1
+        queue = [node]
+        visited.add(node)
+
+        while queue:
+          current_node = queue.pop(0)
+          regions[current_node] = region_id_counter
+
+          if current_node in edges:
+            for neighbor in edges[current_node]:
+              if neighbor in nodes and neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(neighbor)
+
+    # 3. Format the grid
+    for row in range(grid_height):
+      row_values = []
+      for col in range(grid_width):
+        sector_id = row * grid_width + col
+        if sector_id in regions:
+          # This sector is part of a region
+          val_str = str(regions[sector_id])
+        elif sector_id in nodes:
+          # This sector is occupied but has no cr_ relations (isolated)
+          val_str = "X" # Mark isolated occupied sectors
+        else:
+          # Not occupied by this agent
+          val_str = "."
+        row_values.append(f"{val_str:>2}")
+      output.append(" ".join(row_values))
+
+  return output
+
+
 def display_grid(model, state, action, grid_height, grid_width, num_timesteps, num_agents):
   """
   Display the grid for all timesteps to the console.
@@ -97,4 +184,14 @@ def get_grid_string(model, state, action, grid_height, grid_width, num_timesteps
       output.extend(actions)
 
     output.append("")
+
+  # --- NEW VISUALIZATION ---
+  # Add the cohesion grid to the output
+  num_sectors = grid_height * grid_width
+  cohesion_rows = format_cohesion_grid(
+    model, state, grid_height, grid_width, num_timesteps, num_agents, num_sectors
+  )
+  output.extend(cohesion_rows)
+  # --- END NEW VISUALIZATION ---
+
   return "\n".join(output)

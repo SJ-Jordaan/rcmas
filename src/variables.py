@@ -1,7 +1,7 @@
 """Z3 variable creation for the RCMAS system."""
-from itertools import combinations, permutations
+from itertools import permutations
 
-from z3 import Int, Bool, Or, And, Implies
+from z3 import Int, Bool, Or, And, Implies, If, Sum
 
 from .utils import sector_to_coords
 from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
@@ -75,7 +75,20 @@ def encode_adjacency(state):
       )
 
       adjacency.append(
-        Bool(f"cohesive_relation_{i}_{j}_{a}") == Bool(f"adjacent_{i}_{j}_{a}")
+        Implies(
+          Bool(f"adjacent_{i}_{j}_{a}"),
+          Bool(f"cohesive_relation_{i}_{j}_{a}")
+        )
+      )
+
+      adjacency.append(
+        Implies(
+          Bool(f"cohesive_relation_{i}_{j}_{a}"),
+          And(
+            state[i][NUM_TIMESTEPS] == (a + 1),
+            state[j][NUM_TIMESTEPS] == (a + 1)
+          )
+        )
       )
 
   return adjacency
@@ -99,3 +112,67 @@ def encode_transitivity():
       )
 
   return transitivity
+
+
+def encode_objective(state):
+  """
+  Implements the size and payoff logic from the LaTeX spec.
+  """
+  S = range(NUM_SECTORS)
+  A = range(NUM_AGENTS)
+
+  # --- Define size_{i,a} variables ---
+  size_vars = [
+    [Int(f"size_{i}_{a}") for a in A]
+    for i in S
+  ]
+
+  # --- Define payoff_{a} variables ---
+  payoff_vars = [Int(f"payoff_{a}") for a in A]
+
+  objective_constraints = []
+
+  for i in S:
+    for a in A:
+      agent_id = a + 1
+
+      # Create the sum: 1 + Σ cr_{i,j,a}
+      # Use If(cr_var, 1, 0) to treat Bool as Int
+      cr_sum_terms = [
+        If(Bool(f"cohesive_relation_{i}_{j}_{a}"), 1, 0)
+        for j in S if i != j
+      ]
+
+      # Implement the rule:
+      # size_{i,a} =
+      #   IF (i is not 'a') THEN 0
+      #   ELSE (1 + sum(cr_{i,j,a}))
+      objective_constraints.append(
+        If(
+          state[i][NUM_TIMESTEPS] != agent_id,
+          size_vars[i][a] == 0,
+          size_vars[i][a] == (1 + Sum(cr_sum_terms))
+        )
+      )
+
+  for a in A:
+    # --- Implement payoff_{a} = max(size_{i,a}) ---
+    # This is modeled by two constraints:
+    # 1. payoff must be >= all sizes
+    # 2. payoff must be == at least one size
+
+    agent_size_vars = [size_vars[i][a] for i in S]
+
+    objective_constraints.extend(
+      [payoff_vars[a] >= size for size in agent_size_vars]
+    )
+
+    objective_constraints.append(
+      Or([payoff_vars[a] == size for size in agent_size_vars])
+    )
+
+  # --- Define the final objective function ---
+  # max Σ payoff_{a}
+  total_payoff = Sum(payoff_vars)
+
+  return objective_constraints, total_payoff
