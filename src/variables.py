@@ -1,25 +1,55 @@
 """Z3 variable creation for the RCMAS system."""
-from itertools import permutations
+from itertools import combinations, product
 
 from z3 import Int, Bool, Or, And, Implies, If, Sum
 
 from .utils import sector_to_coords
 from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
 
+def encode_state():
+  S = range(NUM_SECTORS)
+  T = range(NUM_TIMESTEPS + 1)
+
+  return [
+    [Int(f"sector_{s}_{t}") for t in T]
+    for s in S
+  ]
+
+def encode_action():
+  T = range(NUM_TIMESTEPS)
+  A = range(NUM_AGENTS)
+
+  return [
+    [Int(f"action_{a}_{t}") for t in T]
+    for a in A
+  ]
+
+def adj(s1, s2, a):
+  return Bool(f"adj_{s1}_{s2}_{a}")
+
+def cr(s1, s2, a):
+  return Bool(f"cohesive_relation_{s1}_{s2}_{a}")
+
+def encode_size():
+  S = range(NUM_SECTORS)
+  A = range(NUM_AGENTS)
+
+  size_vars = [
+    [Int(f"size_{i}_{a}") for a in A]
+    for i in S
+  ]
+
+  return size_vars
+
+def encode_payoff():
+  A = range(NUM_AGENTS)
+
+  payoff = [Int(f"payoff_{a}") for a in A]
+
+  return payoff
 
 def encode_variables():
-  state = [
-    [Int(f"sector_{s}_{t}") for t in range(NUM_TIMESTEPS + 1)]
-    for s in range(NUM_SECTORS)
-  ]
-
-  action = [
-    [Int(f"action_{a}_{t}") for t in range(NUM_TIMESTEPS)]
-    for a in range(NUM_AGENTS)
-  ]
-
-  return state, action
-
+  return encode_state(), encode_action()
 
 def encode_initial_state(state):
   inaccessible_constraints = [
@@ -36,99 +66,61 @@ def encode_initial_state(state):
   return inaccessible_constraints + initial_empty_constraints
 
 def encode_adjacency(state):
-  S = range(NUM_SECTORS)  # 0 to S-1
-  A = range(NUM_AGENTS)  # 0 to A-1
+  T = range(NUM_SECTORS)
+  Agt = range(NUM_AGENTS)
 
-  adjacency = []
+  constraints = []
 
-  for i, j in permutations(S, 2):
-    for a in A:
-      x, y = sector_to_coords(i)
-      x_prime, y_prime = sector_to_coords(j)
-      adjacency.append(
-        Bool(f"adjacent_{i}_{j}_{a}") == Or(
-          And(
-            x == x_prime - 1,
-            y == y_prime,
-            state[i][NUM_TIMESTEPS] == (a + 1),
-            state[j][NUM_TIMESTEPS] == (a + 1)
-          ),
-          And(
-            x == x_prime + 1,
-            y == y_prime,
-            state[i][NUM_TIMESTEPS] == (a + 1),
-            state[j][NUM_TIMESTEPS] == (a + 1)
-          ),
-          And(
-            y == y_prime - 1,
-            x == x_prime,
-            state[i][NUM_TIMESTEPS] == (a + 1),
-            state[j][NUM_TIMESTEPS] == (a + 1)
-          ),
-          And(
-            y == y_prime + 1,
-            x == x_prime,
-            state[i][NUM_TIMESTEPS] == (a + 1),
-            state[j][NUM_TIMESTEPS] == (a + 1)
-          ),
-        )
+  for i, j in combinations(T, 2):
+    for a in Agt:
+      xi, yi = sector_to_coords(i)
+      xj, yj = sector_to_coords(j)
+
+      are_physically_adjacent = Or(
+        And(xi == xj, abs(yi - yj) == 1),
+        And(yi == yj, abs(xi - xj) == 1)
       )
 
-      adjacency.append(
-        Implies(
-          Bool(f"adjacent_{i}_{j}_{a}"),
-          Bool(f"cohesive_relation_{i}_{j}_{a}")
-        )
+      both_owned_by_a = And(
+        state[i][NUM_TIMESTEPS] == (a + 1),
+        state[j][NUM_TIMESTEPS] == (a + 1)
       )
 
-      adjacency.append(
-        Implies(
-          Bool(f"cohesive_relation_{i}_{j}_{a}"),
-          And(
-            state[i][NUM_TIMESTEPS] == (a + 1),
-            state[j][NUM_TIMESTEPS] == (a + 1)
-          )
-        )
+      constraints.append(
+        adj(i, j, a) == And(are_physically_adjacent, both_owned_by_a)
       )
 
-  return adjacency
+  return constraints
 
 def encode_transitivity():
-  S = range(NUM_SECTORS)  # 0 to S-1
-  A = range(NUM_AGENTS)  # 0 to A-1
+  T = range(NUM_SECTORS)
+  Agt = range(NUM_AGENTS)
 
-  transitivity = []
+  constraints = []
 
-  for i, j, k in permutations(S, 3):
-    for a in A:
-      transitivity.append(
-        Implies(
-          And(
-            Bool(f"cohesive_relation_{i}_{j}_{a}"),
-            Bool(f"cohesive_relation_{j}_{k}_{a}")
-          ),
-          Bool(f"cohesive_relation_{i}_{k}_{a}")
+  for (i, j), a in product(combinations(T, 2), Agt):
+      constraints.append(
+          cr(i, j, a) ==
+          Or(
+            adj(i, j, a),
+            Or(
+              And(
+                cr(i, k, a),
+                cr(k, j, a)
+              )
+              for k in T
+            )
+          )
         )
-      )
 
-  return transitivity
-
+  return constraints
 
 def encode_objective(state):
-  """
-  Implements the size and payoff logic from the LaTeX spec.
-  """
   S = range(NUM_SECTORS)
   A = range(NUM_AGENTS)
 
-  # --- Define size_{i,a} variables ---
-  size_vars = [
-    [Int(f"size_{i}_{a}") for a in A]
-    for i in S
-  ]
-
-  # --- Define payoff_{a} variables ---
-  payoff_vars = [Int(f"payoff_{a}") for a in A]
+  size_vars = encode_size()
+  payoff_vars = encode_payoff()
 
   objective_constraints = []
 
@@ -136,10 +128,9 @@ def encode_objective(state):
     for a in A:
       agent_id = a + 1
 
-      # Create the sum: 1 + Σ cr_{i,j,a}
-      # Use If(cr_var, 1, 0) to treat Bool as Int
+      # 1 + Σ cr_{i,j,a}
       cr_sum_terms = [
-        If(Bool(f"cohesive_relation_{i}_{j}_{a}"), 1, 0)
+        If(cr(i, j, a), 1, 0)
         for j in S if i != j
       ]
 
@@ -176,3 +167,4 @@ def encode_objective(state):
   total_payoff = Sum(payoff_vars)
 
   return objective_constraints, total_payoff
+

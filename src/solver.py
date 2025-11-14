@@ -7,7 +7,8 @@ from .variables import (
   encode_variables,
   encode_initial_state,
   encode_adjacency,
-  encode_transitivity
+  encode_transitivity,
+  encode_objective
 )
 from .constraints import (
   encode_action_availability,
@@ -25,12 +26,10 @@ def setup_solver(use_soft_constraints=True):
   action_availability = encode_action_availability(state, action)
   evolution = encode_evolution(state, action)
   full_board = encode_full_board(state)
+  # obj_constraints, total_payoff = encode_objective(state)
 
   soft_constraints = []
   if use_soft_constraints:
-    soft_constraints = []
-
-  if soft_constraints:
     optimizer = Optimize()
     optimizer.add(initial_state)
     optimizer.add(adjacency)
@@ -38,6 +37,8 @@ def setup_solver(use_soft_constraints=True):
     optimizer.add(action_availability)
     optimizer.add(evolution)
     optimizer.add(full_board)
+    # optimizer.add(obj_constraints)
+    # optimizer.maximize(total_payoff)
 
     for soft in soft_constraints:
       optimizer.add_soft(soft)

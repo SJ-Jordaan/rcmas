@@ -1,6 +1,6 @@
 """Utility functions for the RCMAS system."""
 
-from .config import GRID_HEIGHT, GRID_WIDTH
+from .config import GRID_WIDTH
 
 def calculate_position(sector_id, grid_width):
   """
