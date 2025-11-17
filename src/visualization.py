@@ -1,6 +1,7 @@
 """Visualization and display functions for the RCMAS system."""
 from z3 import Bool
-from itertools import permutations
+# Import combinations in addition to permutations
+from itertools import permutations, combinations
 from .config import (
   INACCESSIBLE_SECTORS,
   NUM_AGENTS,
@@ -106,23 +107,58 @@ def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, n
         except Exception:
             pass # Sector not in model or failed eval
 
-    # Find all TRUE cohesion edges
-    for i, j in permutations(range(num_sectors), 2):
+    # --- BUG FIX ---
+    # The cohesive relation is symmetric (i.e., cr_i_j == cr_j_i).
+    # The previous loop used permutations(N, 2) and built a directed
+    # graph, which caused the BFS to fail.
+    #
+    # The fix is to build an UNDIRECTED graph. We iterate using
+    # combinations(N, 2) (which checks i < j) and add edges in
+    # BOTH directions (i -> j and j -> i) if the relation is true.
+    # This ensures the BFS will find the full connected component
+    # regardless of the starting node.
+
+    # Iterate using combinations (i < j)
+    for i, j in combinations(range(num_sectors), 2):
+      # Optimization: skip if neither node is owned by agent
+      if i not in nodes and j not in nodes:
+          continue
+
+      is_cohesive = False
       try:
+        # Check for relation i_j (assuming i < j)
         cr_var = Bool(f"cohesive_relation_{i}_{j}_{a}")
-        if model.eval(cr_var, model_completion=True) == True:
-          if i not in edges:
-            edges[i] = []
-          edges[i].append(j)
+        is_cohesive = model.eval(cr_var, model_completion=True) == True
       except Exception:
-        pass  # Variable not in model
+        # If i_j fails, try j_i (defensive check)
+        try:
+          cr_var_sym = Bool(f"cohesive_relation_{j}_{i}_{a}")
+          is_cohesive = model.eval(cr_var_sym, model_completion=True) == True
+        except Exception:
+          pass # Both failed, is_cohesive remains False
+
+      # If we found a true relation, add the undirected edge
+      if is_cohesive:
+        # Add edge i -> j
+        if i not in edges:
+          edges[i] = []
+        if j not in edges[i]:
+          edges[i].append(j)
+
+        # Add edge j -> i
+        if j not in edges:
+          edges[j] = []
+        if i not in edges[j]:
+          edges[j].append(i)
+    # --- END BUG FIX ---
 
     # 2. Find connected components (regions) using BFS
     visited = set()
     regions = {}  # Map: sector_id -> region_id
     region_id_counter = 0
 
-    for node in nodes:  # Iterate only over sectors agent 'a' owns
+    # Iterate over all nodes owned by the agent
+    for node in nodes:
       if node not in visited:
         region_id_counter += 1
         queue = [node]
@@ -134,6 +170,7 @@ def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, n
 
           if current_node in edges:
             for neighbor in edges[current_node]:
+              # We only care about neighbors ALSO owned by this agent
               if neighbor in nodes and neighbor not in visited:
                 visited.add(neighbor)
                 queue.append(neighbor)
@@ -144,11 +181,16 @@ def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, n
       for col in range(grid_width):
         sector_id = row * grid_width + col
         if sector_id in regions:
-          # This sector is part of a region
+          # This sector is part of a found region
           val_str = str(regions[sector_id])
         elif sector_id in nodes:
-          # This sector is occupied but has no cr_ relations (isolated)
-          val_str = "X" # Mark isolated occupied sectors
+          # This sector is occupied but was not in a cohesive relation
+          # It's an isolated region of size 1.
+          # Note: This logic might run if the BFS loop finishes before
+          # processing all nodes (e.g., isolated nodes).
+          region_id_counter += 1
+          val_str = str(region_id_counter)
+          regions[sector_id] = region_id_counter # Mark it
         else:
           # Not occupied by this agent
           val_str = "."
