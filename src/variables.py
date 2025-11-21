@@ -112,17 +112,4 @@ def encode_transitivity():
         )
       )
 
-    constraints.append(
-        cr(i, j, a) == And(
-          adj(i, j, a),
-          And(
-            Or(
-              Not(cr(i,k,a)),
-              Not(cr(k,j,a))
-            )
-            for k in T if i < k < j
-          )
-        )
-      )
-
   return constraints
