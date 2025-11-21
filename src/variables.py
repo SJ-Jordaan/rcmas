@@ -1,7 +1,7 @@
 """Z3 variable creation for the RCMAS system."""
 from itertools import combinations, product
 
-from z3 import Int, Bool, Or, And, Exists, If, Sum
+from z3 import Int, Bool, Or, And, Not, If, Sum
 
 from .utils import sector_to_coords
 from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
@@ -99,70 +99,30 @@ def encode_transitivity():
   constraints = []
 
   for (i, j), a in product(combinations(T, 2), Agt):
-    k = Int(f"k")
-
     constraints.append(
         cr(i, j, a) == Or(
           adj(i, j, a),
-          Exists([k], And(
-            cr(i, k, a),
-            cr(k, j, a)
-          ))
+          Or(
+            And(
+              cr(i,k,a),
+              cr(k,j,a)
+            )
+            for k in T if i < k < j
+          )
+        )
+      )
+
+    constraints.append(
+        cr(i, j, a) == And(
+          adj(i, j, a),
+          And(
+            Or(
+              Not(cr(i,k,a)),
+              Not(cr(k,j,a))
+            )
+            for k in T if i < k < j
+          )
         )
       )
 
   return constraints
-
-def encode_objective(state):
-  T = range(NUM_SECTORS)
-  Agt = range(NUM_AGENTS)
-
-  size_vars = encode_size()
-  payoff_vars = encode_payoff()
-
-  objective_constraints = []
-
-  for i in T:
-    for a in Agt:
-      agent_id = a + 1
-
-      # 1 + Σ cr_{i,j,a}
-      cr_sum_terms = [
-        If(cr(i, j, a), 1, 0)
-        for j in T if i != j
-      ]
-
-      # Implement the rule:
-      # size_{i,a} =
-      #   IF (i is not 'a') THEN 0
-      #   ELSE (1 + sum(cr_{i,j,a}))
-      objective_constraints.append(
-        If(
-          state[i][NUM_TIMESTEPS] != agent_id,
-          size_vars[i][a] == 0,
-          size_vars[i][a] == (1 + Sum(cr_sum_terms))
-        )
-      )
-
-  for a in Agt:
-    # --- Implement payoff_{a} = max(size_{i,a}) ---
-    # This is modeled by two constraints:
-    # 1. payoff must be >= all sizes
-    # 2. payoff must be == at least one size
-
-    agent_size_vars = [size_vars[i][a] for i in T]
-
-    objective_constraints.extend(
-      [payoff_vars[a] >= size for size in agent_size_vars]
-    )
-
-    objective_constraints.append(
-      Or([payoff_vars[a] == size for size in agent_size_vars])
-    )
-
-  # --- Define the final objective function ---
-  # max Σ payoff_{a}
-  total_payoff = Sum(payoff_vars)
-
-  return objective_constraints, total_payoff
-
