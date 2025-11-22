@@ -13,40 +13,65 @@ from .utils import calculate_position
 
 def format_grid(model, state, grid_height, grid_width, timestep):
   """
-    Format a single timestep grid with better alignment and characters.
-    - '.' for empty (0)
-    - 'X' for inaccessible
-    - '1', '2', etc. for agents
-    - All cells are right-aligned to 2 characters.
-    """
-  rows = []
+      Format a grid with a 'box' layout for each cell.
+      Shows Sector ID, Coordinates (row, col), and the Agent/Value.
+      """
+  rows_output = []
+
+  # Calculate dynamic width based on grid size to ensure text fits
+  # Example fit: "S:99 (9,9)" -> needs ~10-12 chars
+  cell_width = 12
+
+  # Create the horizontal divider line (e.g., +------------+------------+)
+  divider = "+" + ("-" * cell_width + "+") * grid_width
+
+  rows_output.append(divider)
+
   for row in range(grid_height):
-    row_values = []
+    # We need two lines of text per grid row:
+    # 1. The Info Line (Sector ID and Coords)
+    # 2. The Value Line (The 'X', '.', or Agent ID)
+    line_info = "|"
+    line_value = "|"
+
     for col in range(grid_width):
       sector_id = row * grid_width + col
 
+      # --- 1. Logic to determine the value (unchanged) ---
       if sector_id in INACCESSIBLE_SECTORS:
         val_str = "X"
       else:
         sector_var = state[sector_id][timestep]
         try:
           value = model.eval(sector_var, model_completion=True).as_long()
-
           if value == 0:
             val_str = "."
           else:
-            val_str = str(value)  # value will be 1, 2, -1, etc.
+            val_str = str(value)
         except Exception:
-          val_str = "?"  # Failed to evaluate
+          val_str = "?"
 
-      # This is the key: f"{val_str:>2}"
-      # It formats the string to be right-aligned (>) within 2 spaces.
-      # '1' becomes ' 1', '10' becomes '10', '.' becomes ' .'
-      row_values.append(f"{val_str:>2}")
+      # --- 2. Formatting the cell internals ---
 
-    # Join with a single space for a clean grid
-    rows.append(" ".join(row_values))
-  return rows
+      # Top part: Sector and Coords (e.g., "S:5 (1,2)")
+      # We truncate or pack it to fit cell_width
+      info_text = f"S:{sector_id} ({row},{col})"
+
+      # Bottom part: The actual value centered
+      # If it's a dot, we keep it subtle; if it's an agent/X, it stands out
+      val_text = val_str
+
+      # Append to the current string builders with padding
+      # ^ centers the text, < left aligns
+      line_info += f" {info_text:^{cell_width - 2}} |"
+      line_value += f" {val_text:^{cell_width - 2}} |"
+
+    # Add the constructed lines to the output
+    rows_output.append(line_info)
+    rows_output.append(line_value)
+    rows_output.append(divider)
+
+  return rows_output
 
 
 def format_actions(model, action, grid_width, num_agents, timestep):
@@ -84,118 +109,98 @@ def format_actions(model, action, grid_width, num_agents, timestep):
 
 def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, num_agents, num_sectors):
   """
-  Formats a grid showing the final cohesive regions for each agent.
-  Sectors in the same region will have the same number.
-  """
+    Displays raw variable data without BFS interpretation:
+    1. The Connectivity Matrix (Adjacency Matrix) for the final `cr` variables.
+    2. The Size Map (The value of the `size` variable per sector).
+    """
   output = ["=" * 60]
-  output.append("Final Cohesion Grid (by Region ID)")
+  output.append("RAW SOLVER DATA (No post-processing)")
+  output.append("=" * 60)
+
+  # --- 1. Connectivity Matrix (Visualizing the cr variables) ---
+  # This shows exactly which sectors the solver thinks are connected.
+  for a in range(num_agents):
+    agent_id = a + 1  # 1-based index for display
+    output.append(f"\n[Agent {agent_id} Connectivity Matrix]")
+    output.append(f"('X' = cr(i,j) is True, '.' = False)")
+
+    # Create Header (0 1 2 ...)
+    header = "     " + " ".join([f"{i:<2}" for i in range(num_sectors)])
+    output.append(header)
+    output.append("    " + "-" * (len(header) - 4))
+
+    for i in range(num_sectors):
+      row_str = f"{i:<2} | "
+      for j in range(num_sectors):
+        if i == j:
+          row_str += "\\  "  # Self
+          continue
+
+        # Sort indices because variables are usually stored as i_j with i < j
+        u, v = (i, j) if i < j else (j, i)
+
+        val_char = "."
+        try:
+          # Attempt to read the specific boolean variable
+          # Adjust the variable name format to match your encoding exactly
+          cr_name = f"cohesive_relation_{u}_{v}_{a}"
+          cr_var = Bool(cr_name)
+
+          # Check if True in the model
+          if model.eval(cr_var, model_completion=True):
+            val_char = "X"
+        except Exception:
+          val_char = "?"
+
+        row_str += f"{val_char:<3}"
+      output.append(row_str)
+
+  # --- 2. Size Variable Map ---
+  # Displays the integer value of 'size_{s}_{a}' on the grid
+  output.append("\n" + "=" * 60)
+  output.append("Cluster Size Map (Value of 'size' variable)")
   output.append("=" * 60)
 
   for a in range(num_agents):
     agent_id = a + 1
-    output.append(f"\nAgent {agent_id} Regions:")
+    output.append(f"\n[Agent {agent_id} Calculated Sizes]")
 
-    # 1. Build graph adjacency list from TRUE cohesive relations
-    edges = {}
-    nodes = set()
+    # Draw grid for this agent
+    rows_output = []
+    # Simple divider
+    divider = "+" + ("-" * 5 + "+") * grid_width
+    rows_output.append(divider)
 
-    # Find all sectors this agent occupies
-    for i in range(num_sectors):
-        try:
-            if model.eval(state[i][num_timesteps], model_completion=True).as_long() == agent_id:
-                nodes.add(i)
-        except Exception:
-            pass # Sector not in model or failed eval
-
-    # --- BUG FIX ---
-    # The cohesive relation is symmetric (i.e., cr_i_j == cr_j_i).
-    # The previous loop used permutations(N, 2) and built a directed
-    # graph, which caused the BFS to fail.
-    #
-    # The fix is to build an UNDIRECTED graph. We iterate using
-    # combinations(N, 2) (which checks i < j) and add edges in
-    # BOTH directions (i -> j and j -> i) if the relation is true.
-    # This ensures the BFS will find the full connected component
-    # regardless of the starting node.
-
-    # Iterate using combinations (i < j)
-    for i, j in combinations(range(num_sectors), 2):
-      # Optimization: skip if neither node is owned by agent
-      if i not in nodes and j not in nodes:
-          continue
-
-      is_cohesive = False
-      try:
-        # Check for relation i_j (assuming i < j)
-        cr_var = Bool(f"cohesive_relation_{i}_{j}_{a}")
-        is_cohesive = model.eval(cr_var, model_completion=True) == True
-      except Exception:
-        # If i_j fails, try j_i (defensive check)
-        try:
-          cr_var_sym = Bool(f"cohesive_relation_{j}_{i}_{a}")
-          is_cohesive = model.eval(cr_var_sym, model_completion=True) == True
-        except Exception:
-          pass # Both failed, is_cohesive remains False
-
-      # If we found a true relation, add the undirected edge
-      if is_cohesive:
-        # Add edge i -> j
-        if i not in edges:
-          edges[i] = []
-        if j not in edges[i]:
-          edges[i].append(j)
-
-        # Add edge j -> i
-        if j not in edges:
-          edges[j] = []
-        if i not in edges[j]:
-          edges[j].append(i)
-    # --- END BUG FIX ---
-
-    # 2. Find connected components (regions) using BFS
-    visited = set()
-    regions = {}  # Map: sector_id -> region_id
-    region_id_counter = 0
-
-    # Iterate over all nodes owned by the agent
-    for node in nodes:
-      if node not in visited:
-        region_id_counter += 1
-        queue = [node]
-        visited.add(node)
-
-        while queue:
-          current_node = queue.pop(0)
-          regions[current_node] = region_id_counter
-
-          if current_node in edges:
-            for neighbor in edges[current_node]:
-              # We only care about neighbors ALSO owned by this agent
-              if neighbor in nodes and neighbor not in visited:
-                visited.add(neighbor)
-                queue.append(neighbor)
-
-    # 3. Format the grid
     for row in range(grid_height):
-      row_values = []
+      line_val = "|"
       for col in range(grid_width):
         sector_id = row * grid_width + col
-        if sector_id in regions:
-          # This sector is part of a found region
-          val_str = str(regions[sector_id])
-        elif sector_id in nodes:
-          # This sector is occupied but was not in a cohesive relation
-          # It's an isolated region of size 1.
-          # Note: This logic might run if the BFS loop finishes before
-          # processing all nodes (e.g., isolated nodes).
-          region_id_counter += 1
-          val_str = str(region_id_counter)
-          regions[sector_id] = region_id_counter # Mark it
-        else:
-          # Not occupied by this agent
-          val_str = "."
-        row_values.append(f"{val_str:>2}")
-      output.append(" ".join(row_values))
+
+        # Retrieve the 'size' variable directly
+        # Assumes variable is named 'size_{sector}_{agent}' (0-indexed agent)
+        val_str = " "
+        try:
+          # Variable name from your previous code: size(s, a) -> size_{s}_{a}
+          size_var_name = f"size_{sector_id}_{a}"
+          # We need to access the integer variable.
+          # Since we don't have the variable object, we create a reference with the same name
+          from z3 import Int
+          s_var = Int(size_var_name)
+
+          val = model.eval(s_var, model_completion=True).as_long()
+          if val > 0:
+            val_str = str(val)
+          else:
+            val_str = "."
+        except Exception:
+          val_str = "?"
+
+        line_val += f" {val_str:^3} |"
+
+      rows_output.append(line_val)
+      rows_output.append(divider)
+
+    output.extend(rows_output)
 
   return output
 

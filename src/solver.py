@@ -1,6 +1,6 @@
 """Solver setup and execution for the RCMAS system."""
 
-from z3 import Solver, Optimize, Or, sat, set_option
+from z3 import Sum, Optimize, Or, sat, set_option
 
 from config import NUM_SECTORS, NUM_TIMESTEPS, NUM_AGENTS
 from .variables import (
@@ -8,6 +8,8 @@ from .variables import (
   encode_initial_state,
   encode_adjacency,
   encode_transitivity,
+  encode_size,
+  encode_payoff
 )
 from .constraints import (
   encode_action_availability,
@@ -15,7 +17,7 @@ from .constraints import (
   encode_full_board
 )
 
-def setup_solver(use_soft_constraints=True):
+def setup_solver():
   set_option(verbose=10)
 
   state, action = encode_variables()
@@ -25,31 +27,23 @@ def setup_solver(use_soft_constraints=True):
   action_availability = encode_action_availability(state, action)
   evolution = encode_evolution(state, action)
   full_board = encode_full_board(state)
+  size_vars = encode_size(state)
+  payoff_vars, payoff_constraints = encode_payoff()
 
-  soft_constraints = []
-  if use_soft_constraints:
-    optimizer = Optimize()
-    optimizer.add(initial_state)
-    optimizer.add(adjacency)
-    optimizer.add(transitivity)
-    optimizer.add(action_availability)
-    optimizer.add(evolution)
-    optimizer.add(full_board)
+  optimizer = Optimize()
+  optimizer.add(initial_state)
+  optimizer.add(adjacency)
+  optimizer.add(transitivity)
+  optimizer.add(action_availability)
+  optimizer.add(evolution)
+  optimizer.add(full_board)
+  optimizer.add(size_vars)
+  optimizer.add(payoff_constraints)
 
-    for soft in soft_constraints:
-      optimizer.add_soft(soft)
+  objective = Sum(payoff_vars)
+  optimizer.maximize(objective)
 
-    return optimizer
-  else:
-    solver = Solver()
-    solver.add(initial_state)
-    solver.add(adjacency)
-    solver.add(action_availability)
-    solver.add(transitivity)
-    solver.add(evolution)
-    solver.add(full_board)
-    return solver
-
+  return optimizer
 
 def find_solution(solver):
   if solver.check() == sat:

@@ -1,6 +1,6 @@
 """Configuration constants for the RCMAS system."""
 
-GRID_HEIGHT = 4
+GRID_HEIGHT = 5
 GRID_WIDTH = 4
 INACCESSIBLE_SECTORS = []
 
