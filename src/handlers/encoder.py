@@ -1,41 +1,66 @@
 from z3 import Optimize, Sum
 from src.handlers.base import Handler
 from src.core.state import PipelineContext
-from src.logic import variables, constraints
+from src.logic import variables
+from src.logic.constraints import (
+  ActionAvailabilityConstraint,
+  EvolutionConstraint,
+  AdjacencyConstraint,
+  TransitivityConstraint,
+  FullBoardConstraint,
+  PayoffConstraint, InitialStateConstraint
+)
+
 
 class SATEncodingHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
-    S = ctx.num_sectors
-    T = ctx.num_timesteps
-    A = ctx.config.agents.count
-    W = ctx.config.grid.width
-    inaccessible = ctx.config.grid.inaccessible_sectors
+    print("Initializing Variables...")
 
-    state, action = variables.encode_variables(S, A, T)
-    adjacency = variables.encode_adjacency(state, S, A, T, W)
-    transitivity = variables.encode_transitivity(S, A, W)
-    initial_state = variables.encode_initial_state(state, inaccessible, T, S)
-    action_availability = constraints.encode_action_availability(state, action, S, A, T)
-    evolution = constraints.encode_evolution(state, action, S, A, T)
-    full_board = constraints.encode_full_board(state, S, T, inaccessible)
-    size_vars = variables.encode_size(state, S, A, T)
-    payoff_vars, payoff_constraints = variables.encode_payoff(S, A)
+    # 1. Variable Phase (Create the vocabulary)
+    state, action = variables.create_base_variables(
+      ctx.num_sectors, ctx.num_timesteps, ctx.config.agents.count
+    )
+    adj, cr = variables.create_topology_variables(
+      ctx.num_sectors, ctx.config.agents.count
+    )
+    size, payoff = variables.create_objective_variables(
+      ctx.num_sectors, ctx.config.agents.count
+    )
 
-    optimizer = Optimize()
-    optimizer.add(initial_state)
-    optimizer.add(adjacency)
-    optimizer.add(transitivity)
-    optimizer.add(action_availability)
-    optimizer.add(evolution)
-    optimizer.add(full_board)
-    optimizer.add(size_vars)
-    optimizer.add(payoff_constraints)
-
-    objective = Sum(payoff_vars)
-    optimizer.maximize(objective)
+    # Store in context for Constraints to access
     ctx.z3_vars = {
       'state': state,
       'action': action,
+      'adj': adj,
+      'cr': cr,
+      'size': size,
+      'payoff': payoff
     }
+
+    # 2. Constraint Phase (Define the rules)
+    # We can easily add/remove constraints here based on config flags if we wanted!
+    active_constraints = [
+      InitialStateConstraint(),
+      ActionAvailabilityConstraint(),
+      EvolutionConstraint(),
+      AdjacencyConstraint(),
+      TransitivityConstraint(),
+      FullBoardConstraint(),
+      PayoffConstraint()
+    ]
+
+    optimizer = Optimize()
+
+    print("Applying Constraints...")
+    for constraint in active_constraints:
+      # Each constraint looks at ctx.z3_vars, builds logic, and returns list
+      rules = constraint.build(ctx)
+      optimizer.add(rules)
+
+    # 3. Objective Phase
+    # Maximize the sum of all agent payoffs
+    total_payoff = Sum(payoff)
+    optimizer.maximize(total_payoff)
+
     ctx.z3_optimizer = optimizer
     return ctx

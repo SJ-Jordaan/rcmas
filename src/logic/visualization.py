@@ -1,6 +1,6 @@
 """Visualization and display functions for the RCMAS system."""
 from z3 import Bool
-from utils import calculate_position
+from utils.coords import calculate_position
 
 def format_grid(model, state, grid_height, grid_width, timestep, inaccessible_sectors):
   """
