@@ -1,0 +1,11 @@
+grid:
+  height: 3
+  width: 3
+  inaccessible_sectors: [4]
+
+agents:
+  count: 2
+
+simulation:
+  timesteps: null  # Set to an integer to override auto-calculation
+  max_models: 1    # How many solutions the solver should look for

@@ -1,7 +1,5 @@
 """Utility functions for the RCMAS system."""
 
-from .config import GRID_WIDTH
-
 def calculate_position(sector_id, grid_width):
   """
   Convert a sector ID to row and column coordinates.
@@ -17,7 +15,7 @@ def calculate_position(sector_id, grid_width):
   col = sector_id % grid_width
   return row, col
 
-def sector_to_coords(sector):
-  row = sector // GRID_WIDTH
-  col = sector % GRID_WIDTH
+def sector_to_coords(sector, grid_width):
+  row = sector // grid_width
+  col = sector % grid_width
   return row, col

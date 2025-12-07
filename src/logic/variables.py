@@ -3,21 +3,20 @@ from itertools import combinations, product
 
 from z3 import Int, Bool, Or, And, Implies, Sum, If, Not
 
-from .utils import sector_to_coords
-from .config import NUM_SECTORS, NUM_AGENTS, NUM_TIMESTEPS, INACCESSIBLE_SECTORS
+from utils import sector_to_coords
 
-def encode_state():
-  S = range(NUM_SECTORS)
-  T = range(NUM_TIMESTEPS + 1)
+def encode_state(num_sectors, num_timesteps):
+  S = range(num_sectors)
+  T = range(num_timesteps + 1)
 
   return [
     [Int(f"sector_{s}_{t}") for t in T]
     for s in S
   ]
 
-def encode_action():
-  T = range(NUM_TIMESTEPS)
-  A = range(NUM_AGENTS)
+def encode_action(num_timesteps, num_agents):
+  T = range(num_timesteps)
+  A = range(num_agents)
 
   return [
     [Int(f"action_{a}_{t}") for t in T]
@@ -33,33 +32,33 @@ def cr(s1, s2, a):
 def size(s, a):
   return Int(f"size_{s}_{a}")
 
-def encode_variables():
-  return encode_state(), encode_action()
+def encode_variables(num_sectors, num_agents, num_timesteps):
+  return encode_state(num_sectors, num_timesteps), encode_action(num_timesteps, num_agents)
 
-def encode_initial_state(state):
+def encode_initial_state(state, inaccessible_sectors, num_timesteps, num_sectors):
   inaccessible_constraints = [
     state[s][t] == -1
-    for s in INACCESSIBLE_SECTORS
-    for t in range(NUM_TIMESTEPS + 1)
+    for s in inaccessible_sectors
+    for t in range(num_timesteps + 1)
   ]
 
   initial_empty_constraints = [
     state[s][0] == 0
-    for s in range(NUM_SECTORS) if s not in INACCESSIBLE_SECTORS
+    for s in range(num_sectors) if s not in inaccessible_sectors
   ]
 
   return inaccessible_constraints + initial_empty_constraints
 
-def encode_adjacency(state):
-  T = range(NUM_SECTORS)
-  Agt = range(NUM_AGENTS)
+def encode_adjacency(state, num_sectors, num_agents, num_timesteps, grid_width):
+  T = range(num_sectors)
+  Agt = range(num_agents)
 
   constraints = []
 
   for i, j in combinations(T, 2):
     for a in Agt:
-      xi, yi = sector_to_coords(i)
-      xj, yj = sector_to_coords(j)
+      xi, yi = sector_to_coords(i, grid_width)
+      xj, yj = sector_to_coords(j, grid_width)
 
       are_physically_adjacent = Or(
         And(xi == xj, abs(yi - yj) == 1),
@@ -67,8 +66,8 @@ def encode_adjacency(state):
       )
 
       both_owned_by_a = And(
-        state[i][NUM_TIMESTEPS] == (a + 1),
-        state[j][NUM_TIMESTEPS] == (a + 1)
+        state[i][num_timesteps] == (a + 1),
+        state[j][num_timesteps] == (a + 1)
       )
 
       constraints.append(
@@ -78,9 +77,9 @@ def encode_adjacency(state):
   return constraints
 
 
-def encode_transitivity():
-  S = range(NUM_SECTORS)
-  Agt = range(NUM_AGENTS)
+def encode_transitivity(num_sectors, num_agents, grid_width):
+  S = range(num_sectors)
+  Agt = range(num_agents)
 
   constraints = []
 
@@ -88,10 +87,10 @@ def encode_transitivity():
   #    This prevents checking every sector against every other sector.
   neighbors = {s: [] for s in S}
   for i in S:
-    xi, yi = sector_to_coords(i)
+    xi, yi = sector_to_coords(i, grid_width)
     for j in S:
       if i == j: continue
-      xj, yj = sector_to_coords(j)
+      xj, yj = sector_to_coords(j, grid_width)
       # Check physical adjacency (Manhattan distance of 1)
       if abs(xi - xj) + abs(yi - yj) == 1:
         neighbors[i].append(j)
@@ -125,7 +124,7 @@ def encode_transitivity():
 
   # 3. Iterative Expansion (Step 1 to NUM_SECTORS)
   # We unroll the graph traversal. Max diameter is NUM_SECTORS.
-  for k in range(1, NUM_SECTORS):
+  for k in range(1, num_sectors):
     for a in Agt:
       for i in S:
         for j in S:
@@ -150,7 +149,7 @@ def encode_transitivity():
 
   # 4. Bind the Final State to the Interface Variable `cr`
   # Your interface expects cr(i, j, a). We map the final reachability step to this.
-  final_step = NUM_SECTORS - 1
+  final_step = num_sectors - 1
   for (i, j), a in product(combinations(S, 2), Agt):
     constraints.append(
       cr(i, j, a) == reach[(final_step, a, i, j)]
@@ -158,16 +157,16 @@ def encode_transitivity():
 
   return constraints
 
-def encode_size(state):
-  T = range(NUM_SECTORS)
-  Agt = range(NUM_AGENTS)
+def encode_size(state, num_sectors, num_agents, num_timesteps):
+  T = range(num_sectors)
+  Agt = range(num_agents)
 
   constraints = []
 
   for i, a in product(T, Agt):
     constraints.append(
       If(
-        state[i][NUM_TIMESTEPS] == (a + 1),
+        state[i][num_timesteps] == (a + 1),
         size(i, a) == 1 + Sum(
           cr(i, j, a)
           for j in T if i < j
@@ -178,7 +177,7 @@ def encode_size(state):
 
   return constraints
 
-def encode_payoff():
+def encode_payoff(num_sectors, num_agents):
   """
   Creates payoff variables and constraints.
   Payoff_a = Max(size_{0,a}, size_{1,a}, ... size_{N,a})
@@ -186,13 +185,13 @@ def encode_payoff():
   constraints = []
   payoff_vars = []
 
-  for a in range(NUM_AGENTS):
+  for a in range(num_agents):
     # Create the variable
     p_var = Int(f"payoff_{a}")
     payoff_vars.append(p_var)
 
     # Get all size variables for this agent
-    agent_size_vars = [size(s, a) for s in range(NUM_SECTORS)]
+    agent_size_vars = [size(s, a) for s in range(num_sectors)]
 
     # Constraint 1: Payoff must be an upper bound (>= all sizes)
     for s_var in agent_size_vars:

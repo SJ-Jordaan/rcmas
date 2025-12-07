@@ -1,17 +1,8 @@
 """Visualization and display functions for the RCMAS system."""
 from z3 import Bool
-# Import combinations in addition to permutations
-from itertools import permutations, combinations
-from .config import (
-  INACCESSIBLE_SECTORS,
-  NUM_AGENTS,
-  NUM_TIMESTEPS,
-  NUM_SECTORS,
-  GRID_WIDTH,
-)
-from .utils import calculate_position
+from utils import calculate_position
 
-def format_grid(model, state, grid_height, grid_width, timestep):
+def format_grid(model, state, grid_height, grid_width, timestep, inaccessible_sectors):
   """
       Format a grid with a 'box' layout for each cell.
       Shows Sector ID, Coordinates (row, col), and the Agent/Value.
@@ -38,7 +29,7 @@ def format_grid(model, state, grid_height, grid_width, timestep):
       sector_id = row * grid_width + col
 
       # --- 1. Logic to determine the value (unchanged) ---
-      if sector_id in INACCESSIBLE_SECTORS:
+      if sector_id in inaccessible_sectors:
         val_str = "X"
       else:
         sector_var = state[sector_id][timestep]
@@ -205,14 +196,14 @@ def format_cohesion_grid(model, state, grid_height, grid_width, num_timesteps, n
   return output
 
 
-def display_grid(model, state, action, grid_height, grid_width, num_timesteps, num_agents):
+def display_grid(model, state, action, grid_height, grid_width, num_timesteps, num_agents, inaccessible_sectors):
   """
   Display the grid for all timesteps to the console.
   """
-  print(get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents))
+  print(get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents, inaccessible_sectors))
 
 
-def get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents):
+def get_grid_string(model, state, action, grid_height, grid_width, num_timesteps, num_agents, inaccessible_sectors):
   """
   Get the grid display as a string for all timesteps.
   """
@@ -221,7 +212,7 @@ def get_grid_string(model, state, action, grid_height, grid_width, num_timesteps
     output.append(f"Timestep {t}:")
 
     # Pass 'state'
-    grid_rows = format_grid(model, state, grid_height, grid_width, t)
+    grid_rows = format_grid(model, state, grid_height, grid_width, t, inaccessible_sectors)
     output.extend(grid_rows)
 
     if t < num_timesteps:
