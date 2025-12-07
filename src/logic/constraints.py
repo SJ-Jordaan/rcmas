@@ -67,7 +67,6 @@ class ActionAvailabilityConstraint(BaseConstraint):
 
     return lower + upper + occupied
 
-
 class EvolutionConstraint(BaseConstraint):
   def build(self, ctx: PipelineContext) -> list:
     state = ctx.z3_vars['state']
@@ -101,7 +100,6 @@ class EvolutionConstraint(BaseConstraint):
       constraints.append(Implies(conflict, state[s][t + 1] == state[s][t]))
 
     return constraints
-
 
 # --- TOPOLOGY CONSTRAINTS ---
 
@@ -284,7 +282,6 @@ class FullBoardConstraint(BaseConstraint):
       state[s][ctx.num_timesteps] != 0
       for s in accessible_sectors
     ]
-
 
 class BlockSolutionConstraint(BaseConstraint):
   def build(self, ctx: PipelineContext) -> list:

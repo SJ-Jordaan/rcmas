@@ -1,31 +1,36 @@
+# src/core/state.py
 from pydantic import BaseModel, Field
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 from .config import AppConfig
+from enum import Enum
+
+
+class PipelineMode(str, Enum):
+  EVAL_BASELINE = "eval_baseline"
+  AGENT_OPTIMIZATION = "agent_opt"
 
 
 class PipelineContext(BaseModel):
-  # Static Configuration
   config: AppConfig
-
-  # Derived Constants
   num_sectors: int = 0
   num_timesteps: int = 0
 
-  # Solver State
   z3_optimizer: Any = None
   z3_model: Any = None
-
-  # --- MISSING FIELDS ADDED HERE ---
-  z3_vars: Dict[str, Any] = Field(default_factory=dict)  # Stores 'state' and 'action' lists
-  found_models: List[Any] = Field(default_factory=list)  # Stores all found Z3 models
-  # ---------------------------------
-
+  z3_vars: Dict[str, Any] = Field(default_factory=dict)
+  found_models: List[Any] = Field(default_factory=list)
   is_satisfiable: bool = False
 
-  # RL State
   iteration: int = 0
-  current_reward: float = 0.0
-  terminated: bool = False
+  mode: PipelineMode = PipelineMode.EVAL_BASELINE
+  target_agent_idx: Optional[int] = None
+  current_baseline_payoff: float = 0.0
+
+  # NEW STRUCTURE: Joint Q-Table
+  # Key: State Tuple (s0, s1, ... sN)
+  # Value: Dict[JointActionTuple, QValue]
+  #        JointActionTuple = (action_agent_0, action_agent_1, ...)
+  q_table: Dict[Tuple[int, ...], Dict[Tuple[int, ...], float]] = Field(default_factory=dict)
 
   class Config:
     arbitrary_types_allowed = True

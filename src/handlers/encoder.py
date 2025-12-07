@@ -1,16 +1,18 @@
 from z3 import Optimize, Sum
-from src.handlers.base import Handler
-from src.core.state import PipelineContext
-from src.logic import variables
-from src.logic.constraints import (
+
+from handlers.base import Handler
+from core.state import PipelineContext
+from logic import variables
+from logic.constraints import (
   ActionAvailabilityConstraint,
   EvolutionConstraint,
   AdjacencyConstraint,
   TransitivityConstraint,
   FullBoardConstraint,
-  PayoffConstraint, InitialStateConstraint
+  PayoffConstraint,
+  InitialStateConstraint,
 )
-
+from logic.strategy import FixedStrategyConstraint
 
 class EncodingHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
@@ -45,6 +47,7 @@ class EncodingHandler(Handler):
       EvolutionConstraint(),
       AdjacencyConstraint(),
       TransitivityConstraint(),
+      FixedStrategyConstraint(),
       FullBoardConstraint(),
       PayoffConstraint()
     ]
