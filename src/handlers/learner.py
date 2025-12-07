@@ -2,7 +2,7 @@ from src.handlers.base import Handler
 from src.core.state import PipelineContext
 
 
-class QLearningHandler(Handler):
+class LearningHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
     if not ctx.is_satisfiable:
       # Reward punishment

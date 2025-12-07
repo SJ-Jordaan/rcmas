@@ -12,7 +12,7 @@ from src.logic.constraints import (
 )
 
 
-class SATEncodingHandler(Handler):
+class EncodingHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
     print("Initializing Variables...")
 

@@ -5,7 +5,7 @@ from src.core.state import PipelineContext
 from src.logic.constraints import BlockSolutionConstraint
 
 
-class Z3SolverHandler(Handler):
+class SolverHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
     ctx.found_models = []
     max_models = ctx.config.simulation.max_models
