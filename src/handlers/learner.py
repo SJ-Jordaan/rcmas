@@ -50,14 +50,74 @@ def _count_occupied(state):
   return sum(1 for v in state if v > 0)
 
 
-def _compute_reward(ctx, s_t, a_t, s_t1, terminal, episode_payoff):
-  """Shaped reward: occupancy gain per step, with terminal bonus of solver payoff.
+def _max_cluster_sizes(state, width):
+  """Compute largest connected component size per agent (4-neighbor)."""
+  agent_cells = {}
+  for idx, v in enumerate(state):
+    if v <= 0:
+      continue
+    agent_cells.setdefault(v, set()).add(idx)
 
-  - Per-step reward = change in occupied cells (all agents).
-  - Terminal reward adds the episode payoff.
+  def neighbors(i):
+    r, c = divmod(i, width)
+    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+      nr, nc = r + dr, c + dc
+      if nr < 0 or nc < 0:
+        continue
+      j = nr * width + nc
+      yield j
+
+  max_sizes = {}
+  for agent, cells in agent_cells.items():
+    seen = set()
+    best = 0
+    for cell in cells:
+      if cell in seen:
+        continue
+      stack = [cell]
+      comp = 0
+      while stack:
+        cur = stack.pop()
+        if cur in seen or cur not in cells:
+          continue
+        seen.add(cur)
+        comp += 1
+        for nb in neighbors(cur):
+          stack.append(nb)
+      best = max(best, comp)
+    max_sizes[agent] = best
+  return max_sizes
+
+
+def _compute_reward(ctx, s_t, a_t, s_t1, terminal, episode_payoff):
+  """Shaped reward: cohesion gain + gentle payoff shaping + stall penalty.
+
+  - Per-step base: increase in largest cluster sizes across agents.
+  - Shaping: add a small fraction of the episode payoff each step.
+  - Stall penalty: small negative if no cohesion gain.
+  - Terminal bonus: full episode payoff at the last step.
   """
-  delta_occ = _count_occupied(s_t1) - _count_occupied(s_t)
-  reward = float(delta_occ)
+  width = ctx.config.grid.width
+  sizes_t = _max_cluster_sizes(s_t, width)
+  sizes_t1 = _max_cluster_sizes(s_t1, width)
+
+  def total_sizes(sizes):
+    return sum(sizes.values()) if sizes else 0
+
+  cohesion_gain = float(total_sizes(sizes_t1) - total_sizes(sizes_t))
+  reward = cohesion_gain
+
+  # Mild shaping toward better final solutions
+  w_connect = getattr(ctx.config.debug, "reward_connect_weight", 0.0)
+  if w_connect:
+    steps = max(1, ctx.num_timesteps)
+    reward += w_connect * float(episode_payoff) / steps
+
+  # Penalize stalling in cohesion
+  if cohesion_gain == 0.0:
+    stall_pen = getattr(ctx.config.debug, "reward_stall_penalty", 0.0)
+    reward -= float(stall_pen)
+
   if terminal:
     reward += float(episode_payoff)
   return reward
