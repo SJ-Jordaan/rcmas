@@ -1,7 +1,7 @@
 grid:
   height: 3
   width: 3
-  inaccessible_sectors: []
+  inaccessible_sectors: [2,5,7]
 
 agents:
   count: 3

@@ -44,7 +44,15 @@ class PipelineContext(BaseModel):
 
   def initialize_derived_values(self):
     self.num_sectors = self.config.grid.height * self.config.grid.width
+
+    # Max steps is bounded by how many joint moves can fill accessible cells.
+    agent_count = self.config.agents.count
+    accessible_cells = self.num_sectors - len(self.config.grid.inaccessible_sectors)
+    max_fill_steps = max(1, accessible_cells // agent_count)
+
     if self.config.simulation.timesteps:
-      self.num_timesteps = self.config.simulation.timesteps
+      # Honor explicit timesteps but cap to achievable fill horizon.
+      self.num_timesteps = min(self.config.simulation.timesteps, max_fill_steps)
     else:
-      self.num_timesteps = self.num_sectors // self.config.agents.count
+      implied_steps = self.num_sectors // agent_count
+      self.num_timesteps = min(implied_steps, max_fill_steps)

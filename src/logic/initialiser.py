@@ -29,6 +29,11 @@ class MinimalQTableInitializer(QTableInitializer):
     inaccessible = set(ctx.config.grid.inaccessible_sectors)
     horizon = ctx.num_timesteps or (num_sectors // num_agents)
 
+    # Cap horizon so we never plan more joint moves than accessible cells allow.
+    accessible_cells = num_sectors - len(inaccessible)
+    max_fill_steps = accessible_cells // num_agents
+    horizon = min(horizon, max_fill_steps)
+
     # Initial state: inaccessible = -1, everything else empty (0)
     init_state: List[int] = []
     for s in range(num_sectors):
