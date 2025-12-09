@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from logic.initialiser import ValidStateInitializer, build_action_map
+from logic.initialiser import MinimalQTableInitializer, build_action_map
 from handlers.base import Handler
 from core.state import PipelineContext, PipelineMode
 from utils.debug import q_deltas, format_changes_table, serialize_q_table
@@ -77,7 +77,7 @@ def ensure_q_table(ctx: PipelineContext, logger: logging.Logger):
   if ctx.q_table:
     return
   logger.info("Q-Table empty, initializing")
-  initializer = ValidStateInitializer()
+  initializer = MinimalQTableInitializer()
   ctx.q_table = initializer.generate(ctx)
   logger.info("Q-Table initialized with %s states", len(ctx.q_table))
   if ctx.config.debug.dump_q_json:
@@ -88,7 +88,6 @@ def ensure_q_table(ctx: PipelineContext, logger: logging.Logger):
 class LearningHandler(Handler):
   def handle(self, ctx: PipelineContext) -> PipelineContext:
     logger = logging.getLogger("rcmas.learning")
-    # 1. INITIALIZATION (Run once)
     ensure_q_table(ctx, logger)
     ctx.mode = PipelineMode.EVAL_BASELINE
     return ctx

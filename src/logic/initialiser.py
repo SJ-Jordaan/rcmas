@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from itertools import product
-from typing import Dict, Tuple, List, Set
+from typing import Dict, Tuple, List
 from core.state import PipelineContext
 
 
@@ -12,19 +12,17 @@ class QTableInitializer(ABC):
     pass
 
 
-class ValidStateInitializer(QTableInitializer):
+class MinimalQTableInitializer(QTableInitializer):
   """
-  Generates a Joint Q-Table but pre-penalizes:
-  1. Collision Actions (multiple agents picking same sector)
-  2. Unreachable States (states that violate the time/occupation invariant)
+  Generates a single deterministic game trajectory for the Q-Table.
+
+  Starting from the initial state it walks forward, picking one valid joint
+  action per timestep (lexicographically first) and recording only that
+  action for the encountered state. No branching or breadth/depth expansion.
   """
 
   def generate(self, ctx: PipelineContext) -> Dict[Tuple[int, ...], Dict[Tuple[int, ...], float]]:
-    """Generate reachable states up to the timestep horizon using forward expansion.
-
-    This avoids full Cartesian explosion while giving the strategy encoder
-    meaningful initial support.
-    """
+    """Generate a single plausible path of length = timesteps (or until blocked)."""
 
     num_agents = ctx.config.agents.count
     num_sectors = ctx.num_sectors
@@ -42,29 +40,21 @@ class ValidStateInitializer(QTableInitializer):
 
     q_table: Dict[Tuple[int, ...], Dict[Tuple[int, ...], float]] = {}
 
-    frontier: List[Tuple[int, Tuple[int, ...]]] = [(0, init_state_tuple)]
-    visited: Set[Tuple[int, ...]] = set()
+    current_state = init_state_tuple
 
-    while frontier:
-      t, state = frontier.pop()
-      if state in visited:
-        continue
-      visited.add(state)
+    for _ in range(horizon):
+      action_map = build_action_map(ctx, current_state)
+      if not action_map:
+        break
 
-      action_map = build_action_map(ctx, state)
-      if action_map:
-        q_table[state] = action_map
+      # Pick a single deterministic joint action (lexicographically first)
+      chosen_action = min(action_map.keys())
+      q_table[current_state] = {chosen_action: 0.0}
 
-      # Do not expand beyond horizon
-      if t >= horizon:
-        continue
+      next_state = step_state(current_state, chosen_action, num_agents)
+      current_state = next_state
 
-      # Expand successors
-      for action in action_map.keys():
-        next_state = step_state(state, action, num_agents)
-        frontier.append((t + 1, next_state))
-
-      print(f"[Init] Q-Table generated with {len(q_table)} reachable states (up to {horizon} steps).")
+    print(f"[Init] Q-Table generated with {len(q_table)} states on a single trajectory (up to {horizon} steps).")
     return q_table
 
 
