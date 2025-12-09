@@ -140,7 +140,7 @@ class AdjacencyConstraint(BaseConstraint):
 
     return constraints
 
-class TransitivityConstraint(BaseConstraint):
+class ExhaustiveTransitivityConstraint(BaseConstraint):
   def build(self, ctx: PipelineContext) -> list:
     constraints = []
 
@@ -217,6 +217,41 @@ class TransitivityConstraint(BaseConstraint):
     # We iterate over the cr_vars keys which are (i, j, a)
     for (i, j, a), cr_bool in cr_vars.items():
       constraints.append(cr_bool == reach[(final_step, a, i, j)])
+
+    return constraints
+
+class TransitivityConstraint(BaseConstraint):
+  def build(self, ctx: PipelineContext) -> list:
+    # cr(i,j,a) ↔ ad(i,j,a) ∨ ∃k∈(i,j): (ad(i,k,a) ∧ cr(k,j,a)) ∨ (cr(i,k,a) ∧ ad(k,j,a))
+    constraints = []
+
+    adj_vars = ctx.z3_vars['adj']
+    cr_vars = ctx.z3_vars['cr']
+
+    S = range(ctx.num_sectors)
+    A = range(ctx.config.agents.count)
+
+    def get_adj(i: int, j: int, a: int):
+      low, high = (i, j) if i < j else (j, i)
+      return adj_vars[(low, high, a)]
+
+    def get_cr(i: int, j: int, a: int):
+      low, high = (i, j) if i < j else (j, i)
+      return cr_vars[(low, high, a)]
+
+    for a in A:
+      for i in S:
+        for j in S:
+          if i >= j:
+            continue
+
+          chain_terms = []
+          for k in range(i + 1, j):
+            chain_terms.append(And(get_adj(i, k, a), get_cr(k, j, a)))
+            chain_terms.append(And(get_cr(i, k, a), get_adj(k, j, a)))
+
+          body = [get_adj(i, j, a)] + chain_terms
+          constraints.append(get_cr(i, j, a) == Or(body))
 
     return constraints
 

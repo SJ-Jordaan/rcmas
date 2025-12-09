@@ -1,59 +1,69 @@
 # src/main.py
+import logging
 import sys
+from pathlib import Path
 from src.core.config import AppConfig
 from src.core.state import PipelineContext
-from src.handlers.encoder import EncodingHandler
-from src.handlers.solver import SolverHandler
-from src.handlers.output import OutputHandler
-from src.handlers.learner import LearningHandler
+from src.handlers.pipeline import run_episode
+
+
+def _setup_logging(config: AppConfig) -> logging.Logger:
+    log_level = getattr(logging, config.debug.level.upper(), logging.INFO)
+    logger = logging.getLogger("rcmas")
+    logger.setLevel(log_level)
+
+    # Avoid duplicate handlers if main is re-run in the same process
+    if logger.handlers:
+        return logger
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    file_handler = logging.FileHandler(log_dir / "pipeline.log")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    logger.debug("Logging initialized", extra={"level": config.debug.level})
+    return logger
 
 def main():
-    print("=" * 60)
-    print("RCMAS - Pipeline Execution")
-    print("=" * 60)
-
     try:
         config = AppConfig.load("config/default.yaml")
     except FileNotFoundError:
         print("Error: config/default.yaml not found.")
         sys.exit(1)
 
+    logger = _setup_logging(config)
+
+    logger.info("RCMAS - Pipeline Execution")
+    logger.info("Grid: %sx%s | Agents: %s | Inaccessible: %s", config.grid.height, config.grid.width, config.agents.count, config.grid.inaccessible_sectors)
+
     context = PipelineContext(config=config)
     context.initialize_derived_values()
 
-    print(f"Grid: {config.grid.height}x{config.grid.width}")
-    print(f"Agents: {config.agents.count}")
-    print(f"Sectors: {context.num_sectors}")
-    print(f"Timesteps: {context.num_timesteps}")
-    print("=" * 60)
+    logger.info("Derived: sectors=%s timesteps=%s", context.num_sectors, context.num_timesteps)
 
-    pipeline = [
-        EncodingHandler(),
-        SolverHandler(),
-        OutputHandler(),
-        LearningHandler()
-    ]
+    max_episodes = config.simulation.max_episodes
 
-    MAX_EPISODES = 5  # Could be moved to config
-
-    while context.iteration < MAX_EPISODES:
-        print(f"\n--- Episode {context.iteration + 1} ---")
-
-        # Run each handler in sequence
-        for handler in pipeline:
-            context = handler.handle(context)
-
-            # If the solver failed entirely, we might want to break the pipeline early
-            # but usually, the Learner needs to see the failure to penalize it.
-            if isinstance(handler, SolverHandler) and not context.is_satisfiable:
-                print("Solver failed to find any model this episode.")
-
-        # Check termination condition from RL agent
-        if context.terminated:
-            print("Goal met. Terminating pipeline.")
-            break
-
+    while context.iteration < max_episodes and not context.terminated:
+        logger.info("Episode %s start", context.iteration + 1)
+        context = run_episode(context)
         context.iteration += 1
+
+    if context.ne_found:
+        logger.info("Stopping early: Nash equilibrium detected.")
+    elif context.terminated and not context.ne_found:
+        logger.info("Stopping early: terminated without Nash equilibrium (e.g., baseline infeasible).")
 
 if __name__ == "__main__":
     main()

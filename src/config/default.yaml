@@ -1,11 +1,27 @@
 grid:
-  height: 4
+  height: 3
   width: 3
-  inaccessible_sectors: [3,4]
+  inaccessible_sectors: []
 
 agents:
-  count: 2
+  count: 3
 
 simulation:
-  timesteps: null  # Set to an integer to override auto-calculation
-  max_models: 1    # How many solutions the solver should look for
+  timesteps: null # Set to an integer to override auto-calculation
+  max_models: 1 # How many solutions the solver should look for
+  max_episodes: 50 # Max training/solve episodes
+
+debug:
+  enabled: true
+  level: DEBUG # DEBUG for detailed traces
+  max_q_deltas: 20 # Cap number of Q-table changes logged per episode
+  max_state_logs: 10 # Cap number of state/action paths printed per episode
+  dump_q_json: true # If true, write artifacts/q_table.json after each episode
+  epsilon: 1e-6 # Threshold to consider a Q-value change meaningful
+  include_strategy_constraints: true # If false, skips FixedStrategyConstraint to test encoding only
+  dump_strategy_constraints: true # If true, write a summary of fixed strategy implications
+  dump_constraints: true # If true, dump full SMT constraints to artifacts
+  max_init_states: 500 # Cap reachable-state generation during init
+  max_actions_per_state: 50 # Cap actions stored per state during init
+  learning_rate: 0.5 # Alpha for TD update
+  discount: 0.9 # Gamma for TD update

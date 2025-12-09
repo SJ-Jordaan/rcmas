@@ -25,12 +25,19 @@ class PipelineContext(BaseModel):
   mode: PipelineMode = PipelineMode.EVAL_BASELINE
   target_agent_idx: Optional[int] = None
   current_baseline_payoff: float = 0.0
+  terminated: bool = False
 
   # NEW STRUCTURE: Joint Q-Table
   # Key: State Tuple (s0, s1, ... sN)
   # Value: Dict[JointActionTuple, QValue]
   #        JointActionTuple = (action_agent_0, action_agent_1, ...)
   q_table: Dict[Tuple[int, ...], Dict[Tuple[int, ...], float]] = Field(default_factory=dict)
+
+  # Debug/trace holders
+  last_path: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = Field(default_factory=list)
+  last_payoff: float = 0.0
+  last_q_changes: List[Dict[str, Any]] = Field(default_factory=list)
+  ne_found: bool = False
 
   class Config:
     arbitrary_types_allowed = True
