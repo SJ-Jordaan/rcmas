@@ -111,8 +111,28 @@ def main(argv: list[str] | None = None) -> int:
         timeout_ms=args.timeout_ms,
     )
 
-    if args.testbed in {"smt-co", "smt-ne"}:
+    if args.testbed in {"smt-co", "smt-ne", "hybrid"}:
         if args.testbed == "smt-ne":
+            res = tb.solve(territory=territory, num_agents=args.agents, horizon=args.max_rounds)  # type: ignore[attr-defined]
+            print(f"sat={res.is_sat} reason={res.reason}")
+            if res.payoff_by_agent is not None:
+                print(f"payoff={res.payoff_by_agent}")
+            print(f"iterations={res.iterations} found_ne={res.found_ne}")
+
+            sol = res.final_solution
+            if args.render and sol is not None and sol.owner_by_round is not None:
+                print("\n=== TRACE (t=0..T) ===")
+                for t, snapshot in enumerate(sol.owner_by_round):
+                    print(f"\n-- t={t} --")
+                    print(_render_owner_grid(territory=territory, owner_by_index=snapshot))
+                    if sol.actions_by_round is not None and t < len(sol.actions_by_round):
+                        step = sol.actions_by_round[t]
+                        action_str = " ".join(f"a{a}={c}" for a, c in enumerate(step))
+                        print(f"actions: {action_str}")
+
+            return 0 if res.is_sat else 2
+
+        if args.testbed == "hybrid":
             res = tb.solve(territory=territory, num_agents=args.agents, horizon=args.max_rounds)  # type: ignore[attr-defined]
             print(f"sat={res.is_sat} reason={res.reason}")
             if res.payoff_by_agent is not None:

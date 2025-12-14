@@ -14,7 +14,7 @@ def build_testbed(
     from .smt_co import SmtCollectiveOptimalityTestbed
     from .qlearning_tb import QLearningTestbed
     from .smt_ne import SmtNaiveNETestbed
-    from .stubs import HybridTestbed
+    from .hybrid import HybridTestbed
 
     if name == "smt-co":
         return SmtCollectiveOptimalityTestbed()
@@ -23,5 +23,5 @@ def build_testbed(
     if name == "smt-ne":
         return SmtNaiveNETestbed(max_iters=max_iters, progress=progress, timing=timing, timeout_ms=timeout_ms)
     if name == "hybrid":
-        return HybridTestbed()
+        return HybridTestbed(max_iters=max_iters, progress=progress, timing=timing, timeout_ms=timeout_ms)
     raise ValueError(f"unknown testbed: {name}")

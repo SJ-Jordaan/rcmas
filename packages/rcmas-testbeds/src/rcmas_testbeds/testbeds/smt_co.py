@@ -48,6 +48,7 @@ def solve_smt_game(
     objective: str | int = "sum",
     fixed_actions_by_round: tuple[tuple[Coord | None, ...], ...] | None = None,
     fixed_policy_by_agent: tuple[dict[tuple[int, ...], Coord | None] | None, ...] | None = None,
+    action_candidates_by_agent: tuple[dict[tuple[int, ...], tuple[Coord | None, ...]] | None, ...] | None = None,
     enforce_state_only_for_agents: tuple[int, ...] = (),
     require_victory: bool = False,
     debug: bool = False,
@@ -90,6 +91,52 @@ def solve_smt_game(
     for a in range(A):
         for t in range(T):
             opt.add(Or(action[a][t] == -1, And(action[a][t] >= 0, action[a][t] < S)))
+
+    # Optionally restrict actions via per-agent state->candidate-actions sets.
+    #
+    # This is primarily used by the hybrid testbed to reduce the best-response
+    # search space based on RL suggestions (top-k actions per visited state).
+    #
+    # For any matching state at time t, we enforce action[a][t] to be one of the
+    # provided candidates (plus -1 as a safety escape hatch). If a state is not
+    # present in the map, the agent remains unrestricted at that state.
+    if action_candidates_by_agent is not None:
+        if len(action_candidates_by_agent) != A:
+            raise ValueError("action_candidates_by_agent must have length == num_agents")
+
+        for a in range(A):
+            cand = action_candidates_by_agent[a]
+            if cand is None:
+                continue
+            for state, choices in cand.items():
+                if len(state) != S:
+                    raise ValueError("action_candidates_by_agent has a state key with wrong length")
+                for c in choices:
+                    if c is None:
+                        continue
+                    if territory.index_of(c) is None:
+                        raise ValueError(f"candidate action {c} is not in territory")
+
+        for t in range(T):
+            for a in range(A):
+                cand = action_candidates_by_agent[a]
+                if cand is None:
+                    continue
+
+                # Stable iteration order for reproducibility.
+                for state in sorted(cand.keys()):
+                    allowed_idxs: set[int] = {-1}
+                    for c in cand[state]:
+                        if c is None:
+                            allowed_idxs.add(-1)
+                            continue
+                        sidx = territory.index_of(c)
+                        if sidx is None:
+                            raise ValueError(f"candidate action {c} is not in territory")
+                        allowed_idxs.add(sidx)
+
+                    match_state = And([owner[s][t] == state[s] for s in range(S)])
+                    opt.add(Implies(match_state, Or([action[a][t] == i for i in sorted(allowed_idxs)])))
 
     # Optionally fix actions for some or all agents per round.
     if fixed_actions_by_round is not None:
