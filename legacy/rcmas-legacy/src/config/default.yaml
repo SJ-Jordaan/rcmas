@@ -1,0 +1,29 @@
+grid:
+  height: 3
+  width: 3
+  inaccessible_sectors: [2, 5, 7]
+
+agents:
+  count: 3
+
+simulation:
+  timesteps: null # Set to an integer to override auto-calculation
+  max_models: 1 # How many solutions the solver should look for
+  max_episodes: 10 # Max training/solve episodes
+
+debug:
+  enabled: true
+  level: DEBUG # DEBUG for detailed traces
+  max_q_deltas: 20 # Cap number of Q-table changes logged per episode
+  max_state_logs: 10 # Cap number of state/action paths printed per episode
+  dump_q_json: true # If true, write artifacts/q_table.json after each episode
+  epsilon: 1e-6 # Threshold to consider a Q-value change meaningful
+  include_strategy_constraints: true # If false, skips FixedStrategyConstraint to test encoding only
+  dump_strategy_constraints: false # If true, write a summary of fixed strategy implications
+  dump_constraints: false # If true, dump full SMT constraints to artifacts
+  learning_rate: 0.5 # Alpha for TD update
+  discount: 0.9 # Gamma for TD update
+  dump_policy_signatures: true # If true, write policy signatures used per episode
+  reward_connect_weight: 0.2 # Weight for shaping toward higher payoff/connected clusters
+  reward_stall_penalty: 0.1 # Penalty when no new cells are occupied in a step
+  hard_solver_update: true # If true, overwrite Q-values with solver-derived targets that beat the baseline
