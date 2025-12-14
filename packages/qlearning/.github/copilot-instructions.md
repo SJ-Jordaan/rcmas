@@ -27,9 +27,9 @@
 - Run tests:
   - `pytest`
 - Run a game:
-  - `python -m qlearning.cli simulate --grid grids/example.txt --agents random greedy`
+  - `python -m qlearning.cli simulate --grid ../../grids/example.txt --agents random greedy`
 - Train:
-  - `python -m qlearning.cli train --grid grids/example.txt --num-agents 2 --episodes 2000 --out-dir q_tables`
+  - `python -m qlearning.cli train --grid ../../grids/example.txt --num-agents 2 --episodes 2000 --out-dir q_tables`
 
 ## When changing rules
 - Update `GameState.step()` first, then adjust any agent assumptions (`src/qlearning/agents/`) and trainer reward shaping (`src/qlearning/rl/trainer.py`).

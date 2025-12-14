@@ -58,7 +58,8 @@ def eval_episode(territory: Territory, qtables: list[QTable], *, seed: int = 0) 
 
 
 def main() -> int:
-    grid_path = Path(__file__).resolve().parents[1] / "grids" / "example.txt"
+    # In the monorepo layout, grids live at the repo top-level.
+    grid_path = Path(__file__).resolve().parents[2] / "grids" / "example.txt"
     territory = load_territory(grid_path)
 
     num_agents = 2

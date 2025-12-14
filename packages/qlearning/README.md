@@ -12,7 +12,7 @@ python -m qlearning.cli smoke
 
 Provide an ASCII file where `.` means an acquirable sector; any other character is ignored.
 
-Example (`grids/plus.txt`):
+Example (`grids/plus.txt` in the monorepo root):
 
 ```
 ..#..
@@ -25,13 +25,13 @@ Example (`grids/plus.txt`):
 ## Simulate
 
 ```bash
-python -m qlearning.cli simulate --grid grids/example.txt --agents random greedy
+python -m qlearning.cli simulate --grid ../../grids/example.txt --agents random greedy
 ```
 
 ## Train (tabular Q-learning)
 
 ```bash
-python -m qlearning.cli train --grid grids/example.txt --num-agents 2 --episodes 2000 --out-dir q_tables
+python -m qlearning.cli train --grid ../../grids/example.txt --num-agents 2 --episodes 2000 --out-dir q_tables
 ```
 
 ## Dev
