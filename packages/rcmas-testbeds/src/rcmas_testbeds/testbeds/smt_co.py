@@ -23,10 +23,39 @@ class SmtSolution:
 
 
 def solve_collective_optimality(*, territory: Territory, num_agents: int, horizon: int, debug: bool = False) -> SmtSolution:
-    """Solve the scenario in one SMT shot.
+    """Solve the scenario in one SMT shot (collective optimality).
 
     This deliberately does *not* interact with the engine loop. We encode the game dynamics
     as constraints and ask Z3 to optimize the collective payoff.
+    """
+
+    return solve_smt_game(
+        territory=territory,
+        num_agents=num_agents,
+        horizon=horizon,
+        objective="sum",
+        fixed_actions_by_round=None,
+        require_victory=False,
+        debug=debug,
+    )
+
+
+def solve_smt_game(
+    *,
+    territory: Territory,
+    num_agents: int,
+    horizon: int,
+    objective: str | int = "sum",
+    fixed_actions_by_round: tuple[tuple[Coord | None, ...], ...] | None = None,
+    fixed_policy_by_agent: tuple[dict[tuple[int, ...], Coord | None] | None, ...] | None = None,
+    enforce_state_only_for_agents: tuple[int, ...] = (),
+    require_victory: bool = False,
+    debug: bool = False,
+    timeout_ms: int | None = None,
+) -> SmtSolution:
+    """Generic SMT solve for this game's dynamics.
+
+    See module docstring for details.
     """
 
     if num_agents <= 0:
@@ -35,7 +64,7 @@ def solve_collective_optimality(*, territory: Territory, num_agents: int, horizo
         raise ValueError("horizon must be >= 1")
 
     try:
-        from z3 import And, Bool, If, Implies, Int, Optimize, Or, Sum, is_true, sat
+        from z3 import And, Bool, If, Implies, Int, Optimize, Or, Sum, is_true, sat, unknown
     except Exception as e:  # pragma: no cover
         raise RuntimeError("z3-solver is required for smt-co testbed") from e
 
@@ -45,6 +74,10 @@ def solve_collective_optimality(*, territory: Territory, num_agents: int, horizo
     T = horizon
 
     opt = Optimize()
+    if timeout_ms is not None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be > 0")
+        opt.set(timeout=timeout_ms)
 
     # owner[s][t] in {-1 (unowned), 0..A-1}
     owner = [[Int(f"owner_{s}_{t}") for t in range(T + 1)] for s in range(S)]
@@ -57,6 +90,93 @@ def solve_collective_optimality(*, territory: Territory, num_agents: int, horizo
     for a in range(A):
         for t in range(T):
             opt.add(Or(action[a][t] == -1, And(action[a][t] >= 0, action[a][t] < S)))
+
+    # Optionally fix actions for some or all agents per round.
+    if fixed_actions_by_round is not None:
+        if len(fixed_actions_by_round) != T:
+            raise ValueError("fixed_actions_by_round must have length == horizon")
+        for t in range(T):
+            step = fixed_actions_by_round[t]
+            if len(step) != A:
+                raise ValueError("fixed_actions_by_round[t] must have length == num_agents")
+            for a in range(A):
+                c = step[a]
+                if c is None:
+                    continue
+                sidx = territory.index_of(c)
+                if sidx is None:
+                    raise ValueError(f"fixed action {c} is not in territory")
+                opt.add(action[a][t] == sidx)
+
+    # Optionally fix actions via per-agent state->action policies.
+    #
+    # Each fixed agent's action at time t is constrained to be a pure function of the
+    # current ownership vector owner[*][t]. Policies may be partial; any unmatched
+    # state uses a deterministic fallback action computed from the state.
+    if fixed_policy_by_agent is not None:
+        if len(fixed_policy_by_agent) != A:
+            raise ValueError("fixed_policy_by_agent must have length == num_agents")
+
+        # Validate indices for any requested state-only consistency constraints.
+        for a in enforce_state_only_for_agents:
+            if a < 0 or a >= A:
+                raise ValueError("enforce_state_only_for_agents contains invalid agent index")
+
+        def default_action_expr(agent_id: int, t: int):
+            # Deterministic collision-free fallback: choose the agent_id-th unowned
+            # sector in the fixed ordering (else -1 if fewer unowned remain).
+            expr = -1
+            for i in reversed(range(S)):
+                unowned_before = Sum([If(owner[j][t] == -1, 1, 0) for j in range(i)])
+                cond = And(owner[i][t] == -1, unowned_before == agent_id)
+                expr = If(cond, i, expr)
+            return expr
+
+        # Apply policy constraints.
+        for a in range(A):
+            policy = fixed_policy_by_agent[a]
+            if policy is None:
+                continue
+
+            for state, chosen_coord in policy.items():
+                if len(state) != S:
+                    raise ValueError("fixed_policy_by_agent has a state key with wrong length")
+                if chosen_coord is not None:
+                    sidx = territory.index_of(chosen_coord)
+                    if sidx is None:
+                        raise ValueError(f"fixed policy action {chosen_coord} is not in territory")
+
+        # Constrain action[a][t] for fixed-policy agents.
+        for t in range(T):
+            for a in range(A):
+                policy = fixed_policy_by_agent[a]
+                if policy is None:
+                    continue
+
+                expr = default_action_expr(a, t)
+
+                # Stable iteration order for reproducibility.
+                for state in sorted(policy.keys()):
+                    chosen_coord = policy[state]
+                    chosen_idx = -1
+                    if chosen_coord is not None:
+                        sidx = territory.index_of(chosen_coord)
+                        if sidx is None:
+                            raise ValueError(f"fixed policy action {chosen_coord} is not in territory")
+                        chosen_idx = sidx
+
+                    match_state = And([owner[s][t] == state[s] for s in range(S)])
+                    expr = If(match_state, chosen_idx, expr)
+
+                opt.add(action[a][t] == expr)
+
+        # Optional: enforce that selected agents are state-only (same state => same action)
+        # across the whole horizon. Useful when synthesizing / extracting state-only policies.
+        for a in enforce_state_only_for_agents:
+            for t1 in range(T):
+                for t2 in range(t1 + 1, T):
+                    same_state = And([owner[s][t1] == owner[s][t2] for s in range(S)])
+                    opt.add(Implies(same_state, action[a][t1] == action[a][t2]))
 
     # Initial state: everything unowned.
     for s in range(S):
@@ -86,6 +206,11 @@ def solve_collective_optimality(*, territory: Territory, num_agents: int, horizo
             # claim_sum is 0 if nobody claimed, else (agent_id+1) since at most one.
             claim_sum = Sum([If(action[a][t] == s, a + 1, 0) for a in range(A)])
             opt.add(owner[s][t + 1] == If(claim_sum == 0, owner[s][t], claim_sum - 1))
+
+    # Optional: enforce victory (all sectors claimed) at the final timestep.
+    if require_victory:
+        for s in range(S):
+            opt.add(owner[s][T] != -1)
 
     # --- Payoff: largest connected component per agent at final timestep ---
     # We mirror the old rcmas idea: build adjacency at final_t, compute reachability,
@@ -158,10 +283,20 @@ def solve_collective_optimality(*, territory: Territory, num_agents: int, horizo
             opt.add(payoff[a] >= size[i][a])
         opt.add(Or([payoff[a] == size[i][a] for i in range(S)]))
 
-    # Objective: maximize total payoff.
-    opt.maximize(Sum(payoff))
+    # Objective
+    if objective == "sum":
+        opt.maximize(Sum(payoff))
+    elif isinstance(objective, int):
+        if objective < 0 or objective >= A:
+            raise ValueError("objective agent index out of range")
+        opt.maximize(payoff[objective])
+    else:
+        raise ValueError("objective must be 'sum' or an agent index")
 
-    if opt.check() != sat:
+    check_res = opt.check()
+    if check_res != sat:
+        if check_res == unknown:
+            return SmtSolution(False, "unknown", None, None)
         return SmtSolution(False, "unsat", None, None)
 
     model = opt.model()
