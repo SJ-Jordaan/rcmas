@@ -163,12 +163,16 @@ def update_q_from_results(ctx: PipelineContext, results: list):
 
   alpha = ctx.config.debug.learning_rate
   gamma = ctx.config.debug.discount
+  hard_update = getattr(ctx.config.debug, "hard_solver_update", False)
+  eps = ctx.config.debug.epsilon
 
   # Baseline payoff
   baseline_payoff = float("-inf")
+  baseline_sat = False
   for r in results:
     if r.get("name") == "all_fixed" and r.get("satisfiable"):
       baseline_payoff = r.get("payoff", float("-inf"))
+      baseline_sat = True
       break
 
   # Apply updates from all satisfiable runs
@@ -181,6 +185,10 @@ def update_q_from_results(ctx: PipelineContext, results: list):
       continue
 
     transitions = _extract_transitions(vctx)
+    better_policy = False
+    if baseline_sat and payoff >= baseline_payoff + eps:
+      better_policy = True
+
     for (s_t, a_t, s_t1, terminal) in transitions:
       # Ensure state/action maps exist
       if s_t not in ctx.q_table:
@@ -205,8 +213,12 @@ def update_q_from_results(ctx: PipelineContext, results: list):
       reward = _compute_reward(ctx, s_t, a_t, s_t1, terminal, payoff)
       old_q = ctx.q_table[s_t].get(a_t, 0.0)
       target = reward + (gamma * max_next if not terminal else 0.0)
-      new_q = (1 - alpha) * old_q + alpha * target
-      ctx.q_table[s_t][a_t] = new_q
+      if hard_update and better_policy:
+        # Trust solver-derived policies that beat the current baseline
+        ctx.q_table[s_t][a_t] = max(old_q, target)
+      else:
+        new_q = (1 - alpha) * old_q + alpha * target
+        ctx.q_table[s_t][a_t] = new_q
 
     if r.get("name") != "all_fixed":
       agent = r.get("target_agent")

@@ -27,11 +27,11 @@ class DebugConfig(BaseModel):
     epsilon: float = 1e-6
     include_strategy_constraints: bool = True
     dump_strategy_constraints: bool = False
+    dump_policy_signatures: bool = False
     dump_constraints: bool = False
-    max_init_states: int = 500
-    max_actions_per_state: int = 50
     learning_rate: float = 0.5
     discount: float = 0.9
+    hard_solver_update: bool = True
 
 
 class AppConfig(BaseModel):

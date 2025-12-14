@@ -1,9 +1,11 @@
 # src/logic/strategy.py
 import logging
+from numbers import Number
 from pathlib import Path
 from z3 import And, Implies
 from logic.base import BaseConstraint
 from core.state import PipelineContext, PipelineMode
+from logic.initialiser import build_action_map
 
 class FixedStrategyConstraint(BaseConstraint):
   def build(self, ctx: PipelineContext) -> list:
@@ -11,6 +13,7 @@ class FixedStrategyConstraint(BaseConstraint):
       return []
 
     logger = logging.getLogger("rcmas.strategy")
+
     constraints = []
     state_vars = ctx.z3_vars['state']
     action_vars = ctx.z3_vars['action']
@@ -21,35 +24,58 @@ class FixedStrategyConstraint(BaseConstraint):
     elif ctx.mode == PipelineMode.AGENT_OPTIMIZATION:
       fixed_agents = [a for a in range(ctx.config.agents.count) if a != ctx.target_agent_idx]
 
+    # Build a chosen policy; if current argmax policy was seen, walk states from the tail and pick the first unseen alternative signature.
+    policy_actions = {state: max(actions.items(), key=lambda kv: kv[1])[0] for state, actions in ctx.q_table.items() if actions}
+    strategy_sig = _policy_signature(policy_actions)
+
+    if strategy_sig in ctx.strategy_signatures:
+      logger.info("Strategy already used; searching for the first unseen alternative policy")
+      states = list(policy_actions.keys())
+      for state in reversed(states):
+        valid_actions = build_action_map(ctx, state)
+        if not valid_actions:
+          continue
+        current = policy_actions[state]
+        alternatives = [a for a in sorted(valid_actions.keys()) if a != current]
+        for alt in alternatives:
+          candidate_policy = dict(policy_actions)
+          candidate_policy[state] = alt
+          candidate_sig = _policy_signature(candidate_policy)
+          if candidate_sig not in ctx.strategy_signatures:
+            policy_actions = candidate_policy
+            strategy_sig = candidate_sig
+            break
+        if strategy_sig not in ctx.strategy_signatures:
+          break
+
+    ctx.strategy_signatures.add(strategy_sig)
+
+    if getattr(ctx.config.debug, "dump_policy_signatures", False):
+      out_path = Path("artifacts/policy_signatures.txt")
+      out_path.parent.mkdir(parents=True, exist_ok=True)
+      with open(out_path, "a") as f:
+        f.write(f"signature: {strategy_sig}\n")
+        for state, action in sorted(policy_actions.items()):
+          f.write(f"  {state} -> {action}\n")
+        f.write("---\n")
+
     summary = []
 
     for state_tuple, action_map in ctx.q_table.items():
 
-      # Find the BEST Joint Action for this state
-      # action_map is Dict[JointActionTuple, Value]
-      # We want the Key with the Max Value
       if not action_map:
         continue
 
-      best_joint_action = max(action_map, key=action_map.get)
+      best_joint_action = policy_actions.get(state_tuple)
+      if best_joint_action is None:
+        continue
 
-      # Add constraints for every timestep
-      for t in range(ctx.num_timesteps):
-
-        # This is the condition, basically identifying if we have found the state
-        is_state_match = And([
-          state_vars[s][t] == val
-          for s, val in enumerate(state_tuple)
-        ])
-
-        # which actions to take when we have fixed an agent for that state
-        implications = []
-        for agent_id in fixed_agents:
-          required_action = best_joint_action[agent_id]
-          implications.append(action_vars[agent_id][t] == required_action)
-
-        if implications:
-          constraints.append(Implies(is_state_match, And(implications)))
+      for agent_id in fixed_agents:
+        required_action = best_joint_action[agent_id]
+        t = _state_to_timestep(state_tuple, ctx.config.agents.count)
+        constraints.append(
+          action_vars[agent_id][t] == required_action
+        )
 
       # Record a summary row for debugging/logging (only once per state)
       summary.append((state_tuple, best_joint_action, fixed_agents))
@@ -71,3 +97,14 @@ class FixedStrategyConstraint(BaseConstraint):
       logger.info("Strategy summary written to %s", out_path)
 
     return constraints
+
+
+def _policy_signature(policy_actions: dict) -> str:
+  """Stable signature of chosen actions per state."""
+  items = sorted(policy_actions.items())
+  return str(items)
+
+
+def _state_to_timestep(state: tuple, count: int) -> int:
+  if count == 0: return 0
+  return sum(1 for cell in state if cell > 0) // count

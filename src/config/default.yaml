@@ -23,5 +23,7 @@ debug:
   dump_constraints: false # If true, dump full SMT constraints to artifacts
   learning_rate: 0.5 # Alpha for TD update
   discount: 0.9 # Gamma for TD update
+  dump_policy_signatures: true # If true, write policy signatures used per episode
   reward_connect_weight: 0.2 # Weight for shaping toward higher payoff/connected clusters
   reward_stall_penalty: 0.1 # Penalty when no new cells are occupied in a step
+  hard_solver_update: true # If true, overwrite Q-values with solver-derived targets that beat the baseline

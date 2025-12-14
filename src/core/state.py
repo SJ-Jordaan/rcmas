@@ -38,6 +38,7 @@ class PipelineContext(BaseModel):
   last_payoff: float = 0.0
   last_q_changes: List[Dict[str, Any]] = Field(default_factory=list)
   ne_found: bool = False
+  strategy_signatures: set = Field(default_factory=set)
 
   class Config:
     arbitrary_types_allowed = True
