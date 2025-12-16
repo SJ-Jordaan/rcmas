@@ -147,8 +147,15 @@ def solve_naive_ne(
         else:
             _log(f"iter={it} base_payoff={base_payoff}")
 
-        improved = False
-        next_policies: list[Policy] = [dict(p) for p in policies]
+        # Important: do not merge multiple unilateral best-responses in one
+        # iteration. Combining independently learned policies can introduce
+        # collisions and make the next baseline UNSAT. Instead, pick the single
+        # agent with the best improvement and update only that agent.
+        best_agent: int | None = None
+        best_ratio: float = 1.0
+        best_delta: int = 0
+        best_learned: Policy | None = None
+        best_learned_states: int = 0
 
         for a in range(num_agents):
             fixed_policy_by_agent: list[Policy | None] = []
@@ -183,20 +190,47 @@ def solve_naive_ne(
                 _log(f"iter={it} agent={a} br_payoff={new_payoff}")
 
             if new_payoff > base_payoff[a]:
-                improved = True
                 learned = _policy_from_solution_for_agent(br, a)
-                updated = dict(next_policies[a])
-                updated.update(learned)
-                next_policies[a] = updated
-                _log(f"iter={it} agent={a} improved delta={new_payoff - base_payoff[a]} learned_states={len(learned)} total_states={len(updated)}")
+                delta = int(new_payoff - base_payoff[a])
+                ratio = float(new_payoff) / float(base_payoff[a])
+                learned_states = len(learned)
 
-        if not improved:
+                # Pick the single best improvement (ratio, then delta).
+                # Conservative tie-break: prefer learning fewer states.
+                is_better = False
+                if best_agent is None or ratio > best_ratio:
+                    is_better = True
+                elif ratio == best_ratio and delta > best_delta:
+                    is_better = True
+                elif ratio == best_ratio and delta == best_delta and learned_states < best_learned_states:
+                    is_better = True
+
+                if is_better:
+                    best_agent = a
+                    best_ratio = ratio
+                    best_delta = delta
+                    best_learned = learned
+                    best_learned_states = learned_states
+
+                _log(
+                    f"iter={it} agent={a} improved delta={delta} ratio={ratio:.3f} learned_states={learned_states}"
+                )
+
+        if best_agent is None or best_learned is None:
             if timing:
                 _log(f"iter={it} converged_time_s={time.perf_counter() - iter_t0:.3f}")
                 _log(f"done reason=ne iterations={it} total_time_s={time.perf_counter() - t0:.3f}")
             return SmtNaiveNEResult(True, "ne", True, it, base.actions_by_round, base_payoff, base)
 
-        policies = next_policies
+        updated = dict(policies[best_agent])
+        updated.update(best_learned)
+        policies = [dict(p) for p in policies]
+        policies[best_agent] = updated
+
+        _log(
+            f"iter={it} picked_agent={best_agent} picked_delta={best_delta} picked_ratio={best_ratio:.3f} "
+            f"picked_learned_states={best_learned_states}"
+        )
 
         if timing:
             _log(f"iter={it} updated_profile_states={[len(p) for p in policies]} iter_time_s={time.perf_counter() - iter_t0:.3f}")
