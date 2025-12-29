@@ -86,11 +86,11 @@ def solve_smt_game(
         for t in range(T + 1):
             opt.add(And(owner[s][t] >= -1, owner[s][t] < A))
 
-    # action[a][t] in {-1 (no-op), 0..S-1}
+    # action[a][t] in {0..S-1}
     action = [[Int(f"action_{a}_{t}") for t in range(T)] for a in range(A)]
     for a in range(A):
         for t in range(T):
-            opt.add(Or(action[a][t] == -1, And(action[a][t] >= 0, action[a][t] < S)))
+            opt.add(Or(And(action[a][t] >= 0, action[a][t] < S)))
 
     # Optionally restrict actions via per-agent state->candidate-actions sets.
     #
