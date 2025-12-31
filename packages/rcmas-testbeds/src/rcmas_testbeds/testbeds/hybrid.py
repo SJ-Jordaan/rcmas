@@ -395,10 +395,6 @@ def solve_hybrid_ne(
     if cfg.max_iters <= 0:
         raise ValueError("max_iters must be >= 1")
 
-    sectors = territory.ordered_sectors()
-    if num_agents * horizon < len(sectors):
-        return HybridNEResult(False, "horizon too small to guarantee victory", False, 0, None, None)
-
     policies: list[Policy] = [{} for _ in range(num_agents)]
     seen_profiles: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
 

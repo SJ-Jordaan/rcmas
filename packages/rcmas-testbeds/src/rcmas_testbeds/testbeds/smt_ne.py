@@ -90,10 +90,6 @@ def solve_naive_ne(
     if max_iters <= 0:
         raise ValueError("max_iters must be >= 1")
 
-    sectors = territory.ordered_sectors()
-    if num_agents * horizon < len(sectors):
-        return SmtNaiveNEResult(False, "horizon too small to guarantee victory", False, 0, None, None, None)
-
     # Start with empty explicit policies for all agents; the solver-enforced fallback
     # defines the behavior for all unmapped states.
     policies: list[Policy] = [{} for _ in range(num_agents)]
