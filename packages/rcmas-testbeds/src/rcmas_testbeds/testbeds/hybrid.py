@@ -35,7 +35,7 @@ class HybridConfig:
     max_iters: int = 25
 
     # RL: episodes per agent per outer iteration (0 disables RL proposals)
-    rl_episodes_per_iter: int = 200
+    rl_episodes_per_iter: int = 1000
     rl_alpha: float = 0.3
     rl_gamma: float = 0.95
     rl_epsilon_start: float = 0.7
@@ -47,6 +47,11 @@ class HybridConfig:
 
     # RL warm-start: keep Q-tables across outer iterations.
     rl_persist_q: bool = False
+
+    # SMT -> RL: replay the baseline SMT-evaluated joint trace into each agent's
+    # Q-table before running that agent's Q-learning best-response episodes.
+    # This lets Q-learning "learn from" the SMT encoding's response (the base solve).
+    rl_pretrain_from_smt_base: bool = True
 
     # Bootstrap: before the first SMT iteration, do extra RL training (per-agent)
     # against the default fallback opponents, then derive an initial collision-free
@@ -320,6 +325,81 @@ def _train_best_response_q(
     return policy, candidates, q, seen_states
 
 
+def _pretrain_q_from_smt_base_trace(
+    *,
+    territory: Territory,
+    num_agents: int,
+    horizon: int,
+    agent_id: int,
+    sol: SmtSolution,
+    cfg: HybridConfig,
+    q: dict[str, dict[str, float]],
+    seen_states: set[StateKey],
+) -> None:
+    """Apply a single pass of Q-learning updates from an SMT debug trace.
+
+    The SMT solution provides a concrete joint action trace (and the implied state
+    evolution). We replay it through the engine step function and treat it as
+    additional experience for tabular Q-learning.
+    """
+
+    if sol.owner_by_round is None or sol.actions_by_round is None:
+        return
+
+    # owner_by_round has length horizon+1, actions_by_round length horizon.
+    T = min(horizon, len(sol.actions_by_round), max(0, len(sol.owner_by_round) - 1))
+    for t in range(T):
+        state = GameState(
+            territory=territory,
+            num_agents=num_agents,
+            owner_by_index=sol.owner_by_round[t],
+            round_index=t,
+        )
+        actions_step = sol.actions_by_round[t]
+        actions: dict[int, Coord | None] = {i: actions_step[i] for i in range(num_agents)}
+        next_state, outcome = state.step(actions)
+
+        prev_sizes = [state.largest_region_size(i) for i in range(num_agents)]
+        next_sizes = [next_state.largest_region_size(i) for i in range(num_agents)]
+
+        # Reward shaping for this agent only (match _train_best_response_q).
+        if outcome.status == GameStatus.DEFEAT:
+            r = -cfg.defeat_penalty
+            terminal = True
+        else:
+            r = 0.0
+            if actions.get(agent_id) is not None:
+                r += cfg.step_success_reward
+            delta = next_sizes[agent_id] - prev_sizes[agent_id]
+            if delta:
+                r += cfg.delta_region_reward * float(delta)
+            if next_state.is_terminal():
+                r += cfg.terminal_score_reward * float(next_state.scores()[agent_id])
+            terminal = next_state.is_terminal()
+
+        act_chosen = actions.get(agent_id)
+        if act_chosen is None:
+            continue
+
+        s = _state_key(state.owner_by_index)
+        a = _action_key(state, act_chosen)
+        seen_states.add(tuple(state.owner_by_index))
+
+        if terminal:
+            target = r
+        else:
+            next_sk = _state_key(next_state.owner_by_index)
+            next_opts = list(next_state.available_sectors())
+            next_aks = [_action_key(next_state, c) for c in next_opts]
+            best_next = _best_action(q, next_sk, next_aks)
+            next_max = 0.0 if best_next is None else q.get(next_sk, {}).get(best_next, 0.0)
+            target = r + cfg.rl_gamma * next_max
+
+        old = q.get(s, {}).get(a, 0.0)
+        new = (1.0 - cfg.rl_alpha) * old + cfg.rl_alpha * float(target)
+        q.setdefault(s, {})[a] = new
+
+
 def _bootstrap_profile_from_q(
     *,
     territory: Territory,
@@ -486,6 +566,28 @@ def solve_hybrid_ne(
             # 1) RL proposal (optional)
             if cfg.rl_episodes_per_iter > 0:
                 rl_t0 = time.perf_counter()
+
+                q_seed: dict[str, dict[str, float]] | None
+                seen_seed: set[StateKey] | None
+                if cfg.rl_persist_q:
+                    q_seed = q_by_agent[a]
+                    seen_seed = seen_states_by_agent[a]
+                else:
+                    q_seed = {}
+                    seen_seed = set()
+
+                if cfg.rl_pretrain_from_smt_base:
+                    _pretrain_q_from_smt_base_trace(
+                        territory=territory,
+                        num_agents=num_agents,
+                        horizon=horizon,
+                        agent_id=a,
+                        sol=base,
+                        cfg=cfg,
+                        q=q_seed if q_seed is not None else {},
+                        seen_states=seen_seed if seen_seed is not None else set(),
+                    )
+
                 proposal, candidates, q_next, seen_states_next = _train_best_response_q(
                     territory=territory,
                     num_agents=num_agents,
@@ -493,8 +595,8 @@ def solve_hybrid_ne(
                     agent_id=a,
                     opponents=policies,
                     cfg=cfg,
-                    q_init=q_by_agent[a] if cfg.rl_persist_q else None,
-                    seen_states_init=seen_states_by_agent[a] if cfg.rl_persist_q else None,
+                    q_init=q_seed,
+                    seen_states_init=seen_seed,
                 )
                 candidates_by_agent[a] = candidates
                 if cfg.rl_persist_q:
