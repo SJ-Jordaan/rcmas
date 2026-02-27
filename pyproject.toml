@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rcmas"
-version = "0.2.0"
-description = "RCMAS monorepo runner CLI"
+version = "1.0.0"
+description = "Region Control Multi-Agent System: SMT-based Nash equilibrium synthesis"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+license = {text = "MIT"}
+dependencies = [
+    "z3-solver",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -16,8 +19,9 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 rcmas = "rcmas.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["rcmas*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
