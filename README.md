@@ -49,6 +49,9 @@ Iterative best-response search for a Nash equilibrium (Algorithm 1).
 ```bash
 rcmas ibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
       --max-iters 25 --progress --timing --timeout-ms 10000
+
+# Enable symmetry-breaking constraints (reduces search space on symmetric grids)
+rcmas ibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
 ```
 
 ### Q-learning-guided IBIS (`qibis`)
@@ -58,6 +61,9 @@ Best-response iterations guided by Q-learning action proposals (Algorithm 2).
 ```bash
 rcmas qibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
       --max-iters 25 --progress --timing --timeout-ms 10000
+
+# With symmetry breaking
+rcmas qibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
 ```
 
 ### Q-learning self-play (`train`)
@@ -113,6 +119,7 @@ Every module in `rcmas/` maps to a section of the paper. The table below gives t
 | Alg 1: IBIS | `ibis.py` | `solve_ibis()` |
 | Sec 5.2: Q-learning | `qlearning.py` | `QTable`, `train_self_play()` |
 | Alg 2: Q-IBIS | `qibis.py` | `solve_qibis()` |
+| Symmetry reduction | `symmetry.py` | `territory_automorphisms()`, `symmetry_info()`, `SymmetryInfo` |
 
 ## Project structure
 
@@ -127,6 +134,7 @@ rcmas/
     ibis.py               # Alg 1:     IBIS (iterative best-response via SMT)
     qlearning.py          # Sec 5.2:   Tabular Q-learning, self-play training
     qibis.py              # Alg 2:     Q-IBIS (Q-learning-guided IBIS)
+    symmetry.py           # Symmetry detection and reduction (automorphisms, orbits)
     cli.py                # Command-line interface
 tests/                    # 186 tests covering every module
 grids/                    # ASCII territory files

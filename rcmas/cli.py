@@ -28,6 +28,7 @@ class RunArgs:
     timeout_ms: int | None
     dump_model: bool
     render: bool
+    symmetry: bool
 
 
 def _render_owner_grid(*, territory: Territory, owner_by_index: tuple[int, ...]) -> str:
@@ -88,6 +89,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     co.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")
     co.add_argument("--render", action="store_true", help="Print ASCII state trace")
     co.add_argument("--dump-model", action="store_true", help="Print model variables")
+    co.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
 
     # ── ibis: Algorithm 1 (IBIS) ──────────────────────────────────
     ibis = sub.add_parser("ibis", help="Nash equilibrium via IBIS (Algorithm 1)")
@@ -97,6 +99,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     ibis.add_argument("--progress", action="store_true", help="Print per-iteration progress")
     ibis.add_argument("--timing", action="store_true", help="Include solve timings")
     ibis.add_argument("--render", action="store_true", help="Print ASCII state trace")
+    ibis.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
 
     # ── qibis: Algorithm 2 (Q-IBIS) ──────────────────────────────
     qibis = sub.add_parser("qibis", help="Q-learning-guided IBIS (Algorithm 2)")
@@ -106,6 +109,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     qibis.add_argument("--progress", action="store_true", help="Print per-iteration progress")
     qibis.add_argument("--timing", action="store_true", help="Include solve timings")
     qibis.add_argument("--render", action="store_true", help="Print ASCII state trace")
+    qibis.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
 
     # ── train: Q-learning self-play (Sec 5.2) ────────────────────
     train = sub.add_parser("train", help="Q-learning self-play training (Sec 5.2)")
@@ -136,6 +140,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         timeout_ms=None if int(timeout_ms_raw) == 0 else int(timeout_ms_raw),
         dump_model=bool(getattr(ns, "dump_model", False)),
         render=bool(getattr(ns, "render", False)),
+        symmetry=bool(getattr(ns, "symmetry", False)),
     )
 
 
@@ -156,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         debug = args.dump_model or args.render
         sol = solve_collective_optimality(
             territory=territory, num_agents=args.agents, horizon=args.horizon, debug=debug,
+            symmetry_breaking=args.symmetry,
         )
         print(f"sat={sol.is_sat} reason={sol.reason}")
         if sol.final_state is not None:
@@ -191,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             territory=territory, num_agents=args.agents, horizon=args.horizon,
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
+            symmetry=args.symmetry,
         )
         print(f"sat={res.is_sat} reason={res.reason}")
         if res.payoff_by_agent is not None:
@@ -208,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = QibisConfig(
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
+            symmetry=args.symmetry,
         )
         res = solve_qibis(territory=territory, num_agents=args.agents, horizon=args.horizon, cfg=cfg)
         print(f"sat={res.is_sat} reason={res.reason}")

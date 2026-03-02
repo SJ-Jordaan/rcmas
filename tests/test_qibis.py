@@ -93,3 +93,48 @@ class TestQibisValidation:
         territory = Territory.from_ascii([".."])
         with pytest.raises(ValueError, match="max_iters"):
             solve_qibis(territory=territory, num_agents=1, horizon=1, cfg=QibisConfig(max_iters=0))
+
+
+# ===================================================================
+# Symmetry integration
+# ===================================================================
+
+class TestQibisSymmetry:
+    def test_qibis_symmetry_bootstrap_sat(self):
+        """2x2, A=2, H=2 with symmetry+bootstrap produces a SAT result."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=50,
+                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=100,
+                rl_top_k_actions=2, timeout_ms=5000, seed=42, symmetry=True,
+            ),
+        )
+        assert res.is_sat
+
+    def test_qibis_symmetry_finds_ne(self):
+        """2x2, A=2, H=2 with symmetry+bootstrap finds NE."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=50,
+                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=100,
+                rl_top_k_actions=2, timeout_ms=5000, seed=42, symmetry=True,
+            ),
+        )
+        assert res.found_ne
+
+    def test_qibis_3x3_symmetry(self):
+        """3x3, A=3, H=3 with symmetry+bootstrap (9 claims = 9 sectors)."""
+        territory = Territory.from_ascii(["...", "...", "..."])
+        res = solve_qibis(
+            territory=territory, num_agents=3, horizon=3,
+            cfg=QibisConfig(
+                max_iters=15, rl_episodes_per_iter=100,
+                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=200,
+                rl_top_k_actions=3, timeout_ms=10000, seed=42, symmetry=True,
+            ),
+        )
+        assert res.is_sat

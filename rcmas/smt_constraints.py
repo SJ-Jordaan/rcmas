@@ -13,6 +13,7 @@ from typing import Any
 from .model import Coord, Territory
 from .smt_variables import SmtVariables
 from .strategy import ActionCandidates, Policy, StateKey
+from .symmetry import SymmetryInfo
 
 
 # ---------------------------------------------------------------------------
@@ -315,3 +316,38 @@ def action_candidates_constraint(
 
                 match_state = And([v.owner[s][t] == state[s] for s in range(S)])
                 opt.add(Implies(match_state, Or([v.action[a][t] == i for i in sorted(allowed_idxs)])))
+
+
+# ---------------------------------------------------------------------------
+# Symmetry-breaking constraints
+# ---------------------------------------------------------------------------
+
+def symmetry_breaking_constraint(
+    opt: Any,
+    v: SmtVariables,
+    sym_info: SymmetryInfo,
+) -> None:
+    """Add symmetry-breaking constraints to prune equivalent solutions.
+
+    Two types of constraint are added:
+
+    1. **Agent lex-leader**: first-round actions are ordered by agent index.
+       ``action[0][0] <= action[1][0] <= ... <= action[A-1][0]``
+       This eliminates agent-permutation symmetry (factor A!).
+
+    2. **Spatial canonicalization**: the first agent's first action is
+       restricted to one canonical representative per territory-automorphism
+       orbit.  This eliminates spatial symmetry (factor |Aut(T)|).
+    """
+    from z3 import Or
+
+    A = v.A
+
+    # Agent lex-leader on round-0 actions
+    for a in range(A - 1):
+        opt.add(v.action[a][0] <= v.action[a + 1][0])
+
+    # Spatial canonicalization: first agent picks from orbit representatives
+    reps = sym_info.representatives
+    if reps:
+        opt.add(Or([v.action[0][0] == r for r in reps]))

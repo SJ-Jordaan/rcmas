@@ -29,6 +29,7 @@ from .strategy import (
     policy_action,
     policy_from_solution,
 )
+from .symmetry import SymmetryInfo, canonical_state, invert_automorphism, symmetry_info
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,7 @@ class QibisConfig:
     progress: bool = False
     timing: bool = False
     seed: int = 0
+    symmetry: bool = False
 
 
 def _log(progress: bool, msg: str) -> None:
@@ -85,6 +87,7 @@ def _evaluate_profile(
         territory=territory, num_agents=num_agents, horizon=horizon,
         objective="sum", fixed_policy_by_agent=tuple(policies),
         require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
+        symmetry_breaking=cfg.symmetry,
     )
 
 
@@ -99,6 +102,7 @@ def _train_best_response_q(
     q_init: dict[str, dict[str, float]] | None = None,
     seen_states_init: set[StateKey] | None = None,
     episodes: int | None = None,
+    sym: SymmetryInfo | None = None,
 ) -> tuple[Policy, ActionCandidates, dict[str, dict[str, float]], set[StateKey]]:
     """Train a single agent's best-response Q-table against fixed opponents."""
     q: dict[str, dict[str, float]] = {} if q_init is None else q_init
@@ -141,10 +145,22 @@ def _train_best_response_q(
                 if rng.random() < eps:
                     act = rng.choice(options)
                 else:
-                    sk = state_key(state.owner_by_index)
-                    aks = [action_key(state, c) for c in options]
-                    best = best_q_action(q, sk, aks)
-                    act = rng.choice(options) if best is None else decode_action(state, best)
+                    if sym is not None:
+                        canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
+                        inv_sigma = invert_automorphism(sigma)
+                        sk = state_key(canon_owner)
+                        canon_aks = [str(sigma[int(action_key(state, c))]) for c in options]
+                        best = best_q_action(q, sk, canon_aks)
+                        if best is None:
+                            act = rng.choice(options)
+                        else:
+                            raw_idx = inv_sigma[int(best)]
+                            act = state.ordered_sectors[raw_idx]
+                    else:
+                        sk = state_key(state.owner_by_index)
+                        aks = [action_key(state, c) for c in options]
+                        best = best_q_action(q, sk, aks)
+                        act = rng.choice(options) if best is None else decode_action(state, best)
                 actions[agent_id] = act
                 try:
                     next_state = evolve(state, actions)
@@ -172,16 +188,27 @@ def _train_best_response_q(
             # Q update
             act_chosen = actions.get(agent_id)
             if act_chosen is not None:
-                s = state_key(state.owner_by_index)
-                a = action_key(state, act_chosen)
+                if sym is not None:
+                    canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
+                    s = state_key(canon_owner)
+                    a = str(sigma[int(action_key(state, act_chosen))])
+                else:
+                    s = state_key(state.owner_by_index)
+                    a = action_key(state, act_chosen)
                 seen_states.add(tuple(state.owner_by_index))
 
                 if terminal:
                     target = r
                 else:
-                    next_sk = state_key(next_state.owner_by_index)
-                    next_opts = list(next_state.available_actions())
-                    next_aks = [action_key(next_state, c) for c in next_opts]
+                    if sym is not None:
+                        next_canon, next_sigma = canonical_state(next_state.owner_by_index, sym.automorphisms)
+                        next_sk = state_key(next_canon)
+                        next_opts = list(next_state.available_actions())
+                        next_aks = [str(next_sigma[int(action_key(next_state, c))]) for c in next_opts]
+                    else:
+                        next_sk = state_key(next_state.owner_by_index)
+                        next_opts = list(next_state.available_actions())
+                        next_aks = [action_key(next_state, c) for c in next_opts]
                     best_next = best_q_action(q, next_sk, next_aks)
                     next_max = 0.0 if best_next is None else q.get(next_sk, {}).get(best_next, 0.0)
                     target = r + cfg.rl_gamma * next_max
@@ -205,14 +232,26 @@ def _train_best_response_q(
             policy[st] = None
             candidates[st] = (None,)
             continue
-        sk = state_key(gs.owner_by_index)
-        aks = [action_key(gs, c) for c in options]
-        topk = top_k_actions(q, sk, aks, k=cfg.rl_top_k_actions)
-        if not topk:
-            policy[st] = options[0]
-            candidates[st] = (options[0],)
-            continue
-        decoded = tuple(decode_action(gs, ak) for ak in topk)
+        if sym is not None:
+            canon_owner, sigma = canonical_state(gs.owner_by_index, sym.automorphisms)
+            inv_sigma = invert_automorphism(sigma)
+            sk = state_key(canon_owner)
+            canon_aks = [str(sigma[int(action_key(gs, c))]) for c in options]
+            topk = top_k_actions(q, sk, canon_aks, k=cfg.rl_top_k_actions)
+            if not topk:
+                policy[st] = options[0]
+                candidates[st] = (options[0],)
+                continue
+            decoded = tuple(gs.ordered_sectors[inv_sigma[int(ak)]] for ak in topk)
+        else:
+            sk = state_key(gs.owner_by_index)
+            aks = [action_key(gs, c) for c in options]
+            topk = top_k_actions(q, sk, aks, k=cfg.rl_top_k_actions)
+            if not topk:
+                policy[st] = options[0]
+                candidates[st] = (options[0],)
+                continue
+            decoded = tuple(decode_action(gs, ak) for ak in topk)
         candidates[st] = decoded
         policy[st] = decoded[0]
 
@@ -229,6 +268,7 @@ def _pretrain_q_from_smt_trace(
     cfg: QibisConfig,
     q: dict[str, dict[str, float]],
     seen_states: set[StateKey],
+    sym: SymmetryInfo | None = None,
 ) -> None:
     """Replay an SMT solution trace into a Q-table."""
     if sol.owner_by_round is None or sol.actions_by_round is None:
@@ -266,16 +306,27 @@ def _pretrain_q_from_smt_trace(
         if act_chosen is None:
             continue
 
-        s = state_key(state.owner_by_index)
-        a = action_key(state, act_chosen)
+        if sym is not None:
+            canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
+            s = state_key(canon_owner)
+            a = str(sigma[int(action_key(state, act_chosen))])
+        else:
+            s = state_key(state.owner_by_index)
+            a = action_key(state, act_chosen)
         seen_states.add(tuple(state.owner_by_index))
 
         if terminal:
             target = r
         else:
-            next_sk = state_key(next_state.owner_by_index)
-            next_opts = list(next_state.available_actions())
-            next_aks = [action_key(next_state, c) for c in next_opts]
+            if sym is not None:
+                next_canon, next_sigma = canonical_state(next_state.owner_by_index, sym.automorphisms)
+                next_sk = state_key(next_canon)
+                next_opts = list(next_state.available_actions())
+                next_aks = [str(next_sigma[int(action_key(next_state, c))]) for c in next_opts]
+            else:
+                next_sk = state_key(next_state.owner_by_index)
+                next_opts = list(next_state.available_actions())
+                next_aks = [action_key(next_state, c) for c in next_opts]
             best_next = best_q_action(q, next_sk, next_aks)
             next_max = 0.0 if best_next is None else q.get(next_sk, {}).get(best_next, 0.0)
             target = r + cfg.rl_gamma * next_max
@@ -291,6 +342,7 @@ def _bootstrap_profile_from_q(
     num_agents: int,
     horizon: int,
     q_by_agent: list[dict[str, dict[str, float]]],
+    sym: SymmetryInfo | None = None,
 ) -> list[Policy]:
     """Derive a collision-free initial policy profile from Q-tables via greedy rollout."""
     policies: list[Policy] = [{} for _ in range(num_agents)]
@@ -304,12 +356,35 @@ def _bootstrap_profile_from_q(
 
         chosen_by_agent: dict[int, Coord | None] = {}
         taken: set[Coord] = set()
+        prev_action_idx = -1
 
         for a in range(num_agents):
-            sk = state_key(state.owner_by_index)
-            aks = [action_key(state, c) for c in options]
-            ranked = top_k_actions(q_by_agent[a], sk, aks, k=len(aks))
-            ranked_coords = [decode_action(state, ak) for ak in ranked] if ranked else list(options)
+            if sym is not None:
+                canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
+                inv_sigma = invert_automorphism(sigma)
+                sk = state_key(canon_owner)
+                canon_aks = [str(sigma[int(action_key(state, c))]) for c in options]
+                ranked = top_k_actions(q_by_agent[a], sk, canon_aks, k=len(canon_aks))
+                if ranked:
+                    ranked_coords = [state.ordered_sectors[inv_sigma[int(ak)]] for ak in ranked]
+                else:
+                    ranked_coords = list(options)
+            else:
+                sk = state_key(state.owner_by_index)
+                aks = [action_key(state, c) for c in options]
+                ranked = top_k_actions(q_by_agent[a], sk, aks, k=len(aks))
+                ranked_coords = [decode_action(state, ak) for ak in ranked] if ranked else list(options)
+
+            # Symmetry-constrained filtering for round 0
+            if sym is not None and rounds == 0:
+                if a == 0:
+                    valid_indices = set(sym.representatives)
+                    ranked_coords = [c for c in ranked_coords
+                                     if territory.index_of(c) in valid_indices]
+                else:
+                    ranked_coords = [c for c in ranked_coords
+                                     if territory.index_of(c) is not None
+                                     and territory.index_of(c) >= prev_action_idx]
 
             pick = None
             for c in ranked_coords:
@@ -320,6 +395,8 @@ def _bootstrap_profile_from_q(
             chosen_by_agent[a] = pick
             if pick is not None:
                 taken.add(pick)
+                if sym is not None and rounds == 0:
+                    prev_action_idx = territory.index_of(pick)
 
         key: StateKey = tuple(state.owner_by_index)
         for a in range(num_agents):
@@ -350,6 +427,8 @@ def solve_qibis(
     if cfg.max_iters <= 0:
         raise ValueError("max_iters must be >= 1")
 
+    sym = symmetry_info(territory) if cfg.symmetry else None
+
     policies: list[Policy] = [{} for _ in range(num_agents)]
     seen_profiles: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
 
@@ -364,7 +443,7 @@ def solve_qibis(
             _, _, q_next, seen_next = _train_best_response_q(
                 territory=territory, num_agents=num_agents, horizon=horizon,
                 agent_id=a, opponents=policies, cfg=cfg,
-                episodes=cfg.rl_bootstrap_episodes,
+                episodes=cfg.rl_bootstrap_episodes, sym=sym,
             )
             q_boot.append(q_next)
             if cfg.rl_persist_q:
@@ -372,7 +451,8 @@ def solve_qibis(
                 seen_states_by_agent[a] = seen_next
 
         policies = _bootstrap_profile_from_q(
-            territory=territory, num_agents=num_agents, horizon=horizon, q_by_agent=q_boot,
+            territory=territory, num_agents=num_agents, horizon=horizon,
+            q_by_agent=q_boot, sym=sym,
         )
         _log(cfg.progress, f"bootstrap policy_sizes={[len(p) for p in policies]}")
 
@@ -426,12 +506,13 @@ def solve_qibis(
                         agent_id=a, sol=base, cfg=cfg,
                         q=q_seed if q_seed is not None else {},
                         seen_states=seen_seed if seen_seed is not None else set(),
+                        sym=sym,
                     )
 
                 proposal, candidates, q_next, seen_states_next = _train_best_response_q(
                     territory=territory, num_agents=num_agents, horizon=horizon,
                     agent_id=a, opponents=policies, cfg=cfg,
-                    q_init=q_seed, seen_states_init=seen_seed,
+                    q_init=q_seed, seen_states_init=seen_seed, sym=sym,
                 )
                 candidates_by_agent[a] = candidates
                 if cfg.rl_persist_q:
@@ -457,6 +538,7 @@ def solve_qibis(
                 action_candidates_by_agent=action_cands,
                 enforce_state_only_for_agents=(a,),
                 require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
+                symmetry_breaking=cfg.symmetry,
             )
             br_dt = time.perf_counter() - br_t0
 

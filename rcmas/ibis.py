@@ -37,6 +37,7 @@ def solve_ibis(
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
+    symmetry: bool = False,
 ) -> IbisResult:
     """Run IBIS: iterative best-response NE search via SMT (Alg 1)."""
 
@@ -65,7 +66,7 @@ def solve_ibis(
             base = solve_smt_game(
                 territory=territory, num_agents=num_agents, horizon=horizon,
                 objective="sum", fixed_policy_by_agent=tuple(policies),
-                require_victory=True, debug=True,
+                require_victory=True, debug=True, symmetry_breaking=symmetry,
             )
             if timing:
                 _log(f"iter={it} final_eval_time_s={time.perf_counter() - iter_t0:.3f}")
@@ -77,6 +78,7 @@ def solve_ibis(
             territory=territory, num_agents=num_agents, horizon=horizon,
             objective="sum", fixed_policy_by_agent=tuple(policies),
             require_victory=True, debug=True, timeout_ms=timeout_ms,
+            symmetry_breaking=symmetry,
         )
         base_dt = time.perf_counter() - base_t0
         if not base.is_sat:
@@ -93,7 +95,7 @@ def solve_ibis(
         best_agent, best_ratio, best_delta, best_learned, best_learned_states = _find_best_improvement(
             territory=territory, num_agents=num_agents, horizon=horizon,
             policies=policies, base_payoff=base_payoff, timeout_ms=timeout_ms,
-            it=it, _log=_log, timing=timing,
+            it=it, _log=_log, timing=timing, symmetry=symmetry,
         )
 
         if best_agent is None or best_learned is None:
@@ -117,6 +119,7 @@ def solve_ibis(
         territory=territory, num_agents=num_agents, horizon=horizon,
         objective="sum", fixed_policy_by_agent=tuple(policies),
         require_victory=True, debug=True, timeout_ms=timeout_ms,
+        symmetry_breaking=symmetry,
     )
     if timing:
         _log(f"done reason=max_iters iterations={max_iters} total_time_s={time.perf_counter() - t0:.3f}")
@@ -135,6 +138,7 @@ def _find_best_improvement(
     it: int,
     _log,
     timing: bool,
+    symmetry: bool = False,
 ) -> tuple[int | None, float, int, Policy | None, int]:
     """Find the single agent with the best unilateral improvement."""
     best_agent: int | None = None
@@ -152,6 +156,7 @@ def _find_best_improvement(
             objective=a, fixed_policy_by_agent=tuple(fixed),
             enforce_state_only_for_agents=(a,),
             require_victory=True, timeout_ms=timeout_ms, debug=True,
+            symmetry_breaking=symmetry,
         )
         br_dt = time.perf_counter() - br_t0
         if not br.is_sat or br.actions_by_round is None or br.payoff_by_agent is None:

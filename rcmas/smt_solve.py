@@ -24,6 +24,7 @@ from .smt_constraints import (
     protocol_constraint,
     reward_constraint,
     size_constraint,
+    symmetry_breaking_constraint,
     victory_constraint,
 )
 from .smt_objectives import qualitative_objective, quantitative_objective
@@ -59,6 +60,7 @@ def solve_collective_optimality(
     num_agents: int,
     horizon: int,
     debug: bool = False,
+    symmetry_breaking: bool = False,
 ) -> SmtSolution:
     """One-shot collective-optimality solve (maximise total payoff)."""
     return solve_smt_game(
@@ -68,6 +70,7 @@ def solve_collective_optimality(
         objective="sum",
         require_victory=False,
         debug=debug,
+        symmetry_breaking=symmetry_breaking,
     )
 
 
@@ -88,6 +91,7 @@ def solve_smt_game(
     require_victory: bool = False,
     debug: bool = False,
     timeout_ms: int | None = None,
+    symmetry_breaking: bool = False,
 ) -> SmtSolution:
     """Generic SMT solve for RCMAS game dynamics.
 
@@ -135,6 +139,11 @@ def solve_smt_game(
 
     if action_candidates_by_agent is not None:
         action_candidates_constraint(opt, v, territory, action_candidates_by_agent)
+
+    if symmetry_breaking:
+        from .symmetry import symmetry_info
+        sym = symmetry_info(territory)
+        symmetry_breaking_constraint(opt, v, sym)
 
     # Objective (Def 24/25)
     if objective == "sum":
