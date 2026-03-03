@@ -41,6 +41,7 @@ class SmtVariables:
     size: list[list[Any]]       # [S][A]
     payoff: list[Any]           # [A]
     neighbors: dict[int, list[int]]
+    weights: tuple[int, ...] | None
 
     def get_adj(self, i: int, j: int, a: int) -> Any:
         lo, hi = (i, j) if i < j else (j, i)
@@ -54,8 +55,24 @@ class SmtVariables:
         return j in self.neighbors[i]
 
 
-def create_variables(territory: Territory, num_agents: int, horizon: int) -> SmtVariables:
-    """Construct all Z3 variables for the RCMAS SMT encoding (Def 15)."""
+def create_variables(
+    territory: Territory,
+    num_agents: int,
+    horizon: int,
+    *,
+    weights: tuple[int, ...] | None = None,
+    custom_neighbors: dict[int, list[int]] | None = None,
+) -> SmtVariables:
+    """Construct all Z3 variables for the RCMAS SMT encoding (Def 15).
+
+    When *weights* is provided, ``SmtVariables.weights`` is set and the
+    size constraint uses weighted sector contributions.
+
+    When *custom_neighbors* is provided, it replaces the default
+    ``neighbors4``-based adjacency.  This is used by the abstract RCMAS
+    encoding where sectors are synthetic coordinates and adjacency is
+    derived from the concrete territory.
+    """
     from z3 import Bool, Int
 
     sectors = territory.ordered_sectors()
@@ -67,13 +84,16 @@ def create_variables(territory: Territory, num_agents: int, horizon: int) -> Smt
     action = [[Int(f"action_{a}_{t}") for t in range(T)] for a in range(A)]
 
     # Physical neighbour map
-    index_by_coord = {c: i for i, c in enumerate(sectors)}
-    neighbors: dict[int, list[int]] = {i: [] for i in range(S)}
-    for i, c in enumerate(sectors):
-        for nb in neighbors4(c):
-            j = index_by_coord.get(nb)
-            if j is not None:
-                neighbors[i].append(j)
+    if custom_neighbors is not None:
+        neighbors = custom_neighbors
+    else:
+        index_by_coord = {c: i for i, c in enumerate(sectors)}
+        neighbors: dict[int, list[int]] = {i: [] for i in range(S)}
+        for i, c in enumerate(sectors):
+            for nb in neighbors4(c):
+                j = index_by_coord.get(nb)
+                if j is not None:
+                    neighbors[i].append(j)
 
     # Adjacency and reachability booleans
     adj: dict[tuple[int, int, int], Any] = {}
@@ -98,4 +118,5 @@ def create_variables(territory: Territory, num_agents: int, horizon: int) -> Smt
         size=size,
         payoff=payoff,
         neighbors=neighbors,
+        weights=weights,
     )

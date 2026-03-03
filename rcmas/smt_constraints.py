@@ -132,14 +132,23 @@ def cohesive_region_constraint(opt: Any, v: SmtVariables) -> None:
 # ---------------------------------------------------------------------------
 
 def size_constraint(opt: Any, v: SmtVariables) -> None:
-    """size[i][a] = number of sectors in the connected region rooted at i for agent a."""
+    """size[i][a] = weighted size of the connected region rooted at i for agent a.
+
+    When ``v.weights`` is ``None`` every sector has unit weight (original
+    behaviour).  Otherwise ``v.weights[i]`` gives the weight of sector *i*
+    and the size sums the weights of connected sectors.
+    """
     from z3 import If, Sum
 
     final_t = v.T
     for i in range(v.S):
+        w_i = v.weights[i] if v.weights is not None else 1
         for a in range(v.A):
-            connections = Sum([If(v.get_cr(i, j, a), 1, 0) for j in range(i + 1, v.S)])
-            opt.add(v.size[i][a] == If(v.owner[i][final_t] == a, 1 + connections, 0))
+            connections = Sum([
+                If(v.get_cr(i, j, a), v.weights[j] if v.weights is not None else 1, 0)
+                for j in range(i + 1, v.S)
+            ])
+            opt.add(v.size[i][a] == If(v.owner[i][final_t] == a, w_i + connections, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +175,25 @@ def victory_constraint(opt: Any, v: SmtVariables) -> None:
     """All sectors must be claimed at the final timestep."""
     for s in range(v.S):
         opt.add(v.owner[s][v.T] != -1)
+
+
+def weight_balance_constraint(opt: Any, v: SmtVariables, target_weight: int) -> None:
+    """Each agent's total owned weight must equal *target_weight* at the final timestep.
+
+    Used by the abstract RCMAS encoding to ensure that each agent's
+    assigned blocks sum to exactly ``|T_concrete| / num_agents`` concrete
+    sectors, preserving the RCMAS demand invariant.
+    """
+    from z3 import If, Sum
+
+    final_t = v.T
+    assert v.weights is not None
+    for a in range(v.A):
+        total = Sum([
+            If(v.owner[s][final_t] == a, v.weights[s], 0)
+            for s in range(v.S)
+        ])
+        opt.add(total == target_weight)
 
 
 def fixed_actions_constraint(

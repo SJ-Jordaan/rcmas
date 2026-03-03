@@ -4,6 +4,7 @@ Subcommands map to paper constructs:
   co    — Collective Optimality (Def 24)
   ibis  — Algorithm 1: IBIS
   qibis — Algorithm 2: Q-IBIS
+  cegar — Algorithm 1 (EUMAS): CEGAR-NE
   train — Q-learning self-play (Sec 5.2)
 """
 
@@ -29,6 +30,7 @@ class RunArgs:
     dump_model: bool
     render: bool
     symmetry: bool
+    partition: str
 
 
 def _render_owner_grid(*, territory: Territory, owner_by_index: tuple[int, ...]) -> str:
@@ -111,6 +113,17 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     qibis.add_argument("--render", action="store_true", help="Print ASCII state trace")
     qibis.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
 
+    # ── cegar: CEGAR-NE (EUMAS Algorithm 1) ─────────────────────
+    cegar = sub.add_parser("cegar", help="CEGAR-NE abstraction refinement (EUMAS Algorithm 1)")
+    _add_common_args(cegar)
+    cegar.add_argument("--partition", choices=["orbit", "discrete"], default="orbit", help="Initial partition type")
+    cegar.add_argument("--max-iters", type=int, default=25, help="Max refinement iterations")
+    cegar.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")
+    cegar.add_argument("--progress", action="store_true", help="Print per-iteration progress")
+    cegar.add_argument("--timing", action="store_true", help="Include solve timings")
+    cegar.add_argument("--render", action="store_true", help="Print ASCII state trace")
+    cegar.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
+
     # ── train: Q-learning self-play (Sec 5.2) ────────────────────
     train = sub.add_parser("train", help="Q-learning self-play training (Sec 5.2)")
     _add_common_args(train)
@@ -141,6 +154,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         dump_model=bool(getattr(ns, "dump_model", False)),
         render=bool(getattr(ns, "render", False)),
         symmetry=bool(getattr(ns, "symmetry", False)),
+        partition=str(getattr(ns, "partition", "orbit")),
     )
 
 
@@ -222,6 +236,26 @@ def main(argv: list[str] | None = None) -> int:
         if res.payoff_by_agent is not None:
             print(f"payoff={res.payoff_by_agent}")
         print(f"iterations={res.iterations} found_ne={res.found_ne}")
+
+        if args.render and res.final_solution is not None:
+            _render_trace(res.final_solution, territory)
+
+        return 0 if res.is_sat else 2
+
+    if args.mode == "cegar":
+        from .cegar import solve_cegar
+
+        res = solve_cegar(
+            territory=territory, num_agents=args.agents, horizon=args.horizon,
+            initial_partition=args.partition,
+            max_iters=args.max_iters, progress=args.progress,
+            timing=args.timing, timeout_ms=timeout_ms,
+            symmetry=args.symmetry,
+        )
+        print(f"sat={res.is_sat} reason={res.reason}")
+        if res.payoff_by_agent is not None:
+            print(f"payoff={res.payoff_by_agent}")
+        print(f"iterations={res.iterations} found_ne={res.found_ne} final_partition_size={res.final_partition_size}")
 
         if args.render and res.final_solution is not None:
             _render_trace(res.final_solution, territory)

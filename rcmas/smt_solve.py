@@ -26,6 +26,7 @@ from .smt_constraints import (
     size_constraint,
     symmetry_breaking_constraint,
     victory_constraint,
+    weight_balance_constraint,
 )
 from .smt_objectives import qualitative_objective, quantitative_objective
 from .smt_variables import SmtVariables, create_variables
@@ -92,6 +93,9 @@ def solve_smt_game(
     debug: bool = False,
     timeout_ms: int | None = None,
     symmetry_breaking: bool = False,
+    weights: tuple[int, ...] | None = None,
+    custom_neighbors: dict[int, list[int]] | None = None,
+    weight_balance_target: int | None = None,
 ) -> SmtSolution:
     """Generic SMT solve for RCMAS game dynamics.
 
@@ -115,7 +119,10 @@ def solve_smt_game(
             raise ValueError("timeout_ms must be > 0")
         opt.set(timeout=timeout_ms)
 
-    v = create_variables(territory, num_agents, horizon)
+    v = create_variables(
+        territory, num_agents, horizon,
+        weights=weights, custom_neighbors=custom_neighbors,
+    )
 
     # Def 16-23: core constraints
     init_constraint(opt, v)
@@ -130,6 +137,9 @@ def solve_smt_game(
     # Optional structural constraints
     if require_victory:
         victory_constraint(opt, v)
+
+    if weight_balance_target is not None:
+        weight_balance_constraint(opt, v, weight_balance_target)
 
     if fixed_actions_by_round is not None:
         fixed_actions_constraint(opt, v, territory, fixed_actions_by_round)
