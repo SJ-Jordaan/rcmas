@@ -8,6 +8,7 @@ from rcmas.model import Coord, Territory
 from rcmas.symmetry import (
     SymmetryInfo,
     canonical_state,
+    demand_classes,
     invert_automorphism,
     orbit_representatives,
     sector_orbits,
@@ -353,3 +354,117 @@ class TestCanonicalState:
             S = len(sigma)
             for i in range(S):
                 assert inv[sigma[i]] == i
+
+
+# ---------------------------------------------------------------------------
+# Demand classes
+# ---------------------------------------------------------------------------
+
+class TestDemandClasses:
+
+    def test_uniform_demands_single_class(self):
+        """All agents with the same demand form one class."""
+        classes = demand_classes((3, 3, 3))
+        assert len(classes) == 1
+        assert classes[0] == [0, 1, 2]
+
+    def test_two_groups(self):
+        """Agents with two distinct demands produce two classes."""
+        classes = demand_classes((2, 2, 5, 5))
+        assert len(classes) == 2
+        # Each class should contain agents with the same demand
+        class_sets = [frozenset(c) for c in classes]
+        assert frozenset({0, 1}) in class_sets
+        assert frozenset({2, 3}) in class_sets
+
+    def test_all_different_demands(self):
+        """Each agent in its own class when all demands differ."""
+        classes = demand_classes((1, 2, 3))
+        assert len(classes) == 3
+        for cls in classes:
+            assert len(cls) == 1
+
+    def test_agents_sorted_within_class(self):
+        """Agent indices within each class should be sorted."""
+        # Demands: agent 0=5, agent 1=3, agent 2=5, agent 3=3
+        classes = demand_classes((5, 3, 5, 3))
+        for cls in classes:
+            assert cls == sorted(cls)
+
+    def test_empty_demands(self):
+        """Empty demands produce no classes."""
+        classes = demand_classes(())
+        assert classes == []
+
+    def test_single_agent(self):
+        """Single agent forms one class."""
+        classes = demand_classes((4,))
+        assert len(classes) == 1
+        assert classes[0] == [0]
+
+
+# ---------------------------------------------------------------------------
+# Demand-class lex-leader constraint
+# ---------------------------------------------------------------------------
+
+class TestDemandClassLexLeader:
+
+    def test_uniform_demands_same_as_global(self, territory_2x2: Territory):
+        """With uniform demands, behaviour matches the global lex-leader."""
+        from rcmas.smt_solve import solve_collective_optimality
+
+        sol_global = solve_collective_optimality(
+            territory=territory_2x2, num_agents=2, horizon=2,
+            debug=True, symmetry_breaking=True,
+        )
+        sol_demand = solve_collective_optimality(
+            territory=territory_2x2, num_agents=2, horizon=2,
+            debug=True, symmetry_breaking=True, demands=(2, 2),
+        )
+        assert sol_global.is_sat and sol_demand.is_sat
+        assert sol_global.payoff_by_agent is not None
+        assert sol_demand.payoff_by_agent is not None
+        assert sum(sol_global.payoff_by_agent) == sum(sol_demand.payoff_by_agent)
+
+    def test_heterogeneous_demands_still_sat(self, territory_2x2: Territory):
+        """Non-uniform demands with symmetry breaking still finds a solution."""
+        from rcmas.smt_solve import solve_collective_optimality
+
+        sol = solve_collective_optimality(
+            territory=territory_2x2, num_agents=2, horizon=2,
+            debug=True, symmetry_breaking=True, demands=(1, 2),
+        )
+        assert sol.is_sat
+
+    def test_demands_none_is_global_lex_leader(self, territory_2x2: Territory):
+        """demands=None should use global lex-leader (backward compatible)."""
+        from rcmas.smt_solve import solve_smt_game
+
+        sol = solve_smt_game(
+            territory=territory_2x2, num_agents=2, horizon=2,
+            objective="sum", debug=True, symmetry_breaking=True,
+            demands=None,
+        )
+        assert sol.is_sat
+
+    def test_all_different_demands_no_agent_constraint(self, territory_3x3: Territory):
+        """All-different demands: no lex-leader constraints, only spatial."""
+        from rcmas.smt_solve import solve_collective_optimality
+
+        # 3 agents on 3x3, all different demands — no agent-permutation
+        # symmetry, but spatial canonicalisation still applies.
+        sol = solve_collective_optimality(
+            territory=territory_3x3, num_agents=3, horizon=3,
+            debug=True, symmetry_breaking=True, demands=(1, 2, 3),
+        )
+        assert sol.is_sat
+
+    def test_ibis_with_demands(self, territory_2x2: Territory):
+        """IBIS with demand classes finds NE or terminates cleanly."""
+        from rcmas.ibis import solve_ibis
+
+        res = solve_ibis(
+            territory=territory_2x2, num_agents=2, horizon=2,
+            max_iters=10, symmetry=True, demands=(2, 2),
+        )
+        assert res.is_sat

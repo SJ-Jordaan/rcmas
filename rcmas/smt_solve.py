@@ -62,6 +62,7 @@ def solve_collective_optimality(
     horizon: int,
     debug: bool = False,
     symmetry_breaking: bool = False,
+    demands: tuple[int, ...] | None = None,
 ) -> SmtSolution:
     """One-shot collective-optimality solve (maximise total payoff)."""
     return solve_smt_game(
@@ -72,6 +73,7 @@ def solve_collective_optimality(
         require_victory=False,
         debug=debug,
         symmetry_breaking=symmetry_breaking,
+        demands=demands,
     )
 
 
@@ -93,6 +95,7 @@ def solve_smt_game(
     debug: bool = False,
     timeout_ms: int | None = None,
     symmetry_breaking: bool = False,
+    demands: tuple[int, ...] | None = None,
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
@@ -153,7 +156,7 @@ def solve_smt_game(
     if symmetry_breaking:
         from .symmetry import symmetry_info
         sym = symmetry_info(territory)
-        symmetry_breaking_constraint(opt, v, sym)
+        symmetry_breaking_constraint(opt, v, sym, demands=demands)
 
     # Objective (Def 24/25)
     if objective == "sum":

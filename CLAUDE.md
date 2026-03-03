@@ -9,7 +9,7 @@ This directory is a git submodule (`github.com/SJ-Jordaan/rcmas`). Commits here 
 
 ```bash
 ./setup.sh    # or: python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest -q     # 254 tests
+pytest -q     # 295 tests
 ```
 
 ## Module map
@@ -19,13 +19,13 @@ pytest -q     # 254 tests
 | `model.py` | Def 1-8 | Territory, State, evolve, adjacency, connected components, scores |
 | `strategy.py` | Def 9-14 | Policy types (StateKey, Policy), reward, freeze/hash, fallback action |
 | `smt_variables.py` | Def 15 | Z3 variable arrays: owner, action, adj, cr, size, payoff |
-| `smt_constraints.py` | Def 16-23 | One function per constraint + structural constraints (fixed policy, candidates, symmetry) |
+| `smt_constraints.py` | Def 16-23 | One function per constraint + structural constraints (fixed policy, candidates, symmetry breaking with demand-class lex-leader) |
 | `smt_objectives.py` | Def 24-25 | Qualitative (sum) and quantitative (individual) objectives |
 | `smt_solve.py` | — | Solver assembly: compose constraints, call Z3, extract solution |
 | `ibis.py` | Alg 1 | Iterative best-response NE search |
 | `qlearning.py` | Sec 5.2 | Tabular Q-learning, self-play trainer, reward shaping |
 | `qibis.py` | Alg 2 | Q-learning-guided IBIS with RL bootstrap |
-| `symmetry.py` | EUMAS Sec 3-4 | Automorphism detection, orbits, canonical states, symmetry constraints |
+| `symmetry.py` | EUMAS Sec 3-4 | Automorphism detection, orbits, canonical states, demand classes (`demand_classes`) |
 | `abstraction.py` | EUMAS Def 8-12 | Partition, AbstractRCMAS, lifting, deviation set, refinement |
 | `cegar.py` | EUMAS Alg 1 | CEGAR-NE loop: abstract → synthesise → lift → verify → refine |
 | `cli.py` | — | CLI entry point: co, ibis, qibis, cegar, train |

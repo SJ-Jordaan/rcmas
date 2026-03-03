@@ -52,6 +52,9 @@ rcmas ibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
 
 # Enable symmetry-breaking constraints (reduces search space on symmetric grids)
 rcmas ibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
+
+# Heterogeneous demands: agents 0,1 need 3 sectors; agents 2,3 need 5 sectors
+rcmas ibis --grid grids/symmetric/4x4.txt --agents 4 --horizon 3 --symmetry --demands 3,3,5,5
 ```
 
 ### Q-learning-guided IBIS (`qibis`)
@@ -64,6 +67,19 @@ rcmas qibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
 
 # With symmetry breaking
 rcmas qibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
+```
+
+### CEGAR-NE abstraction refinement (`cegar`)
+
+Counterexample-guided abstraction refinement for NE synthesis (EUMAS Algorithm 1).
+
+```bash
+rcmas cegar --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 \
+      --partition orbit --max-iters 25 --progress --symmetry
+
+# With heterogeneous demands
+rcmas cegar --grid grids/symmetric/4x4.txt --agents 4 --horizon 3 \
+      --symmetry --demands 3,3,5,5
 ```
 
 ### Q-learning self-play (`train`)
@@ -120,6 +136,13 @@ Every module in `rcmas/` maps to a section of the paper. The table below gives t
 | Sec 5.2: Q-learning | `qlearning.py` | `QTable`, `train_self_play()` |
 | Alg 2: Q-IBIS | `qibis.py` | `solve_qibis()` |
 | Symmetry reduction | `symmetry.py` | `territory_automorphisms()`, `symmetry_info()`, `SymmetryInfo` |
+| Demand classes (EUMAS Def 5) | `symmetry.py` | `demand_classes()` |
+| Lex-leader + spatial canon. (EUMAS Sec 4) | `smt_constraints.py` | `symmetry_breaking_constraint()` |
+| Territory partition (EUMAS Def 8) | `abstraction.py` | `Partition`, `orbit_partition()`, `discrete_partition()` |
+| Abstract RCMAS (EUMAS Def 9) | `abstraction.py` | `AbstractRCMAS`, `build_abstract_rcmas()` |
+| Strategy lifting (EUMAS Def 10) | `abstraction.py` | `lift_strategy()`, `LiftedStrategy` |
+| Refinement (EUMAS Def 12) | `abstraction.py` | `refine_partition()`, `compute_deviation_set()` |
+| CEGAR-NE (EUMAS Alg 1) | `cegar.py` | `solve_cegar()`, `verify_ne()` |
 
 ## Project structure
 
@@ -134,9 +157,11 @@ rcmas/
     ibis.py               # Alg 1:     IBIS (iterative best-response via SMT)
     qlearning.py          # Sec 5.2:   Tabular Q-learning, self-play training
     qibis.py              # Alg 2:     Q-IBIS (Q-learning-guided IBIS)
-    symmetry.py           # Symmetry detection and reduction (automorphisms, orbits)
+    symmetry.py           # Symmetry detection, orbits, demand classes
+    abstraction.py        # Territory partition, abstract RCMAS, lifting, refinement
+    cegar.py              # CEGAR-NE: abstraction-refinement loop for NE synthesis
     cli.py                # Command-line interface
-tests/                    # 186 tests covering every module
+tests/                    # 295 tests covering every module
 grids/                    # ASCII territory files
 pyproject.toml            # Single project configuration
 setup.sh                  # One-command setup script

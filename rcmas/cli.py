@@ -31,6 +31,7 @@ class RunArgs:
     render: bool
     symmetry: bool
     partition: str
+    demands: tuple[int, ...] | None
 
 
 def _render_owner_grid(*, territory: Territory, owner_by_index: tuple[int, ...]) -> str:
@@ -74,11 +75,23 @@ def _render_trace(sol: SmtSolution, territory: Territory) -> None:
             print(f"actions: {action_str}")
 
 
+def _parse_demands(raw: str, num_agents: int) -> tuple[int, ...]:
+    """Parse a comma-separated demand string into a tuple of ints."""
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != num_agents:
+        raise SystemExit(f"--demands requires exactly {num_agents} comma-separated integers, got {len(parts)}")
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        raise SystemExit(f"--demands values must be integers, got: {raw}")
+
+
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     """Add arguments shared by all subcommands."""
     p.add_argument("--grid", required=True, help="Path to an ASCII grid file")
     p.add_argument("--agents", type=int, required=True, help="Number of agents")
     p.add_argument("--horizon", type=int, default=10, help="Time horizon (max rounds)")
+    p.add_argument("--demands", type=str, default=None, help="Comma-separated per-agent demands (e.g. '3,3,5,5')")
 
 
 def _parse_args(argv: list[str] | None = None) -> RunArgs:
@@ -142,6 +155,9 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     if timeout_ms_raw < 0:
         raise SystemExit("--timeout-ms must be >= 0")
 
+    demands_raw = getattr(ns, "demands", None)
+    demands = _parse_demands(demands_raw, ns.agents) if demands_raw is not None else None
+
     return RunArgs(
         mode=ns.command,
         grid_path=ns.grid,
@@ -155,6 +171,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         render=bool(getattr(ns, "render", False)),
         symmetry=bool(getattr(ns, "symmetry", False)),
         partition=str(getattr(ns, "partition", "orbit")),
+        demands=demands,
     )
 
 
@@ -175,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         debug = args.dump_model or args.render
         sol = solve_collective_optimality(
             territory=territory, num_agents=args.agents, horizon=args.horizon, debug=debug,
-            symmetry_breaking=args.symmetry,
+            symmetry_breaking=args.symmetry, demands=args.demands,
         )
         print(f"sat={sol.is_sat} reason={sol.reason}")
         if sol.final_state is not None:
@@ -211,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
             territory=territory, num_agents=args.agents, horizon=args.horizon,
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
-            symmetry=args.symmetry,
+            symmetry=args.symmetry, demands=args.demands,
         )
         print(f"sat={res.is_sat} reason={res.reason}")
         if res.payoff_by_agent is not None:
@@ -229,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = QibisConfig(
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
-            symmetry=args.symmetry,
+            symmetry=args.symmetry, demands=args.demands,
         )
         res = solve_qibis(territory=territory, num_agents=args.agents, horizon=args.horizon, cfg=cfg)
         print(f"sat={res.is_sat} reason={res.reason}")
@@ -250,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             initial_partition=args.partition,
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
-            symmetry=args.symmetry,
+            symmetry=args.symmetry, demands=args.demands,
         )
         print(f"sat={res.is_sat} reason={res.reason}")
         if res.payoff_by_agent is not None:

@@ -354,14 +354,17 @@ def symmetry_breaking_constraint(
     opt: Any,
     v: SmtVariables,
     sym_info: SymmetryInfo,
+    demands: tuple[int, ...] | None = None,
 ) -> None:
     """Add symmetry-breaking constraints to prune equivalent solutions.
 
     Two types of constraint are added:
 
-    1. **Agent lex-leader**: first-round actions are ordered by agent index.
-       ``action[0][0] <= action[1][0] <= ... <= action[A-1][0]``
-       This eliminates agent-permutation symmetry (factor A!).
+    1. **Agent lex-leader**: within each demand class, first-round actions
+       are ordered by agent index.  When *demands* is ``None``, all agents
+       are assumed to share a common demand (global ordering, factor A!).
+       With heterogeneous demands, only agents in the same demand class
+       are interchangeable (factor ∏|C|!).
 
     2. **Spatial canonicalization**: the first agent's first action is
        restricted to one canonical representative per territory-automorphism
@@ -371,9 +374,17 @@ def symmetry_breaking_constraint(
 
     A = v.A
 
-    # Agent lex-leader on round-0 actions
-    for a in range(A - 1):
-        opt.add(v.action[a][0] <= v.action[a + 1][0])
+    # Agent lex-leader on round-0 actions (within demand classes)
+    if demands is None:
+        # Uniform demands assumed — global S_n ordering
+        for a in range(A - 1):
+            opt.add(v.action[a][0] <= v.action[a + 1][0])
+    else:
+        from .symmetry import demand_classes
+
+        for cls in demand_classes(demands):
+            for i in range(len(cls) - 1):
+                opt.add(v.action[cls[i]][0] <= v.action[cls[i + 1]][0])
 
     # Spatial canonicalization: first agent picks from orbit representatives
     reps = sym_info.representatives

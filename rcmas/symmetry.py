@@ -256,6 +256,21 @@ def canonical_state(
     return best_tuple, best_sigma
 
 
+def demand_classes(demands: tuple[int, ...]) -> list[list[int]]:
+    """Partition agent indices into demand classes.
+
+    Agents with the same demand value are grouped together.  Each inner
+    list contains agent indices sorted in ascending order.
+
+    >>> demand_classes((2, 2, 5, 5))
+    [[0, 1], [2, 3]]
+    """
+    groups: dict[int, list[int]] = {}
+    for agent_idx, d in enumerate(demands):
+        groups.setdefault(d, []).append(agent_idx)
+    return [sorted(g) for g in groups.values()]
+
+
 def invert_automorphism(sigma: dict[int, int]) -> dict[int, int]:
     """Return the inverse permutation of *sigma*.
 

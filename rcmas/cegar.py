@@ -55,6 +55,7 @@ def verify_ne(
     lifted_strategy: LiftedStrategy,
     timeout_ms: int | None = None,
     symmetry: bool = False,
+    demands: tuple[int, ...] | None = None,
 ) -> tuple[int | None, SmtSolution | None, tuple[int, ...] | None]:
     """Verify whether a lifted strategy is a Nash equilibrium in the concrete game.
 
@@ -106,6 +107,7 @@ def verify_ne(
             timeout_ms=timeout_ms,
             debug=True,
             symmetry_breaking=symmetry,
+            demands=demands,
         )
 
         if not br.is_sat or br.payoff_by_agent is None:
@@ -135,6 +137,7 @@ def solve_cegar(
     timing: bool = False,
     timeout_ms: int | None = None,
     symmetry: bool = False,
+    demands: tuple[int, ...] | None = None,
 ) -> CegarResult:
     """Run the CEGAR-NE loop (Algorithm 1, EUMAS).
 
@@ -201,6 +204,7 @@ def solve_cegar(
                 timing=timing,
                 timeout_ms=timeout_ms,
                 symmetry=symmetry,
+                demands=demands,
             )
             if timing:
                 _log(f"cegar done reason=concrete_fallback total_time_s={time.perf_counter() - t0:.3f}")
@@ -245,6 +249,7 @@ def solve_cegar(
                 timing=timing,
                 timeout_ms=timeout_ms,
                 symmetry=symmetry,
+                demands=demands,
             )
             if timing:
                 _log(f"cegar done reason=concrete_fallback total_time_s={time.perf_counter() - t0:.3f}")
@@ -273,6 +278,7 @@ def solve_cegar(
             progress=False,
             timeout_ms=timeout_ms,
             symmetry=symmetry,
+            demands=demands,
         )
 
         if timing:
@@ -311,6 +317,7 @@ def solve_cegar(
             lifted_strategy=lifted,
             timeout_ms=timeout_ms,
             symmetry=symmetry,
+            demands=demands,
         )
         if timing:
             _log(f"cegar iter={it} verify_time_s={time.perf_counter() - verify_t0:.3f}")

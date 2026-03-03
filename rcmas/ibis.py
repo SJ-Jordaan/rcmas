@@ -41,6 +41,7 @@ def solve_ibis(
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
+    demands: tuple[int, ...] | None = None,
 ) -> IbisResult:
     """Run IBIS: iterative best-response NE search via SMT (Alg 1)."""
 
@@ -71,6 +72,7 @@ def solve_ibis(
                 objective="sum", fixed_policy_by_agent=tuple(policies),
                 require_victory=True, debug=True, symmetry_breaking=symmetry,
                 weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+                demands=demands,
             )
             if timing:
                 _log(f"iter={it} final_eval_time_s={time.perf_counter() - iter_t0:.3f}")
@@ -84,6 +86,7 @@ def solve_ibis(
             require_victory=True, debug=True, timeout_ms=timeout_ms,
             symmetry_breaking=symmetry,
             weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+            demands=demands,
         )
         base_dt = time.perf_counter() - base_t0
         if not base.is_sat:
@@ -102,6 +105,7 @@ def solve_ibis(
             policies=policies, base_payoff=base_payoff, timeout_ms=timeout_ms,
             it=it, _log=_log, timing=timing, symmetry=symmetry,
             weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+            demands=demands,
         )
 
         if best_agent is None or best_learned is None:
@@ -127,6 +131,7 @@ def solve_ibis(
         require_victory=True, debug=True, timeout_ms=timeout_ms,
         symmetry_breaking=symmetry,
         weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+        demands=demands,
     )
     if timing:
         _log(f"done reason=max_iters iterations={max_iters} total_time_s={time.perf_counter() - t0:.3f}")
@@ -149,6 +154,7 @@ def _find_best_improvement(
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
+    demands: tuple[int, ...] | None = None,
 ) -> tuple[int | None, float, int, Policy | None, int]:
     """Find the single agent with the best unilateral improvement."""
     best_agent: int | None = None
@@ -168,6 +174,7 @@ def _find_best_improvement(
             require_victory=True, timeout_ms=timeout_ms, debug=True,
             symmetry_breaking=symmetry,
             weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+            demands=demands,
         )
         br_dt = time.perf_counter() - br_t0
         if not br.is_sat or br.actions_by_round is None or br.payoff_by_agent is None:

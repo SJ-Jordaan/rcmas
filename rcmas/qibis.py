@@ -65,6 +65,7 @@ class QibisConfig:
     timing: bool = False
     seed: int = 0
     symmetry: bool = False
+    demands: tuple[int, ...] | None = None
 
 
 def _log(progress: bool, msg: str) -> None:
@@ -87,7 +88,7 @@ def _evaluate_profile(
         territory=territory, num_agents=num_agents, horizon=horizon,
         objective="sum", fixed_policy_by_agent=tuple(policies),
         require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
-        symmetry_breaking=cfg.symmetry,
+        symmetry_breaking=cfg.symmetry, demands=cfg.demands,
     )
 
 
@@ -538,7 +539,7 @@ def solve_qibis(
                 action_candidates_by_agent=action_cands,
                 enforce_state_only_for_agents=(a,),
                 require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
-                symmetry_breaking=cfg.symmetry,
+                symmetry_breaking=cfg.symmetry, demands=cfg.demands,
             )
             br_dt = time.perf_counter() - br_t0
 
