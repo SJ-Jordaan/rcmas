@@ -62,6 +62,15 @@ def solve_ibis(
     seen: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
     t0 = time.perf_counter()
 
+    def _solver_policies() -> tuple[Policy | None, ...]:
+        """Convert empty policies to None for solver compatibility.
+
+        An empty dict forces the deterministic default action (which is
+        agent-id-dependent), conflicting with symmetry-breaking constraints.
+        None means unconstrained — the solver picks the action freely.
+        """
+        return tuple(p if p else None for p in policies)
+
     # Build base encoding once — caches expensive constraint expressions (O(S³))
     base_enc = build_base_encoding(
         territory=territory, num_agents=num_agents, horizon=horizon,
@@ -78,7 +87,7 @@ def solve_ibis(
             _log(f"iter={it} cycle_detected")
             base = solve_from_base(
                 base_enc,
-                objective="sum", fixed_policy_by_agent=tuple(policies),
+                objective="sum", fixed_policy_by_agent=_solver_policies(),
                 debug=True,
             )
             if timing:
@@ -89,7 +98,7 @@ def solve_ibis(
         base_t0 = time.perf_counter()
         base = solve_from_base(
             base_enc,
-            objective="sum", fixed_policy_by_agent=tuple(policies),
+            objective="sum", fixed_policy_by_agent=_solver_policies(),
             debug=True, timeout_ms=timeout_ms,
         )
         base_dt = time.perf_counter() - base_t0
@@ -132,7 +141,7 @@ def solve_ibis(
 
     final = solve_from_base(
         base_enc,
-        objective="sum", fixed_policy_by_agent=tuple(policies),
+        objective="sum", fixed_policy_by_agent=_solver_policies(),
         debug=True, timeout_ms=timeout_ms,
     )
     if timing:
@@ -167,7 +176,7 @@ def _find_best_improvement(
     best_learned_states: int = 0
 
     for a in range(num_agents):
-        fixed: list[Policy | None] = [None if other == a else policies[other] for other in range(num_agents)]
+        fixed: list[Policy | None] = [None if other == a else (policies[other] if policies[other] else None) for other in range(num_agents)]
 
         br_t0 = time.perf_counter()
         if base_encoding is not None:

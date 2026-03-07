@@ -125,6 +125,89 @@ def verify_ne(
 # Main CEGAR-NE loop (Algorithm 1)
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True, slots=True)
+class _SynthResult:
+    """Unified result type for IBIS and Q-IBIS when used by CEGAR."""
+
+    is_sat: bool
+    reason: str
+    found_ne: bool
+    iterations: int
+    strategy: tuple[tuple[Coord | None, ...], ...] | None
+    payoff_by_agent: tuple[int, ...] | None
+    final_solution: SmtSolution | None
+
+
+def _run_synthesiser(
+    *,
+    synthesiser: str,
+    territory: Territory,
+    num_agents: int,
+    horizon: int,
+    progress: bool = False,
+    timing: bool = False,
+    timeout_ms: int | None = None,
+    symmetry: bool = False,
+    demands: tuple[int, ...] | None = None,
+    weights: tuple[int, ...] | None = None,
+    custom_neighbors: dict[int, list[int]] | None = None,
+    weight_balance_target: int | None = None,
+) -> _SynthResult:
+    """Dispatch to IBIS or Q-IBIS and return a unified result."""
+    if synthesiser == "ibis":
+        from .ibis import solve_ibis
+
+        res = solve_ibis(
+            territory=territory,
+            num_agents=num_agents,
+            horizon=horizon,
+            progress=progress,
+            timing=timing,
+            timeout_ms=timeout_ms,
+            symmetry=symmetry,
+            demands=demands,
+            weights=weights,
+            custom_neighbors=custom_neighbors,
+            weight_balance_target=weight_balance_target,
+        )
+        return _SynthResult(
+            is_sat=res.is_sat,
+            reason=res.reason,
+            found_ne=res.found_ne,
+            iterations=res.iterations,
+            strategy=res.strategy,
+            payoff_by_agent=res.payoff_by_agent,
+            final_solution=res.final_solution,
+        )
+    elif synthesiser == "qibis":
+        from .qibis import QibisConfig, solve_qibis
+
+        cfg = QibisConfig(
+            progress=progress,
+            timing=timing,
+            timeout_ms=timeout_ms,
+            symmetry=symmetry,
+            demands=demands,
+        )
+        res = solve_qibis(
+            territory=territory,
+            num_agents=num_agents,
+            horizon=horizon,
+            cfg=cfg,
+        )
+        return _SynthResult(
+            is_sat=res.is_sat,
+            reason=res.reason,
+            found_ne=res.found_ne,
+            iterations=res.iterations,
+            strategy=res.strategy,
+            payoff_by_agent=res.payoff_by_agent,
+            final_solution=res.final_solution,
+        )
+    else:
+        raise ValueError(f"unknown synthesiser: {synthesiser!r}")
+
+
 def solve_cegar(
     *,
     territory: Territory,
@@ -154,7 +237,7 @@ def solve_cegar(
         ``"orbit"`` (default) starts from symmetry orbits,
         ``"discrete"`` starts fully refined (skips abstraction).
     synthesiser : str
-        Only ``"ibis"`` is supported.
+        ``"ibis"`` (default) or ``"qibis"``.
     max_iters : int
         Maximum refinement iterations.
     progress : bool
@@ -171,8 +254,8 @@ def solve_cegar(
         if progress:
             print(msg, file=sys.stderr, flush=True)
 
-    if synthesiser != "ibis":
-        raise ValueError("only 'ibis' synthesiser is supported")
+    if synthesiser not in ("ibis", "qibis"):
+        raise ValueError("synthesiser must be 'ibis' or 'qibis'")
 
     # Build initial partition
     if isinstance(initial_partition, str):
@@ -193,10 +276,9 @@ def solve_cegar(
 
         # If partition is fully discrete, fall through to concrete solve
         if len(partition.blocks) >= len(territory):
-            _log(f"cegar iter={it} partition=discrete, falling through to concrete IBIS")
-            from .ibis import solve_ibis
-
-            concrete_result = solve_ibis(
+            _log(f"cegar iter={it} partition=discrete, falling through to concrete {synthesiser}")
+            concrete_result = _run_synthesiser(
+                synthesiser=synthesiser,
                 territory=territory,
                 num_agents=num_agents,
                 horizon=horizon,
@@ -238,10 +320,9 @@ def solve_cegar(
         # If partition is too coarse (fewer blocks than agents), abstract
         # game has zero horizon — fall through to concrete.
         if abstract.horizon < 1:
-            _log(f"cegar iter={it} partition too coarse (blocks={len(partition.blocks)} < agents={num_agents}), falling through to concrete IBIS")
-            from .ibis import solve_ibis as _ibis
-
-            concrete_result = _ibis(
+            _log(f"cegar iter={it} partition too coarse (blocks={len(partition.blocks)} < agents={num_agents}), falling through to concrete {synthesiser}")
+            concrete_result = _run_synthesiser(
+                synthesiser=synthesiser,
                 territory=territory,
                 num_agents=num_agents,
                 horizon=horizon,
@@ -265,10 +346,9 @@ def solve_cegar(
             )
 
         # 2. Synthesise NE on abstract game
-        from .ibis import solve_ibis
-
         concrete_demand = len(territory) // num_agents
-        abstract_result = solve_ibis(
+        abstract_result = _run_synthesiser(
+            synthesiser=synthesiser,
             territory=abstract.territory,
             num_agents=num_agents,
             horizon=abstract.horizon,

@@ -13,7 +13,7 @@ from typing import Any
 from .model import Coord, Territory
 from .smt_variables import SmtVariables
 from .strategy import ActionCandidates, Policy, StateKey
-from .symmetry import SymmetryInfo
+from .symmetry import ComponentInfo, LocalSymmetryInfo, SymmetryInfo
 
 
 # ---------------------------------------------------------------------------
@@ -390,3 +390,151 @@ def symmetry_breaking_constraint(
     reps = sym_info.representatives
     if reps:
         opt.add(Or([v.action[0][0] == r for r in reps]))
+
+
+def local_symmetry_breaking_constraint(
+    opt: Any,
+    v: SmtVariables,
+    local_sym: LocalSymmetryInfo,
+) -> None:
+    """Add conditional local symmetry-breaking constraints (Ch5 §3).
+
+    For each non-identity local automorphism σ_R with problematic boundary
+    pairs BP(σ_R), adds:
+
+        (∧_{(i,j)∈BP} ¬(sec^i_m = sec^j_m ∧ sec^i_m ≠ -1))
+            ⟹ (∀a: act^a_0 ∈ R ⟹ act^a_0 ∈ Reps_R)
+
+    The antecedent checks reward compatibility at the terminal state.
+    The consequent restricts first actions within R to orbit representatives.
+    """
+    from z3 import And, Implies, Not, Or
+
+    A, S = v.A, v.S
+    final_t = v.T
+    reps = set(local_sym.representatives)
+    subregion = local_sym.subregion
+
+    if not reps or not local_sym.boundary_pairs:
+        return
+
+    # Collect all unique boundary pairs across all automorphisms
+    all_bp: set[tuple[int, int]] = set()
+    for bp_set in local_sym.boundary_pairs.values():
+        all_bp.update(bp_set)
+
+    if not all_bp:
+        return
+
+    # Antecedent: no agent spans a problematic boundary pair at terminal state
+    compat_clauses = []
+    for i, j in sorted(all_bp):
+        # ¬(sec^i_m = sec^j_m ∧ sec^i_m ≠ -1)
+        compat_clauses.append(
+            Not(And(v.owner[i][final_t] == v.owner[j][final_t],
+                    v.owner[i][final_t] != -1))
+        )
+    antecedent = And(compat_clauses) if len(compat_clauses) > 1 else compat_clauses[0]
+
+    # Consequent: for each agent, if first action is in R, it must be an orbit rep
+    consequent_clauses = []
+    non_rep_in_r = sorted(subregion - reps)
+    for a in range(A):
+        for s in non_rep_in_r:
+            # act^a_0 ≠ s (forbid non-representative sectors in R)
+            consequent_clauses.append(v.action[a][0] != s)
+
+    if not consequent_clauses:
+        return
+
+    consequent = And(consequent_clauses) if len(consequent_clauses) > 1 else consequent_clauses[0]
+    opt.add(Implies(antecedent, consequent))
+
+
+def disconnected_symmetry_constraint(
+    opt: Any,
+    v: SmtVariables,
+    comp_info: ComponentInfo,
+    demands: tuple[int, ...] | None = None,
+) -> None:
+    """Add symmetry-breaking constraints for disconnected territories (Ch5 §4).
+
+    Three types of constraints:
+    1. Agent lex-leader within demand classes (reuses symmetry_breaking_constraint logic)
+    2. Intra-component spatial canonicalization (orbit reps within each component)
+    3. Inter-component ordering for isomorphic components
+    """
+    from z3 import And, If, Implies, Or
+
+    A = v.A
+
+    # 1. Agent lex-leader (within demand classes)
+    if demands is None:
+        for a in range(A - 1):
+            opt.add(v.action[a][0] <= v.action[a + 1][0])
+    else:
+        from .symmetry import demand_classes
+
+        for cls in demand_classes(demands):
+            for i in range(len(cls) - 1):
+                opt.add(v.action[cls[i]][0] <= v.action[cls[i + 1]][0])
+
+    # 2. Intra-component spatial canonicalization
+    # For each component, restrict first agent's first action in that component
+    # to orbit representatives within that component
+    for comp_idx, comp in enumerate(comp_info.components):
+        reps = set(comp_info.component_representatives[comp_idx])
+        non_rep = sorted(comp - reps)
+        if not non_rep:
+            continue
+        # First agent (agent 0): if action is in this component, must be a rep
+        for s in non_rep:
+            opt.add(v.action[0][0] != s)
+
+    # 3. Inter-component ordering for isomorphic components
+    # For each iso class with ≥2 components, encode:
+    #   agent 0's first action in the lowest-indexed component is preferred.
+    # Sound constraint: for each iso class, the minimum first-round action
+    # (over all agents) in component K_l must be ≤ the minimum in K_l'
+    # when l < l' (under canonical labeling within the component).
+    #
+    # Encoding: for each pair of isomorphic components (K_l, K_l'),
+    # for all agents a, b: (act^a_0 ∈ K_l' ∧ act^b_0 ∈ K_l)
+    #   ⟹ rank_within_component(act^b_0 in K_l) ≤ rank(act^a_0 in K_l')
+    #
+    # Simplified: use the isomorphism witness to map K_l' sector indices
+    # to K_l indices, then compare within the same index space.
+    for iso_class in comp_info.iso_classes:
+        if len(iso_class) < 2:
+            continue
+
+        for idx in range(len(iso_class) - 1):
+            ci_first = iso_class[idx]
+            ci_second = iso_class[idx + 1]
+            comp_first = comp_info.components[ci_first]
+            comp_second = comp_info.components[ci_second]
+
+            # Build rank within each component (position in sorted order)
+            first_sorted = sorted(comp_first)
+            second_sorted = sorted(comp_second)
+            rank_first = {s: r for r, s in enumerate(first_sorted)}
+            rank_second = {s: r for r, s in enumerate(second_sorted)}
+
+            # For all agents a, b:
+            #   (act^a_0 ∈ K_first ∧ act^b_0 ∈ K_second)
+            #   ⟹ rank(act^a_0) ≤ rank(act^b_0)
+            for a in range(A):
+                for b in range(A):
+                    for sf in first_sorted:
+                        rf = rank_first[sf]
+                        for ss in second_sorted:
+                            rs = rank_second[ss]
+                            if rf > rs:
+                                # This pairing violates component ordering
+                                opt.add(
+                                    Implies(
+                                        And(v.action[a][0] == sf,
+                                            v.action[b][0] == ss),
+                                        False
+                                    )
+                                )

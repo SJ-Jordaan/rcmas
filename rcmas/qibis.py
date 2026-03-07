@@ -80,6 +80,16 @@ def _epsilon_for(cfg: QibisConfig, episode: int, total_episodes: int) -> float:
     return cfg.rl_epsilon_start + t * (cfg.rl_epsilon_end - cfg.rl_epsilon_start)
 
 
+def _solver_policies(policies: list[Policy]) -> tuple[Policy | None, ...]:
+    """Convert empty policies to None for solver compatibility.
+
+    An empty dict forces the deterministic default action (which is
+    agent-id-dependent), conflicting with symmetry-breaking constraints.
+    None means unconstrained — the solver picks the action freely.
+    """
+    return tuple(p if p else None for p in policies)
+
+
 def _evaluate_profile(
     territory: Territory, num_agents: int, horizon: int,
     policies: list[Policy], cfg: QibisConfig,
@@ -88,12 +98,12 @@ def _evaluate_profile(
     if base_enc is not None:
         return solve_from_base(
             base_enc,
-            objective="sum", fixed_policy_by_agent=tuple(policies),
+            objective="sum", fixed_policy_by_agent=_solver_policies(policies),
             debug=True, timeout_ms=cfg.timeout_ms,
         )
     return solve_smt_game(
         territory=territory, num_agents=num_agents, horizon=horizon,
-        objective="sum", fixed_policy_by_agent=tuple(policies),
+        objective="sum", fixed_policy_by_agent=_solver_policies(policies),
         require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
         symmetry_breaking=cfg.symmetry, demands=cfg.demands,
     )
@@ -540,7 +550,7 @@ def solve_qibis(
                     _log(cfg.progress, f"iter={it} agent={a} rl_states={len(proposal)}")
 
             # 2) SMT best-response
-            fixed: list[Policy | None] = [None if other == a else policies[other] for other in range(num_agents)]
+            fixed: list[Policy | None] = [None if other == a else (policies[other] if policies[other] else None) for other in range(num_agents)]
             action_cands = None
             cand = candidates_by_agent[a]
             if cand is not None and cfg.rl_top_k_actions > 0:

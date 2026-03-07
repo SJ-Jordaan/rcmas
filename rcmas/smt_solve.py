@@ -22,10 +22,12 @@ from .smt_constraints import (
     adjacency_constraint,
     cohesive_region_constraint,
     collision_constraint,
+    disconnected_symmetry_constraint,
     evolution_constraint,
     fixed_actions_constraint,
     fixed_policy_constraint,
     init_constraint,
+    local_symmetry_breaking_constraint,
     protocol_constraint,
     reward_constraint,
     size_constraint,
@@ -136,9 +138,32 @@ def build_base_encoding(
         weight_balance_constraint(collector, v, weight_balance_target)
 
     if symmetry_breaking:
-        from .symmetry import symmetry_info
-        sym = symmetry_info(territory)
-        symmetry_breaking_constraint(collector, v, sym, demands=demands)
+        from .symmetry import (
+            component_info as _component_info,
+            find_maximal_rectangular_subregions,
+            local_symmetry_info,
+            symmetry_info,
+            territory_connected_components,
+        )
+
+        comps = territory_connected_components(territory)
+        if len(comps) > 1:
+            # Disconnected territory: use component-wise symmetry breaking
+            ci = _component_info(territory)
+            disconnected_symmetry_constraint(collector, v, ci, demands=demands)
+        else:
+            # Connected territory: global + local symmetry
+            sym = symmetry_info(territory)
+            symmetry_breaking_constraint(collector, v, sym, demands=demands)
+
+            # Local symmetry: only useful when global symmetry is trivial
+            # (identity only). Otherwise global constraints already cover it.
+            if len(sym.automorphisms) <= 1:
+                subregions = find_maximal_rectangular_subregions(territory)
+                for sub in subregions:
+                    lsi = local_symmetry_info(territory, sub)
+                    if lsi.boundary_pairs:
+                        local_symmetry_breaking_constraint(collector, v, lsi)
 
     return BaseEncoding(
         variables=v,
@@ -310,9 +335,28 @@ def solve_smt_game(
         action_candidates_constraint(opt, v, territory, action_candidates_by_agent)
 
     if symmetry_breaking:
-        from .symmetry import symmetry_info
-        sym = symmetry_info(territory)
-        symmetry_breaking_constraint(opt, v, sym, demands=demands)
+        from .symmetry import (
+            component_info as _component_info,
+            find_maximal_rectangular_subregions,
+            local_symmetry_info,
+            symmetry_info,
+            territory_connected_components,
+        )
+
+        comps = territory_connected_components(territory)
+        if len(comps) > 1:
+            ci = _component_info(territory)
+            disconnected_symmetry_constraint(opt, v, ci, demands=demands)
+        else:
+            sym = symmetry_info(territory)
+            symmetry_breaking_constraint(opt, v, sym, demands=demands)
+
+            if len(sym.automorphisms) <= 1:
+                subregions = find_maximal_rectangular_subregions(territory)
+                for sub in subregions:
+                    lsi = local_symmetry_info(territory, sub)
+                    if lsi.boundary_pairs:
+                        local_symmetry_breaking_constraint(opt, v, lsi)
 
     # Objective (Def 24/25)
     if objective == "sum":

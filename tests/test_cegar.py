@@ -172,12 +172,12 @@ class TestCegarRefinement:
         assert result.found_ne
 
     def test_invalid_synthesiser_raises(self, territory_2x1: Territory) -> None:
-        with pytest.raises(ValueError, match="only 'ibis'"):
+        with pytest.raises(ValueError, match="'ibis' or 'qibis'"):
             solve_cegar(
                 territory=territory_2x1,
                 num_agents=2,
                 horizon=1,
-                synthesiser="qibis",
+                synthesiser="bogus",
             )
 
     def test_invalid_partition_type_raises(self, territory_2x1: Territory) -> None:

@@ -85,7 +85,6 @@ ASCII text: `.` = playable sector, anything else = wall. Files in `grids/symmetr
 
 ## What's NOT implemented yet
 
-- **Q-IBIS as CEGAR synthesiser**: Q-learning rollouts assume unit weights; only `ibis` supported in `solve_cegar`
 - **Epsilon-NE**: no epsilon parameter in NE checking
 - **No-op/pass action**: agents must claim every round (limits scenarios where A*H > S)
 

@@ -31,6 +31,7 @@ class RunArgs:
     render: bool
     symmetry: bool
     partition: str
+    synthesiser: str
     demands: tuple[int, ...] | None
 
 
@@ -130,6 +131,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     cegar = sub.add_parser("cegar", help="CEGAR-NE abstraction refinement (EUMAS Algorithm 1)")
     _add_common_args(cegar)
     cegar.add_argument("--partition", choices=["orbit", "discrete"], default="orbit", help="Initial partition type")
+    cegar.add_argument("--synthesiser", choices=["ibis", "qibis"], default="ibis", help="NE synthesiser for abstract/concrete games")
     cegar.add_argument("--max-iters", type=int, default=25, help="Max refinement iterations")
     cegar.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")
     cegar.add_argument("--progress", action="store_true", help="Print per-iteration progress")
@@ -171,6 +173,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         render=bool(getattr(ns, "render", False)),
         symmetry=bool(getattr(ns, "symmetry", False)),
         partition=str(getattr(ns, "partition", "orbit")),
+        synthesiser=str(getattr(ns, "synthesiser", "ibis")),
         demands=demands,
     )
 
@@ -265,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         res = solve_cegar(
             territory=territory, num_agents=args.agents, horizon=args.horizon,
             initial_partition=args.partition,
+            synthesiser=args.synthesiser,
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,
             symmetry=args.symmetry, demands=args.demands,
