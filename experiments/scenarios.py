@@ -43,7 +43,9 @@ def _grid(category: str, name: str) -> str:
 
 
 def _feasible_horizons(S: int, n: int) -> int:
-    """Standard horizon: S // n (each agent claims S/n sectors)."""
+    """Horizon = S / n.  Requires S divisible by n (for require_victory)."""
+    if S % n != 0:
+        raise ValueError(f"S={S} not divisible by n={n}")
     return S // n
 
 
@@ -109,7 +111,7 @@ def e2_local_symmetry() -> list[Scenario]:
         ("L-5x5-4.txt", 22, [2, 11]),
         ("L-6x6-6.txt", 30, [2, 3, 5]),
         ("L-6x4-4.txt", 16, [2, 4, 8]),
-        ("T-5x5.txt", 13, [13]),  # S=13 prime, only n=13 or 1
+        # T-5x5.txt has S=13 (prime) — no useful divisor for n>=2 with h>=2
         ("L-8x6-12.txt", 36, [2, 3, 4, 6]),
     ]
 
@@ -191,8 +193,8 @@ def e4_cegar_vs_direct() -> list[Scenario]:
         ("symmetric", "5x5.txt", 25, [5]),
         ("symmetric", "6x4.txt", 24, [2, 3]),
         # Asymmetric grids: orbit = discrete, CEGAR overhead
-        ("asymmetric", "5x5-13.txt", 13, [13]),
-        ("asymmetric", "interesting.txt", 10, [2, 5]),
+        ("asymmetric", "5x5-13.txt", 12, [2, 3, 4]),
+        ("asymmetric", "interesting.txt", 12, [2, 3, 4]),
         # Local symmetry grids
         ("local_symmetry", "L-4x4-2.txt", 14, [2, 7]),
         ("local_symmetry", "L-6x6-6.txt", 30, [2, 3, 5]),
@@ -273,12 +275,14 @@ def e7_scalability() -> list[Scenario]:
     """Increasing grid sizes to find the scalability limits of each approach.
 
     Fixed agent count (n=2), increasing territory size.
-    Tests how each algorithm and feature scales.
+    Only grids where S is divisible by n (so all sectors can be claimed).
     """
     scenarios: list[Scenario] = []
-    # Squares: 3x3, 4x4, 5x5, 6x6 — all with 2 agents
+    # Even-sector grids for n=2: S must be divisible by 2
     grids = [
-        ("3x3.txt", 9), ("4x4.txt", 16), ("5x5.txt", 25), ("6x6.txt", 36),
+        ("3x2.txt", 6), ("4x2.txt", 8), ("4x3.txt", 12),
+        ("4x4.txt", 16), ("5x4.txt", 20), ("6x4.txt", 24),
+        ("6x6.txt", 36),
     ]
     n = 2
     for grid_file, S in grids:
