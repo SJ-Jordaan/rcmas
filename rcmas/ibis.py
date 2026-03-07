@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 from .model import Coord, Territory
-from .smt_solve import SmtSolution, solve_smt_game
+from .smt_solve import BaseEncoding, SmtSolution, build_base_encoding, solve_from_base, solve_smt_game
 from .strategy import Policy, StateKey, freeze_profile, policy_from_solution
 
 
@@ -62,17 +62,24 @@ def solve_ibis(
     seen: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
     t0 = time.perf_counter()
 
+    # Build base encoding once — caches expensive constraint expressions (O(S³))
+    base_enc = build_base_encoding(
+        territory=territory, num_agents=num_agents, horizon=horizon,
+        require_victory=True, symmetry_breaking=symmetry,
+        weights=weights, custom_neighbors=custom_neighbors,
+        weight_balance_target=weight_balance_target,
+        demands=demands,
+    )
+
     for it in range(1, max_iters + 1):
         iter_t0 = time.perf_counter()
         profile_key = freeze_profile(policies)
         if profile_key in seen:
             _log(f"iter={it} cycle_detected")
-            base = solve_smt_game(
-                territory=territory, num_agents=num_agents, horizon=horizon,
+            base = solve_from_base(
+                base_enc,
                 objective="sum", fixed_policy_by_agent=tuple(policies),
-                require_victory=True, debug=True, symmetry_breaking=symmetry,
-                weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
-                demands=demands,
+                debug=True,
             )
             if timing:
                 _log(f"iter={it} final_eval_time_s={time.perf_counter() - iter_t0:.3f}")
@@ -80,13 +87,10 @@ def solve_ibis(
         seen.add(profile_key)
 
         base_t0 = time.perf_counter()
-        base = solve_smt_game(
-            territory=territory, num_agents=num_agents, horizon=horizon,
+        base = solve_from_base(
+            base_enc,
             objective="sum", fixed_policy_by_agent=tuple(policies),
-            require_victory=True, debug=True, timeout_ms=timeout_ms,
-            symmetry_breaking=symmetry,
-            weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
-            demands=demands,
+            debug=True, timeout_ms=timeout_ms,
         )
         base_dt = time.perf_counter() - base_t0
         if not base.is_sat:
@@ -106,6 +110,7 @@ def solve_ibis(
             it=it, _log=_log, timing=timing, symmetry=symmetry,
             weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
             demands=demands,
+            base_encoding=base_enc,
         )
 
         if best_agent is None or best_learned is None:
@@ -125,13 +130,10 @@ def solve_ibis(
         else:
             _log(f"iter={it} updated_profile_states={[len(p) for p in policies]}")
 
-    final = solve_smt_game(
-        territory=territory, num_agents=num_agents, horizon=horizon,
+    final = solve_from_base(
+        base_enc,
         objective="sum", fixed_policy_by_agent=tuple(policies),
-        require_victory=True, debug=True, timeout_ms=timeout_ms,
-        symmetry_breaking=symmetry,
-        weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
-        demands=demands,
+        debug=True, timeout_ms=timeout_ms,
     )
     if timing:
         _log(f"done reason=max_iters iterations={max_iters} total_time_s={time.perf_counter() - t0:.3f}")
@@ -155,6 +157,7 @@ def _find_best_improvement(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
+    base_encoding: BaseEncoding | None = None,
 ) -> tuple[int | None, float, int, Policy | None, int]:
     """Find the single agent with the best unilateral improvement."""
     best_agent: int | None = None
@@ -167,15 +170,23 @@ def _find_best_improvement(
         fixed: list[Policy | None] = [None if other == a else policies[other] for other in range(num_agents)]
 
         br_t0 = time.perf_counter()
-        br = solve_smt_game(
-            territory=territory, num_agents=num_agents, horizon=horizon,
-            objective=a, fixed_policy_by_agent=tuple(fixed),
-            enforce_state_only_for_agents=(a,),
-            require_victory=True, timeout_ms=timeout_ms, debug=True,
-            symmetry_breaking=symmetry,
-            weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
-            demands=demands,
-        )
+        if base_encoding is not None:
+            br = solve_from_base(
+                base_encoding,
+                objective=a, fixed_policy_by_agent=tuple(fixed),
+                enforce_state_only_for_agents=(a,),
+                timeout_ms=timeout_ms, debug=True,
+            )
+        else:
+            br = solve_smt_game(
+                territory=territory, num_agents=num_agents, horizon=horizon,
+                objective=a, fixed_policy_by_agent=tuple(fixed),
+                enforce_state_only_for_agents=(a,),
+                require_victory=True, timeout_ms=timeout_ms, debug=True,
+                symmetry_breaking=symmetry,
+                weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
+                demands=demands,
+            )
         br_dt = time.perf_counter() - br_t0
         if not br.is_sat or br.actions_by_round is None or br.payoff_by_agent is None:
             if timing:

@@ -4,6 +4,11 @@ This module provides :func:`solve_smt_game`, the main entry point for SMT-based
 synthesis.  It composes the constraint functions from :mod:`smt_constraints` and
 the objectives from :mod:`smt_objectives`, invokes Z3, and extracts a
 :class:`SmtSolution` from the model.
+
+For iterative algorithms (IBIS, Q-IBIS), :func:`build_base_encoding` pre-builds
+the expensive constraint expressions once, and :func:`solve_from_base` replays
+them into fresh solver instances per query—avoiding redundant O(S³) expression
+construction on each best-response call.
 """
 
 from __future__ import annotations
@@ -49,6 +54,157 @@ class SmtSolution:
     size_by_seed: tuple[tuple[int, ...], ...] | None = None
     best_seed_by_agent: tuple[int | None, ...] | None = None
     best_region_by_agent: tuple[tuple[Coord, ...] | None, ...] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Incremental solving: constraint caching for iterative algorithms
+# ---------------------------------------------------------------------------
+
+class ConstraintCollector:
+    """Accumulates Z3 constraint expressions for later replay into a solver.
+
+    Duck-types as an ``Optimize`` for the purpose of constraint functions
+    (which only call ``.add()``).
+    """
+
+    __slots__ = ("_constraints",)
+
+    def __init__(self) -> None:
+        self._constraints: list[Any] = []
+
+    def add(self, *args: Any) -> None:
+        self._constraints.extend(args)
+
+    @property
+    def constraints(self) -> list[Any]:
+        return self._constraints
+
+
+@dataclass(frozen=True, slots=True)
+class BaseEncoding:
+    """Pre-built base constraints and variables, reusable across solver calls.
+
+    The Z3 expression trees are Python objects that can be added to any
+    ``Optimize`` instance that shares the same variable references.
+    """
+
+    variables: SmtVariables
+    constraints: list[Any]
+    territory: Territory
+
+
+def build_base_encoding(
+    *,
+    territory: Territory,
+    num_agents: int,
+    horizon: int,
+    require_victory: bool = False,
+    symmetry_breaking: bool = False,
+    demands: tuple[int, ...] | None = None,
+    weights: tuple[int, ...] | None = None,
+    custom_neighbors: dict[int, list[int]] | None = None,
+    weight_balance_target: int | None = None,
+) -> BaseEncoding:
+    """Build variables and base constraints once for reuse across solver calls.
+
+    This is the expensive step—especially the O(S³) cohesive-region constraint.
+    The returned :class:`BaseEncoding` can be passed to :func:`solve_from_base`
+    for each per-agent best-response query without rebuilding expressions.
+    """
+    v = create_variables(
+        territory, num_agents, horizon,
+        weights=weights, custom_neighbors=custom_neighbors,
+    )
+
+    collector = ConstraintCollector()
+
+    # Def 16-23: core constraints
+    init_constraint(collector, v)
+    protocol_constraint(collector, v)
+    collision_constraint(collector, v)
+    evolution_constraint(collector, v)
+    adjacency_constraint(collector, v)
+    cohesive_region_constraint(collector, v)
+    size_constraint(collector, v)
+    reward_constraint(collector, v)
+
+    # Optional structural constraints (stable across queries)
+    if require_victory:
+        victory_constraint(collector, v)
+
+    if weight_balance_target is not None:
+        weight_balance_constraint(collector, v, weight_balance_target)
+
+    if symmetry_breaking:
+        from .symmetry import symmetry_info
+        sym = symmetry_info(territory)
+        symmetry_breaking_constraint(collector, v, sym, demands=demands)
+
+    return BaseEncoding(
+        variables=v,
+        constraints=collector.constraints,
+        territory=territory,
+    )
+
+
+def solve_from_base(
+    base: BaseEncoding,
+    *,
+    objective: str | int = "sum",
+    fixed_policy_by_agent: tuple[Policy | None, ...] | None = None,
+    action_candidates_by_agent: tuple[ActionCandidates | None, ...] | None = None,
+    enforce_state_only_for_agents: tuple[int, ...] = (),
+    debug: bool = False,
+    timeout_ms: int | None = None,
+) -> SmtSolution:
+    """Solve using pre-built base constraints (avoids rebuilding expressions).
+
+    Creates a fresh ``Optimize`` instance, replays the cached base constraints,
+    adds per-query constraints (fixed policies, candidates, objective), and
+    solves.
+    """
+    try:
+        from z3 import Optimize, is_true, sat, unknown
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("z3-solver is required for SMT solving") from e
+
+    v = base.variables
+    territory = base.territory
+
+    opt = Optimize()
+    if timeout_ms is not None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be > 0")
+        opt.set(timeout=timeout_ms)
+
+    # Replay cached base constraints
+    for c in base.constraints:
+        opt.add(c)
+
+    # Per-query constraints
+    if fixed_policy_by_agent is not None:
+        fixed_policy_constraint(opt, v, territory, fixed_policy_by_agent, enforce_state_only_for_agents)
+
+    if action_candidates_by_agent is not None:
+        action_candidates_constraint(opt, v, territory, action_candidates_by_agent)
+
+    # Objective (Def 24/25)
+    if objective == "sum":
+        qualitative_objective(opt, v)
+    elif isinstance(objective, int):
+        quantitative_objective(opt, v, objective)
+    else:
+        raise ValueError("objective must be 'sum' or an agent index")
+
+    # --- Solve ---
+    check_res = opt.check()
+    if check_res != sat:
+        if check_res == unknown:
+            return SmtSolution(False, "unknown", None, None)
+        return SmtSolution(False, "unsat", None, None)
+
+    model = opt.model()
+    return _extract_solution(model, v, territory, v.A, v.T, debug, is_true)
 
 
 # ---------------------------------------------------------------------------

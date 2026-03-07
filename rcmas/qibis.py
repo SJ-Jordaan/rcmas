@@ -19,7 +19,7 @@ from .qlearning import (
     state_key,
     top_k_actions,
 )
-from .smt_solve import SmtSolution, solve_smt_game
+from .smt_solve import BaseEncoding, SmtSolution, build_base_encoding, solve_from_base, solve_smt_game
 from .strategy import (
     ActionCandidates,
     Policy,
@@ -83,7 +83,14 @@ def _epsilon_for(cfg: QibisConfig, episode: int, total_episodes: int) -> float:
 def _evaluate_profile(
     territory: Territory, num_agents: int, horizon: int,
     policies: list[Policy], cfg: QibisConfig,
+    base_enc: BaseEncoding | None = None,
 ) -> SmtSolution:
+    if base_enc is not None:
+        return solve_from_base(
+            base_enc,
+            objective="sum", fixed_policy_by_agent=tuple(policies),
+            debug=True, timeout_ms=cfg.timeout_ms,
+        )
     return solve_smt_game(
         territory=territory, num_agents=num_agents, horizon=horizon,
         objective="sum", fixed_policy_by_agent=tuple(policies),
@@ -457,20 +464,27 @@ def solve_qibis(
         )
         _log(cfg.progress, f"bootstrap policy_sizes={[len(p) for p in policies]}")
 
+    # Build base encoding once — caches expensive constraint expressions (O(S³))
+    base_enc = build_base_encoding(
+        territory=territory, num_agents=num_agents, horizon=horizon,
+        require_victory=True, symmetry_breaking=cfg.symmetry,
+        demands=cfg.demands,
+    )
+
     t0 = time.perf_counter()
 
     for it in range(1, cfg.max_iters + 1):
         iter_t0 = time.perf_counter()
         key = freeze_profile(policies)
         if key in seen_profiles:
-            base = _evaluate_profile(territory, num_agents, horizon, policies, cfg)
+            base = _evaluate_profile(territory, num_agents, horizon, policies, cfg, base_enc)
             if cfg.timing:
                 _log(cfg.progress, f"done reason=cycle iterations={it - 1} total_time_s={time.perf_counter() - t0:.3f}")
             return QibisResult(base.is_sat, "cycle", False, it - 1, base.payoff_by_agent, base, base.actions_by_round)
         seen_profiles.add(key)
 
         base_eval_t0 = time.perf_counter()
-        base = _evaluate_profile(territory, num_agents, horizon, policies, cfg)
+        base = _evaluate_profile(territory, num_agents, horizon, policies, cfg, base_enc)
         base_eval_dt = time.perf_counter() - base_eval_t0
 
         if not base.is_sat:
@@ -533,13 +547,12 @@ def solve_qibis(
                 action_cands = tuple(cand if i == a else None for i in range(num_agents))
 
             br_t0 = time.perf_counter()
-            br = solve_smt_game(
-                territory=territory, num_agents=num_agents, horizon=horizon,
+            br = solve_from_base(
+                base_enc,
                 objective=a, fixed_policy_by_agent=tuple(fixed),
                 action_candidates_by_agent=action_cands,
                 enforce_state_only_for_agents=(a,),
-                require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
-                symmetry_breaking=cfg.symmetry, demands=cfg.demands,
+                debug=True, timeout_ms=cfg.timeout_ms,
             )
             br_dt = time.perf_counter() - br_t0
 
