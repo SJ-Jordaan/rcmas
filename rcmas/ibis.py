@@ -113,6 +113,13 @@ def solve_ibis(
         else:
             _log(f"iter={it} base_payoff={base_payoff}")
 
+        if base.owner_by_round is not None and base.actions_by_round is not None:
+            for a in range(num_agents):
+                if not policies[a]:
+                    policies[a] = policy_from_solution(
+                        base.owner_by_round, base.actions_by_round, a,
+                    )
+
         best_agent, best_ratio, best_delta, best_learned, best_learned_states = _find_best_improvement(
             territory=territory, num_agents=num_agents, horizon=horizon,
             policies=policies, base_payoff=base_payoff, timeout_ms=timeout_ms,
