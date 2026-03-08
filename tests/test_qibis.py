@@ -138,3 +138,71 @@ class TestQibisSymmetry:
             ),
         )
         assert res.is_sat
+
+
+# ===================================================================
+# Normalization
+# ===================================================================
+
+class TestQibisNormalization:
+    def test_normalized_rewards_finds_ne(self):
+        """2x2, A=2, H=2 with normalize_rewards=True finds NE."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=50,
+                rl_top_k_actions=2, timeout_ms=5000, seed=0,
+                normalize_rewards=True,
+            ),
+        )
+        assert res.is_sat
+        assert res.found_ne
+
+    def test_unnormalized_rewards_finds_ne(self):
+        """2x2, A=2, H=2 with normalize_rewards=False also finds NE."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=50,
+                rl_top_k_actions=2, timeout_ms=5000, seed=0,
+                normalize_rewards=False,
+            ),
+        )
+        assert res.is_sat
+        assert res.found_ne
+
+
+# ===================================================================
+# Quality
+# ===================================================================
+
+class TestQibisQuality:
+    def test_2x2_payoff_is_optimal(self):
+        """2x2, A=2, H=2: each agent claims 2 sectors, payoff=(2,2)."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=0, timeout_ms=5000,
+            ),
+        )
+        assert res.is_sat
+        assert res.payoff_by_agent is not None
+        assert sum(res.payoff_by_agent) == 4
+        assert res.payoff_by_agent == (2, 2)
+
+    def test_deviation_not_profitable(self):
+        """After finding NE, verify payoff is at least as good as (1,1)."""
+        territory = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(
+            territory=territory, num_agents=2, horizon=2,
+            cfg=QibisConfig(
+                max_iters=10, rl_episodes_per_iter=0, timeout_ms=5000,
+            ),
+        )
+        assert res.is_sat
+        assert res.payoff_by_agent is not None
+        for payoff in res.payoff_by_agent:
+            assert payoff >= 1

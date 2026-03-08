@@ -11,11 +11,17 @@ import sys
 import time
 from dataclasses import dataclass
 
-from .model import Coord, State, Territory, CollisionError, evolve, largest_region_size, scores
+from .model import Coord, State, Territory, evolve, largest_region_size, scores
 from .qlearning import (
+    _encode_action,
+    _encode_state,
     action_key,
     best_q_action,
+    compute_shaped_reward,
+    compute_truncation_reward,
     decode_action,
+    detect_collisions,
+    epsilon_schedule,
     state_key,
     top_k_actions,
 )
@@ -47,8 +53,8 @@ class QibisResult:
 class QibisConfig:
     max_iters: int = 25
     rl_episodes_per_iter: int = 1000
-    rl_alpha: float = 0.3
-    rl_gamma: float = 0.95
+    rl_alpha: float = 0.1
+    rl_gamma: float = 0.99
     rl_epsilon_start: float = 0.7
     rl_epsilon_end: float = 0.05
     rl_top_k_actions: int = 3
@@ -56,10 +62,11 @@ class QibisConfig:
     rl_pretrain_from_smt_base: bool = True
     rl_bootstrap_initial_profile: bool = True
     rl_bootstrap_episodes: int = 800
-    defeat_penalty: float = 1000.0
-    step_success_reward: float = 1.0
-    delta_region_reward: float = 2.0
-    terminal_score_reward: float = 1.0
+    defeat_penalty: float = 10.0
+    step_success_reward: float = 0.1
+    delta_region_reward: float = 1.0
+    terminal_score_reward: float = 5.0
+    normalize_rewards: bool = True
     timeout_ms: int | None = None
     progress: bool = False
     timing: bool = False
@@ -73,11 +80,61 @@ def _log(progress: bool, msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
 
-def _epsilon_for(cfg: QibisConfig, episode: int, total_episodes: int) -> float:
-    if total_episodes <= 1:
-        return cfg.rl_epsilon_end
-    t = episode / max(1, total_episodes - 1)
-    return cfg.rl_epsilon_start + t * (cfg.rl_epsilon_end - cfg.rl_epsilon_start)
+def _symmetry_filter_round0(
+    options: list[Coord],
+    agent_id: int,
+    num_agents: int,
+    territory: Territory,
+    sym: SymmetryInfo,
+    opponent_actions: dict[int, Coord | None],
+    demands: tuple[int, ...] | None = None,
+) -> list[Coord]:
+    """Filter round-0 actions to respect lex-leader and spatial canon.
+
+    Ensures Q-learning only explores actions compatible with the SMT
+    symmetry-breaking constraints so that the resulting candidates never
+    conflict with lex-leader / spatial canonicalization during solving.
+    """
+    # Determine demand-class membership
+    if demands is None:
+        class_members = list(range(num_agents))
+    else:
+        from .symmetry import demand_classes as _dc
+
+        class_members = next(cls for cls in _dc(demands) if agent_id in cls)
+
+    pos = class_members.index(agent_id)
+
+    # Lex-leader bounds from fixed opponents within the same demand class
+    lower = -1
+    if pos > 0:
+        prev = class_members[pos - 1]
+        c = opponent_actions.get(prev)
+        if c is not None:
+            idx = territory.index_of(c)
+            if idx is not None:
+                lower = idx
+
+    upper = len(territory) + 1
+    if pos < len(class_members) - 1:
+        nxt = class_members[pos + 1]
+        c = opponent_actions.get(nxt)
+        if c is not None:
+            idx = territory.index_of(c)
+            if idx is not None:
+                upper = idx
+
+    # Spatial canonicalization: first agent restricted to orbit representatives
+    reps = set(sym.representatives) if agent_id == 0 else None
+
+    filtered = [
+        c
+        for c in options
+        if (cidx := territory.index_of(c)) is not None
+        and lower <= cidx <= upper
+        and (reps is None or cidx in reps)
+    ]
+    return filtered if filtered else options
 
 
 def _solver_policies(policies: list[Policy]) -> tuple[Policy | None, ...]:
@@ -132,7 +189,7 @@ def _train_best_response_q(
         return {}, {}, q, seen_states
 
     for episode in range(total_episodes):
-        eps = _epsilon_for(cfg, episode, total_episodes)
+        eps = epsilon_schedule(cfg.rl_epsilon_start, cfg.rl_epsilon_end, max(1, total_episodes - 1), episode)
         state = State.initial(territory, num_agents)
         rounds = 0
 
@@ -142,8 +199,6 @@ def _train_best_response_q(
             if state.is_terminal():
                 break
 
-            prev_sizes = [largest_region_size(state, i) for i in range(num_agents)]
-
             actions: dict[int, Coord | None] = {}
             for other in range(num_agents):
                 if other == agent_id:
@@ -151,14 +206,23 @@ def _train_best_response_q(
                 actions[other] = policy_action(opponents[other], state, other)
 
             options = list(state.available_actions())
+            # At round 0 with symmetry, restrict to lex-leader / spatial-
+            # canon compatible actions so the Q-table never learns values
+            # for actions the SMT solver would reject.
+            if sym is not None and rounds == 0:
+                options = _symmetry_filter_round0(
+                    options, agent_id, num_agents, territory, sym,
+                    actions, demands=cfg.demands,
+                )
             if not options:
                 actions[agent_id] = None
-                try:
-                    next_state = evolve(state, actions)
-                    defeated = False
-                except CollisionError:
+                colliders = detect_collisions(actions)
+                if colliders:
                     defeated = True
                     next_state = state
+                else:
+                    next_state = evolve(state, actions)
+                    defeated = False
             else:
                 if rng.random() < eps:
                     act = rng.choice(options)
@@ -180,28 +244,35 @@ def _train_best_response_q(
                         best = best_q_action(q, sk, aks)
                         act = rng.choice(options) if best is None else decode_action(state, best)
                 actions[agent_id] = act
-                try:
-                    next_state = evolve(state, actions)
-                    defeated = False
-                except CollisionError:
+                colliders = detect_collisions(actions)
+                if colliders:
                     defeated = True
                     next_state = state
+                else:
+                    next_state = evolve(state, actions)
+                    defeated = False
 
             # Reward shaping
-            if defeated:
-                r = -cfg.defeat_penalty
-                terminal = True
-            else:
-                next_sizes = [largest_region_size(next_state, i) for i in range(num_agents)]
-                r = 0.0
-                if actions.get(agent_id) is not None:
-                    r += cfg.step_success_reward
-                delta = next_sizes[agent_id] - prev_sizes[agent_id]
-                if delta:
-                    r += cfg.delta_region_reward * float(delta)
-                if next_state.is_terminal():
-                    r += cfg.terminal_score_reward * float(scores(next_state)[agent_id])
-                terminal = next_state.is_terminal()
+            r = compute_shaped_reward(
+                prev_state=state, next_state=next_state, agent_id=agent_id,
+                agent_acted=(actions.get(agent_id) is not None),
+                defeated=defeated, is_collider=(agent_id in colliders),
+                territory_size=len(territory),
+                collision_penalty=cfg.defeat_penalty,
+                step_reward=cfg.step_success_reward,
+                region_growth_reward=cfg.delta_region_reward,
+                terminal_reward=cfg.terminal_score_reward,
+                normalize=cfg.normalize_rewards,
+            )
+
+            will_truncate = (not defeated and not next_state.is_terminal() and rounds + 1 >= horizon)
+            terminal = defeated or next_state.is_terminal() or will_truncate
+            if will_truncate:
+                r += compute_truncation_reward(
+                    next_state, agent_id, len(territory),
+                    terminal_reward=cfg.terminal_score_reward,
+                    normalize=cfg.normalize_rewards,
+                )
 
             # Q update
             act_chosen = actions.get(agent_id)
@@ -296,29 +367,35 @@ def _pretrain_q_from_smt_trace(
         state = State(territory=territory, num_agents=num_agents, owner_by_index=sol.owner_by_round[t], round_index=t)
         actions_step = sol.actions_by_round[t]
         actions: dict[int, Coord | None] = {i: actions_step[i] for i in range(num_agents)}
-        try:
-            next_state = evolve(state, actions)
-            defeated = False
-        except CollisionError:
+
+        colliders = detect_collisions(actions)
+        if colliders:
             defeated = True
             next_state = state
-
-        prev_sizes = [largest_region_size(state, i) for i in range(num_agents)]
-
-        if defeated:
-            r = -cfg.defeat_penalty
-            terminal = True
         else:
-            next_sizes = [largest_region_size(next_state, i) for i in range(num_agents)]
-            r = 0.0
-            if actions.get(agent_id) is not None:
-                r += cfg.step_success_reward
-            delta = next_sizes[agent_id] - prev_sizes[agent_id]
-            if delta:
-                r += cfg.delta_region_reward * float(delta)
-            if next_state.is_terminal():
-                r += cfg.terminal_score_reward * float(scores(next_state)[agent_id])
-            terminal = next_state.is_terminal()
+            next_state = evolve(state, actions)
+            defeated = False
+
+        r = compute_shaped_reward(
+            prev_state=state, next_state=next_state, agent_id=agent_id,
+            agent_acted=(actions.get(agent_id) is not None),
+            defeated=defeated, is_collider=(agent_id in colliders),
+            territory_size=len(territory),
+            collision_penalty=cfg.defeat_penalty,
+            step_reward=cfg.step_success_reward,
+            region_growth_reward=cfg.delta_region_reward,
+            terminal_reward=cfg.terminal_score_reward,
+            normalize=cfg.normalize_rewards,
+        )
+
+        will_truncate = (not defeated and not next_state.is_terminal() and t + 1 >= horizon)
+        terminal = defeated or next_state.is_terminal() or will_truncate
+        if will_truncate:
+            r += compute_truncation_reward(
+                next_state, agent_id, len(territory),
+                terminal_reward=cfg.terminal_score_reward,
+                normalize=cfg.normalize_rewards,
+            )
 
         act_chosen = actions.get(agent_id)
         if act_chosen is None:
@@ -420,10 +497,10 @@ def _bootstrap_profile_from_q(
         for a in range(num_agents):
             policies[a][key] = chosen_by_agent[a]
 
-        try:
-            next_state = evolve(state, chosen_by_agent)
-        except CollisionError:
+        colliders = detect_collisions(chosen_by_agent)
+        if colliders:
             break
+        next_state = evolve(state, chosen_by_agent)
         state = next_state
         rounds += 1
 

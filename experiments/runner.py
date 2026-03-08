@@ -188,6 +188,26 @@ def run_scenario(
 
 
 # ---------------------------------------------------------------------------
+# Parallel helpers
+# ---------------------------------------------------------------------------
+
+def _pool_init() -> None:
+    """Ignore SIGINT in pool workers; the main process handles shutdown."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _run_scenario_task(args: tuple) -> Result:
+    """Picklable wrapper for multiprocessing dispatch."""
+    scenario, run_num, timeout_s = args
+    return run_scenario(scenario, run_num, timeout_s)
+
+
+def _print_result(result: Result) -> None:
+    ne_str = f" NE={result.found_ne}" if result.found_ne is not None else ""
+    print(f" {result.status} ({result.time_s:.1f}s){ne_str}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
 
@@ -198,48 +218,98 @@ def run_batch(
     timeout_s: int = 300,
     output_path: str | None = None,
     progress: bool = True,
+    workers: int = 1,
 ) -> list[Result]:
     """Run all scenarios and collect results.
 
     Results are written incrementally as JSON lines to output_path (if given)
     and also returned as a list.
+
+    When *workers* > 1, scenarios are dispatched across that many processes
+    via ``multiprocessing.Pool``.  Each worker uses its own SIGALRM for
+    per-scenario timeouts, so results are identical to sequential execution.
     """
+    if workers <= 0:
+        workers = os.cpu_count() or 1
+
     total = len(scenarios) * num_runs
     results: list[Result] = []
 
     out = open(output_path, "w") if output_path else None
 
     try:
-        idx = 0
-        for run_num in range(1, num_runs + 1):
-            if progress:
-                print(f"\n=== Run {run_num}/{num_runs} ===", file=sys.stderr)
-
-            for scenario in scenarios:
-                idx += 1
-                if progress:
-                    label = (
-                        f"[{idx}/{total}] {scenario.suite} "
-                        f"{scenario.name}"
-                    )
-                    print(f"  {label} ...", end="", file=sys.stderr, flush=True)
-
-                result = run_scenario(scenario, run_num, timeout_s)
-                results.append(result)
-
-                if out is not None:
-                    out.write(json.dumps(asdict(result)) + "\n")
-                    out.flush()
-
-                if progress:
-                    status = result.status
-                    t = result.time_s
-                    ne = result.found_ne
-                    ne_str = f" NE={ne}" if ne is not None else ""
-                    print(f" {status} ({t:.1f}s){ne_str}", file=sys.stderr)
-
+        if workers == 1:
+            _run_sequential(scenarios, num_runs, timeout_s, total, results, out, progress)
+        else:
+            _run_parallel(scenarios, num_runs, timeout_s, total, results, out, progress, workers)
     finally:
         if out is not None:
             out.close()
 
     return results
+
+
+def _run_sequential(
+    scenarios: list[Scenario],
+    num_runs: int,
+    timeout_s: int,
+    total: int,
+    results: list[Result],
+    out: Any,
+    progress: bool,
+) -> None:
+    idx = 0
+    for run_num in range(1, num_runs + 1):
+        if progress:
+            print(f"\n=== Run {run_num}/{num_runs} ===", file=sys.stderr)
+
+        for scenario in scenarios:
+            idx += 1
+            if progress:
+                label = f"[{idx}/{total}] {scenario.suite} {scenario.name}"
+                print(f"  {label} ...", end="", file=sys.stderr, flush=True)
+
+            result = run_scenario(scenario, run_num, timeout_s)
+            results.append(result)
+
+            if out is not None:
+                out.write(json.dumps(asdict(result)) + "\n")
+                out.flush()
+
+            if progress:
+                _print_result(result)
+
+
+def _run_parallel(
+    scenarios: list[Scenario],
+    num_runs: int,
+    timeout_s: int,
+    total: int,
+    results: list[Result],
+    out: Any,
+    progress: bool,
+    workers: int,
+) -> None:
+    import multiprocessing
+
+    work = [
+        (scenario, run_num, timeout_s)
+        for run_num in range(1, num_runs + 1)
+        for scenario in scenarios
+    ]
+
+    if progress:
+        print(f"\nParallel: {workers} workers, {total} tasks", file=sys.stderr)
+
+    with multiprocessing.Pool(processes=workers, initializer=_pool_init) as pool:
+        for idx, result in enumerate(pool.imap_unordered(_run_scenario_task, work), 1):
+            results.append(result)
+
+            if out is not None:
+                out.write(json.dumps(asdict(result)) + "\n")
+                out.flush()
+
+            if progress:
+                label = f"[{idx}/{total}] {result.suite} {result.name} r{result.run}"
+                print(f"  {label} ...", end="", file=sys.stderr, flush=True)
+                _print_result(result)
