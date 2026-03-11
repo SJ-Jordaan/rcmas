@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 from .model import Coord, Territory
-from .smt_solve import BaseEncoding, SmtSolution, build_base_encoding, solve_from_base, solve_smt_game
+from .smt_solve import BaseEncoding, SmtSolution, build_base_encoding, find_feasible_from_base, solve_from_base, solve_smt_game
 from .strategy import Policy, StateKey, freeze_profile, policy_from_solution
 
 
@@ -100,11 +100,24 @@ def solve_ibis(
         seen.add(profile_key)
 
         base_t0 = time.perf_counter()
-        base = solve_from_base(
-            base_enc,
-            objective="sum", fixed_policy_by_agent=_solver_policies(),
-            debug=True, timeout_ms=timeout_ms,
-        )
+        solver_policies = _solver_policies()
+        all_unconstrained = all(p is None for p in solver_policies)
+        if all_unconstrained:
+            # First iteration: no policies fixed — use Solver (SAT) instead of
+            # Optimize to find ANY feasible strategy quickly.  IBIS will
+            # iteratively improve from whatever starting point we get.
+            _log("using feasible-only solver (no optimisation)")
+            base = find_feasible_from_base(
+                base_enc,
+                fixed_policy_by_agent=solver_policies,
+                debug=True, timeout_ms=timeout_ms,
+            )
+        else:
+            base = solve_from_base(
+                base_enc,
+                objective="sum", fixed_policy_by_agent=solver_policies,
+                debug=True, timeout_ms=timeout_ms,
+            )
         base_dt = time.perf_counter() - base_t0
         if not base.is_sat:
             return IbisResult(False, base.reason, False, it - 1, base.actions_by_round, None, base)

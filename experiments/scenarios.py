@@ -79,7 +79,7 @@ def e1_global_symmetry() -> list[Scenario]:
         for n in agent_counts:
             h = _feasible_horizons(S, n)
             for sym in [False, True]:
-                for alg in ["ibis", "qibis"]:
+                for alg in ["ibis"]:
                     label = f"{grid_file[:-4]}_n{n}_{alg}_sym{sym}"
                     scenarios.append(Scenario(
                         suite="E1", name=label, grid_path=path,
@@ -122,7 +122,7 @@ def e2_local_symmetry() -> list[Scenario]:
             if h < 1:
                 continue
             for sym in [False, True]:
-                for alg in ["ibis", "qibis"]:
+                for alg in ["ibis"]:
                     label = f"{grid_file[:-4]}_n{n}_{alg}_sym{sym}"
                     scenarios.append(Scenario(
                         suite="E2", name=label, grid_path=path,
@@ -162,7 +162,7 @@ def e3_disconnected() -> list[Scenario]:
             if h < 1:
                 continue
             for sym in [False, True]:
-                for alg in ["ibis", "qibis"]:
+                for alg in ["ibis"]:
                     label = f"{grid_file[:-4]}_n{n}_{alg}_sym{sym}"
                     scenarios.append(Scenario(
                         suite="E3", name=label, grid_path=path,
@@ -210,7 +210,7 @@ def e4_cegar_vs_direct() -> list[Scenario]:
             if h < 1:
                 continue
             # Direct algorithms
-            for alg in ["ibis", "qibis"]:
+            for alg in ["ibis"]:
                 label = f"{grid_file[:-4]}_n{n}_{alg}"
                 scenarios.append(Scenario(
                     suite="E4", name=label, grid_path=path,
@@ -255,7 +255,7 @@ def e5_cegar_synthesiser() -> list[Scenario]:
             h = _feasible_horizons(S, n)
             if h < 1:
                 continue
-            for synthesiser in ["cegar-ibis", "cegar-qibis"]:
+            for synthesiser in ["cegar-ibis"]:
                 for partition in ["orbit", "discrete"]:
                     label = f"{grid_file[:-4]}_n{n}_{synthesiser}_{partition}"
                     scenarios.append(Scenario(
@@ -288,7 +288,7 @@ def e7_scalability() -> list[Scenario]:
     for grid_file, S in grids:
         path = _grid("symmetric", grid_file)
         h = _feasible_horizons(S, n)
-        for alg in ["ibis", "qibis", "cegar-ibis", "cegar-qibis"]:
+        for alg in ["ibis", "cegar-ibis"]:
             for sym in [False, True]:
                 label = f"{grid_file[:-4]}_n{n}_{alg}_sym{sym}"
                 scenarios.append(Scenario(

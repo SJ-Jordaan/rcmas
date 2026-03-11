@@ -230,6 +230,53 @@ def check_improvement_from_base(
     return _extract_solution(model, v, territory, v.A, v.T, debug, is_true)
 
 
+def find_feasible_from_base(
+    base: BaseEncoding,
+    *,
+    fixed_policy_by_agent: tuple[Policy | None, ...] | None = None,
+    enforce_state_only_for_agents: tuple[int, ...] = (),
+    debug: bool = False,
+    timeout_ms: int | None = None,
+) -> SmtSolution:
+    """Find any feasible joint strategy without optimisation.
+
+    Uses ``z3.Solver`` (not ``Optimize``) to find a satisfying assignment
+    quickly.  No objective is added — the solver returns the first valid
+    strategy it finds.  This is dramatically faster than :func:`solve_from_base`
+    when policies are unconstrained (e.g. the initial IBIS iteration).
+    """
+    try:
+        from z3 import Solver, is_true, sat, unknown
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("z3-solver is required for SMT solving") from e
+
+    v = base.variables
+    territory = base.territory
+
+    solver = Solver()
+    if timeout_ms is not None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be > 0")
+        solver.set(timeout=timeout_ms)
+
+    # Replay cached base constraints (batched)
+    solver.add(*base.constraints)
+
+    # Per-query constraints
+    if fixed_policy_by_agent is not None:
+        fixed_policy_constraint(solver, v, territory, fixed_policy_by_agent, enforce_state_only_for_agents)
+
+    # --- Solve (satisfiability only — no objective) ---
+    check_res = solver.check()
+    if check_res != sat:
+        if check_res == unknown:
+            return SmtSolution(False, "unknown", None, None)
+        return SmtSolution(False, "unsat", None, None)
+
+    model = solver.model()
+    return _extract_solution(model, v, territory, v.A, v.T, debug, is_true)
+
+
 def solve_from_base(
     base: BaseEncoding,
     *,
