@@ -22,8 +22,7 @@ from .symmetry import ComponentInfo, LocalSymmetryInfo, SymmetryInfo
 
 def init_constraint(opt: Any, v: SmtVariables) -> None:
     """All sectors start unowned at t=0."""
-    for s in range(v.S):
-        opt.add(v.owner[s][0] == -1)
+    opt.add(*[v.owner[s][0] == -1 for s in range(v.S)])
 
 
 # ---------------------------------------------------------------------------
@@ -34,10 +33,12 @@ def evolution_constraint(opt: Any, v: SmtVariables) -> None:
     """Sector ownership evolves: claimed sectors update, others persist."""
     from z3 import If, Sum
 
+    constraints = []
     for t in range(v.T):
         for s in range(v.S):
             claim_sum = Sum([If(v.action[a][t] == s, a + 1, 0) for a in range(v.A)])
-            opt.add(v.owner[s][t + 1] == If(claim_sum == 0, v.owner[s][t], claim_sum - 1))
+            constraints.append(v.owner[s][t + 1] == If(claim_sum == 0, v.owner[s][t], claim_sum - 1))
+    opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -48,20 +49,22 @@ def protocol_constraint(opt: Any, v: SmtVariables) -> None:
     """Actions must target valid sector indices; can only claim unowned sectors."""
     from z3 import And, Implies
 
+    constraints = []
     # Domain: owner in [-1, A-1], action in [0, S-1]
     for s in range(v.S):
         for t in range(v.T + 1):
-            opt.add(And(v.owner[s][t] >= -1, v.owner[s][t] < v.A))
+            constraints.append(And(v.owner[s][t] >= -1, v.owner[s][t] < v.A))
 
     for a in range(v.A):
         for t in range(v.T):
-            opt.add(And(v.action[a][t] >= 0, v.action[a][t] < v.S))
+            constraints.append(And(v.action[a][t] >= 0, v.action[a][t] < v.S))
 
     # Availability: can only claim unowned sectors
     for t in range(v.T):
         for a in range(v.A):
             for s in range(v.S):
-                opt.add(Implies(v.action[a][t] == s, v.owner[s][t] == -1))
+                constraints.append(Implies(v.action[a][t] == s, v.owner[s][t] == -1))
+    opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -70,18 +73,24 @@ def protocol_constraint(opt: Any, v: SmtVariables) -> None:
 
 def collision_constraint(opt: Any, v: SmtVariables) -> None:
     """No two agents may claim the same sector in the same round."""
-    from z3 import If
+    if v.A >= 3:
+        # Distinct's all-different propagator amortises A*(A-1)/2 pairwise
+        # checks into O(A) arc-consistency passes — net win for A >= 3.
+        from z3 import Distinct
 
-    for t in range(v.T):
-        for a1 in range(v.A):
-            for a2 in range(a1 + 1, v.A):
-                opt.add(
-                    If(
-                        v.action[a1][t] >= 0,
-                        If(v.action[a2][t] >= 0, v.action[a1][t] != v.action[a2][t], True),
-                        True,
-                    )
-                )
+        opt.add(*[
+            Distinct([v.action[a][t] for a in range(v.A)])
+            for t in range(v.T)
+        ])
+    else:
+        # For A <= 2, pairwise != is a single constraint per round with no
+        # theory-propagator overhead.
+        opt.add(*[
+            v.action[a1][t] != v.action[a2][t]
+            for t in range(v.T)
+            for a1 in range(v.A)
+            for a2 in range(a1 + 1, v.A)
+        ])
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +102,17 @@ def adjacency_constraint(opt: Any, v: SmtVariables) -> None:
     from z3 import And
 
     final_t = v.T
-    for a in range(v.A):
-        for i in range(v.S):
-            for j in range(i + 1, v.S):
-                opt.add(
-                    v.get_adj(i, j, a) == And(
-                        v.is_phys_adj(i, j),
-                        v.owner[i][final_t] == a,
-                        v.owner[j][final_t] == a,
-                    )
-                )
+    # Only constrain adj variables that exist (physically adjacent pairs)
+    constraints = []
+    for (i, j, a), adj_var in v.adj.items():
+        constraints.append(
+            adj_var == And(
+                v.owner[i][final_t] == a,
+                v.owner[j][final_t] == a,
+            )
+        )
+    if constraints:
+        opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -113,18 +123,38 @@ def cohesive_region_constraint(opt: Any, v: SmtVariables) -> None:
     """cr(i,j,a) iff i and j are in the same connected region owned by a.
 
     Uses interval-based dynamic programming over index span to avoid cycles.
+    Chain terms involving non-adjacent or pruned pairs are eliminated at
+    construction time (get_adj/get_cr return Python False, collapsing terms).
+    Constraints are only generated for cr variables that exist (unpruned).
     """
     from z3 import And, Or
 
+    constraints = []
     for a in range(v.A):
         for span in range(1, v.S):
             for i in range(v.S - span):
                 j = i + span
-                chain_terms = []
+                cr_ij = v.get_cr(i, j, a)
+                # Skip if this cr variable was pruned (unreachable pair)
+                if cr_ij is False:
+                    continue
+                adj_ij = v.get_adj(i, j, a)
+                disjuncts = [adj_ij] if adj_ij is not False else []
                 for k in range(i + 1, j):
-                    chain_terms.append(And(v.get_adj(i, k, a), v.get_cr(k, j, a)))
-                    chain_terms.append(And(v.get_cr(i, k, a), v.get_adj(k, j, a)))
-                opt.add(v.get_cr(i, j, a) == Or([v.get_adj(i, j, a)] + chain_terms))
+                    adj_ik = v.get_adj(i, k, a)
+                    adj_kj = v.get_adj(k, j, a)
+                    cr_kj = v.get_cr(k, j, a)
+                    cr_ik = v.get_cr(i, k, a)
+                    if adj_ik is not False and cr_kj is not False:
+                        disjuncts.append(And(adj_ik, cr_kj))
+                    if cr_ik is not False and adj_kj is not False:
+                        disjuncts.append(And(cr_ik, adj_kj))
+                if disjuncts:
+                    constraints.append(cr_ij == Or(disjuncts))
+                else:
+                    constraints.append(cr_ij == False)
+    if constraints:
+        opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +171,7 @@ def size_constraint(opt: Any, v: SmtVariables) -> None:
     from z3 import If, Sum
 
     final_t = v.T
+    constraints = []
     for i in range(v.S):
         w_i = v.weights[i] if v.weights is not None else 1
         for a in range(v.A):
@@ -148,7 +179,8 @@ def size_constraint(opt: Any, v: SmtVariables) -> None:
                 If(v.get_cr(i, j, a), v.weights[j] if v.weights is not None else 1, 0)
                 for j in range(i + 1, v.S)
             ])
-            opt.add(v.size[i][a] == If(v.owner[i][final_t] == a, w_i + connections, 0))
+            constraints.append(v.size[i][a] == If(v.owner[i][final_t] == a, w_i + connections, 0))
+    opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -159,11 +191,13 @@ def reward_constraint(opt: Any, v: SmtVariables) -> None:
     """payoff[a] = max over all seeds of size[i][a]."""
     from z3 import Or
 
+    constraints = []
     for a in range(v.A):
-        opt.add(v.payoff[a] >= 0)
+        constraints.append(v.payoff[a] >= 0)
         for i in range(v.S):
-            opt.add(v.payoff[a] >= v.size[i][a])
-        opt.add(Or([v.payoff[a] == v.size[i][a] for i in range(v.S)]))
+            constraints.append(v.payoff[a] >= v.size[i][a])
+        constraints.append(Or([v.payoff[a] == v.size[i][a] for i in range(v.S)]))
+    opt.add(*constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +207,7 @@ def reward_constraint(opt: Any, v: SmtVariables) -> None:
 
 def victory_constraint(opt: Any, v: SmtVariables) -> None:
     """All sectors must be claimed at the final timestep."""
-    for s in range(v.S):
-        opt.add(v.owner[s][v.T] != -1)
+    opt.add(*[v.owner[s][v.T] != -1 for s in range(v.S)])
 
 
 def weight_balance_constraint(opt: Any, v: SmtVariables, target_weight: int) -> None:
@@ -183,17 +216,30 @@ def weight_balance_constraint(opt: Any, v: SmtVariables, target_weight: int) -> 
     Used by the abstract RCMAS encoding to ensure that each agent's
     assigned blocks sum to exactly ``|T_concrete| / num_agents`` concrete
     sectors, preserving the RCMAS demand invariant.
-    """
-    from z3 import If, Sum
 
+    Uses Z3's ``PbEq`` (pseudo-boolean equality) for specialised cardinality
+    reasoning when available, falling back to ``Sum``/``If`` otherwise.
+    """
     final_t = v.T
     assert v.weights is not None
-    for a in range(v.A):
-        total = Sum([
-            If(v.owner[s][final_t] == a, v.weights[s], 0)
-            for s in range(v.S)
+
+    try:
+        from z3 import PbEq
+        opt.add(*[
+            PbEq(
+                [(v.owner[s][final_t] == a, v.weights[s]) for s in range(v.S)],
+                target_weight,
+            )
+            for a in range(v.A)
         ])
-        opt.add(total == target_weight)
+    except ImportError:
+        from z3 import If, Sum
+        for a in range(v.A):
+            total = Sum([
+                If(v.owner[s][final_t] == a, v.weights[s], 0)
+                for s in range(v.S)
+            ])
+            opt.add(total == target_weight)
 
 
 def fixed_actions_constraint(

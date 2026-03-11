@@ -37,6 +37,8 @@ def _model_val(m, expr) -> int:
 
 
 def _model_bool(m, expr) -> bool:
+    if isinstance(expr, bool):
+        return expr
     return z3.is_true(m.eval(expr, model_completion=True))
 
 

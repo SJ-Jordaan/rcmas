@@ -72,12 +72,16 @@ def solve_ibis(
         return tuple(p if p else None for p in policies)
 
     # Build base encoding once — caches expensive constraint expressions (O(S³))
+    # For concrete games (no weights), prune cr variables for sector pairs
+    # whose BFS distance exceeds the demand (max_region_size = S // A).
+    mrs = None if weights is not None else len(territory) // num_agents
     base_enc = build_base_encoding(
         territory=territory, num_agents=num_agents, horizon=horizon,
         require_victory=True, symmetry_breaking=symmetry,
         weights=weights, custom_neighbors=custom_neighbors,
         weight_balance_target=weight_balance_target,
         demands=demands,
+        max_region_size=mrs,
     )
 
     for it in range(1, max_iters + 1):

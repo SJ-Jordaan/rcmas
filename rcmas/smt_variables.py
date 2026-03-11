@@ -6,10 +6,29 @@ dynamics over a given territory, agent count, and time horizon.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
 from .model import Coord, Territory, neighbors4
+
+
+def _bfs_distances(S: int, neighbors: dict[int, frozenset[int]]) -> list[list[int]]:
+    """Compute all-pairs shortest-path distances via BFS on the sector graph."""
+    INF = S + 1
+    dist = [[INF] * S for _ in range(S)]
+    for src in range(S):
+        d = dist[src]
+        d[src] = 0
+        queue = deque([src])
+        while queue:
+            u = queue.popleft()
+            nd = d[u] + 1
+            for w in neighbors.get(u, frozenset()):
+                if nd < d[w]:
+                    d[w] = nd
+                    queue.append(w)
+    return dist
 
 
 @dataclass(slots=True)
@@ -27,7 +46,7 @@ class SmtVariables:
         cr: ``cr[(i,j,a)]``  -- reachability (connected-region) indicator
         size: ``size[i][a]`` -- region size rooted at sector *i* for agent *a*
         payoff: ``payoff[a]`` -- largest-region payoff for agent *a*
-        neighbors: physical adjacency map (sector index -> list of neighbour indices)
+        neighbors: physical adjacency map (sector index -> frozenset of neighbour indices)
     """
 
     S: int
@@ -40,16 +59,16 @@ class SmtVariables:
     cr: dict[tuple[int, int, int], Any]
     size: list[list[Any]]       # [S][A]
     payoff: list[Any]           # [A]
-    neighbors: dict[int, list[int]]
+    neighbors: dict[int, frozenset[int]]
     weights: tuple[int, ...] | None
 
     def get_adj(self, i: int, j: int, a: int) -> Any:
         lo, hi = (i, j) if i < j else (j, i)
-        return self.adj[(lo, hi, a)]
+        return self.adj.get((lo, hi, a), False)
 
     def get_cr(self, i: int, j: int, a: int) -> Any:
         lo, hi = (i, j) if i < j else (j, i)
-        return self.cr[(lo, hi, a)]
+        return self.cr.get((lo, hi, a), False)
 
     def is_phys_adj(self, i: int, j: int) -> bool:
         return j in self.neighbors[i]
@@ -62,6 +81,7 @@ def create_variables(
     *,
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
+    max_region_size: int | None = None,
 ) -> SmtVariables:
     """Construct all Z3 variables for the RCMAS SMT encoding (Def 15).
 
@@ -72,6 +92,11 @@ def create_variables(
     ``neighbors4``-based adjacency.  This is used by the abstract RCMAS
     encoding where sectors are synthetic coordinates and adjacency is
     derived from the concrete territory.
+
+    When *max_region_size* is provided, ``cr`` variables are pruned for
+    sector pairs whose BFS shortest path exceeds ``max_region_size - 1``
+    (since they can never belong to the same connected region).  For
+    concrete RCMAS games, ``max_region_size = S // A`` (the demand).
     """
     from z3 import Bool, Int
 
@@ -83,26 +108,44 @@ def create_variables(
     owner = [[Int(f"owner_{s}_{t}") for t in range(T + 1)] for s in range(S)]
     action = [[Int(f"action_{a}_{t}") for t in range(T)] for a in range(A)]
 
-    # Physical neighbour map
+    # Physical neighbour map (frozenset for O(1) membership tests)
     if custom_neighbors is not None:
-        neighbors = custom_neighbors
+        neighbors: dict[int, frozenset[int]] = {
+            k: frozenset(v) for k, v in custom_neighbors.items()
+        }
     else:
         index_by_coord = {c: i for i, c in enumerate(sectors)}
-        neighbors: dict[int, list[int]] = {i: [] for i in range(S)}
+        nb_lists: dict[int, list[int]] = {i: [] for i in range(S)}
         for i, c in enumerate(sectors):
             for nb in neighbors4(c):
                 j = index_by_coord.get(nb)
                 if j is not None:
-                    neighbors[i].append(j)
+                    nb_lists[i].append(j)
+        neighbors = {k: frozenset(v) for k, v in nb_lists.items()}
 
-    # Adjacency and reachability booleans
+    # Adjacency booleans — only for physically adjacent sector pairs
     adj: dict[tuple[int, int, int], Any] = {}
-    cr: dict[tuple[int, int, int], Any] = {}
     for a in range(A):
         for i in range(S):
-            for j in range(i + 1, S):
-                adj[(i, j, a)] = Bool(f"adj_{i}_{j}_{a}")
-                cr[(i, j, a)] = Bool(f"cr_{i}_{j}_{a}")
+            for j in neighbors.get(i, frozenset()):
+                if j > i:
+                    adj[(i, j, a)] = Bool(f"adj_{i}_{j}_{a}")
+
+    # Reachability booleans — prune pairs too far apart when max_region_size
+    # is known (BFS distance + 1 > max_region_size => unreachable).
+    cr: dict[tuple[int, int, int], Any] = {}
+    if max_region_size is not None and max_region_size > 0:
+        dist = _bfs_distances(S, neighbors)
+        for a in range(A):
+            for i in range(S):
+                for j in range(i + 1, S):
+                    if dist[i][j] + 1 <= max_region_size:
+                        cr[(i, j, a)] = Bool(f"cr_{i}_{j}_{a}")
+    else:
+        for a in range(A):
+            for i in range(S):
+                for j in range(i + 1, S):
+                    cr[(i, j, a)] = Bool(f"cr_{i}_{j}_{a}")
 
     # Size and payoff
     size = [[Int(f"size_{i}_{a}") for a in range(A)] for i in range(S)]

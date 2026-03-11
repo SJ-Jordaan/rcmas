@@ -106,6 +106,7 @@ def build_base_encoding(
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
+    max_region_size: int | None = None,
 ) -> BaseEncoding:
     """Build variables and base constraints once for reuse across solver calls.
 
@@ -116,6 +117,7 @@ def build_base_encoding(
     v = create_variables(
         territory, num_agents, horizon,
         weights=weights, custom_neighbors=custom_neighbors,
+        max_region_size=max_region_size,
     )
 
     collector = ConstraintCollector()
@@ -172,6 +174,62 @@ def build_base_encoding(
     )
 
 
+def check_improvement_from_base(
+    base: BaseEncoding,
+    *,
+    agent: int,
+    threshold: int,
+    fixed_policy_by_agent: tuple[Policy | None, ...] | None = None,
+    enforce_state_only_for_agents: tuple[int, ...] = (),
+    debug: bool = True,
+    timeout_ms: int | None = None,
+) -> SmtSolution:
+    """Check whether *agent* can achieve payoff strictly greater than *threshold*.
+
+    Uses ``z3.Solver`` (not ``Optimize``) with a bound constraint instead of
+    an objective.  This is significantly faster than optimisation when we only
+    need to know *if* improvement is possible, not the optimal value.
+
+    Used by :func:`~rcmas.cegar.verify_ne` for NE deviation checks.
+    """
+    try:
+        from z3 import Solver, is_true, sat, unknown
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("z3-solver is required for SMT solving") from e
+
+    v = base.variables
+    territory = base.territory
+
+    if agent < 0 or agent >= v.A:
+        raise ValueError("agent index out of range")
+
+    solver = Solver()
+    if timeout_ms is not None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be > 0")
+        solver.set(timeout=timeout_ms)
+
+    # Replay cached base constraints (batched)
+    solver.add(*base.constraints)
+
+    # Per-query constraints
+    if fixed_policy_by_agent is not None:
+        fixed_policy_constraint(solver, v, territory, fixed_policy_by_agent, enforce_state_only_for_agents)
+
+    # Bound constraint: payoff[agent] > threshold (replaces maximize objective)
+    solver.add(v.payoff[agent] > threshold)
+
+    # --- Solve ---
+    check_res = solver.check()
+    if check_res != sat:
+        if check_res == unknown:
+            return SmtSolution(False, "unknown", None, None)
+        return SmtSolution(False, "unsat", None, None)
+
+    model = solver.model()
+    return _extract_solution(model, v, territory, v.A, v.T, debug, is_true)
+
+
 def solve_from_base(
     base: BaseEncoding,
     *,
@@ -202,9 +260,8 @@ def solve_from_base(
             raise ValueError("timeout_ms must be > 0")
         opt.set(timeout=timeout_ms)
 
-    # Replay cached base constraints
-    for c in base.constraints:
-        opt.add(c)
+    # Replay cached base constraints (batched for reduced FFI overhead)
+    opt.add(*base.constraints)
 
     # Per-query constraints
     if fixed_policy_by_agent is not None:
@@ -303,9 +360,13 @@ def solve_smt_game(
             raise ValueError("timeout_ms must be > 0")
         opt.set(timeout=timeout_ms)
 
+    # For concrete games (no weights), prune cr variables for sector pairs
+    # whose BFS distance exceeds the demand.
+    mrs = None if weights is not None else len(territory) // num_agents
     v = create_variables(
         territory, num_agents, horizon,
         weights=weights, custom_neighbors=custom_neighbors,
+        max_region_size=mrs,
     )
 
     # Def 16-23: core constraints
@@ -446,7 +507,9 @@ def _extract_solution(
         if i == j:
             return True
         lo, hi = (i, j) if i < j else (j, i)
-        val = v.cr[(lo, hi, a)]
+        val = v.cr.get((lo, hi, a))
+        if val is None or val is False:
+            return False
         b_ref = cast(Any, model.eval(val, model_completion=True))
         return is_true(b_ref)
 

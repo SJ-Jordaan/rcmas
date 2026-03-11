@@ -21,7 +21,13 @@ from .abstraction import (
     refine_partition,
 )
 from .model import Coord, Territory
-from .smt_solve import SmtSolution, solve_smt_game
+from .smt_solve import (
+    SmtSolution,
+    build_base_encoding,
+    check_improvement_from_base,
+    solve_from_base,
+    solve_smt_game,
+)
 from .strategy import Policy, policy_from_solution
 
 
@@ -89,34 +95,41 @@ def verify_ne(
         pol = policy_from_solution(owner_by_round, actions_by_round, a)
         policies.append(pol)
 
-    # For each agent: fix opponents, maximise agent's payoff
+    # Build base encoding once — reuse across per-agent deviation checks
+    base_enc = build_base_encoding(
+        territory=territory,
+        num_agents=num_agents,
+        horizon=concrete_horizon,
+        require_victory=True,
+        symmetry_breaking=symmetry,
+        demands=demands,
+        max_region_size=len(territory) // num_agents,
+    )
+
+    # For each agent: check if they can do strictly better than current payoff.
+    # Uses z3.Solver with a bound constraint (not Optimize), which is faster
+    # since we only need to know *if* improvement exists, not the optimal.
     for a in range(num_agents):
         fixed: list[Policy | None] = [
             None if other == a else policies[other]
             for other in range(num_agents)
         ]
 
-        br = solve_smt_game(
-            territory=territory,
-            num_agents=num_agents,
-            horizon=concrete_horizon,
-            objective=a,
+        br = check_improvement_from_base(
+            base_enc,
+            agent=a,
+            threshold=lifted_strategy.payoff_by_agent[a],
             fixed_policy_by_agent=tuple(fixed),
             enforce_state_only_for_agents=(a,),
-            require_victory=True,
             timeout_ms=timeout_ms,
-            debug=True,
-            symmetry_breaking=symmetry,
-            demands=demands,
         )
 
-        if not br.is_sat or br.payoff_by_agent is None:
+        if not br.is_sat:
             continue
 
-        if br.payoff_by_agent[a] > lifted_strategy.payoff_by_agent[a]:
-            # Agent can improve — this is a counterexample
-            assert br.final_state is not None
-            return a, br, br.final_state.owner_by_index
+        # SAT means payoff[a] > threshold — agent can improve
+        assert br.final_state is not None
+        return a, br, br.final_state.owner_by_index
 
     return None, None, None
 

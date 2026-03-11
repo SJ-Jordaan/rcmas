@@ -552,10 +552,12 @@ def solve_qibis(
         _log(cfg.progress, f"bootstrap policy_sizes={[len(p) for p in policies]}")
 
     # Build base encoding once — caches expensive constraint expressions (O(S³))
+    # Prune cr variables for sector pairs whose BFS distance exceeds the demand.
     base_enc = build_base_encoding(
         territory=territory, num_agents=num_agents, horizon=horizon,
         require_victory=True, symmetry_breaking=cfg.symmetry,
         demands=cfg.demands,
+        max_region_size=len(territory) // num_agents,
     )
 
     t0 = time.perf_counter()
