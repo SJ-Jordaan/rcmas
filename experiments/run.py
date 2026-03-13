@@ -77,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
         "--workers", type=int, default=1,
         help="Parallel workers (default: 1 = sequential, 0 = all cores)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from existing output file, skipping completed experiments",
+    )
 
     args = parser.parse_args(argv)
 
@@ -130,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.output,
         progress=not args.no_progress,
         workers=args.workers,
+        resume=args.resume,
     )
 
     # Print analysis

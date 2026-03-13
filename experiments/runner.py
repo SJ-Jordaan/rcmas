@@ -2,6 +2,10 @@
 
 Outputs one JSON line per (scenario, run) to the output file.
 Uses SIGALRM for wall-clock timeouts on Unix.
+
+Supports resumption: when *resume=True*, existing results are loaded from the
+output file and only missing (scenario, run) pairs are executed.  New results
+are appended rather than overwriting.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import signal
 import sys
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from rcmas.model import Territory
@@ -223,6 +228,39 @@ def _print_result(result: Result) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Resume helpers
+# ---------------------------------------------------------------------------
+
+def _result_key(row: dict[str, Any]) -> tuple:
+    """Return the unique key that identifies a (scenario, run) pair."""
+    return (row["suite"], row["name"], row["algorithm"], row["symmetry"],
+            row.get("partition", "orbit"), row["run"])
+
+
+def _load_completed(path: str) -> tuple[set[tuple], list[dict]]:
+    """Load existing results from a JSONL file.
+
+    Returns (completed_keys, rows) where *completed_keys* is the set of
+    ``_result_key`` tuples already present and *rows* is the raw list of
+    parsed dicts (so callers can convert to Result/ResultRow).
+    """
+    completed: set[tuple] = set()
+    rows: list[dict] = []
+    p = Path(path)
+    if not p.exists():
+        return completed, rows
+    with p.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            rows.append(row)
+            completed.add(_result_key(row))
+    return completed, rows
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
 
@@ -234,11 +272,16 @@ def run_batch(
     output_path: str | None = None,
     progress: bool = True,
     workers: int = 1,
+    resume: bool = False,
 ) -> list[Result]:
     """Run all scenarios and collect results.
 
     Results are written incrementally as JSON lines to output_path (if given)
     and also returned as a list.
+
+    When *resume* is True and *output_path* points to an existing file, any
+    (scenario, run) pairs already present in the file are skipped and new
+    results are appended.
 
     When *workers* > 1, scenarios are dispatched across that many processes
     via ``multiprocessing.Pool``.  Each worker uses its own SIGALRM for
@@ -247,21 +290,67 @@ def run_batch(
     if workers <= 0:
         workers = os.cpu_count() or 1
 
-    total = len(scenarios) * num_runs
+    # --- Resume: load existing results and filter work items ---------------
+    completed_keys: set[tuple] = set()
+    prior_results: list[Result] = []
+
+    if resume and output_path:
+        completed_keys, prior_rows = _load_completed(output_path)
+        if completed_keys:
+            prior_results = [Result(**row) for row in prior_rows]
+            if progress:
+                print(
+                    f"Resuming: {len(completed_keys)} results loaded, "
+                    f"skipping completed experiments.",
+                    file=sys.stderr,
+                )
+
+    total_all = len(scenarios) * num_runs
+    total_skip = 0
+
+    # Build filtered work list
+    filtered_scenarios: list[tuple[Scenario, int]] = []
+    for run_num in range(1, num_runs + 1):
+        for scenario in scenarios:
+            key = (scenario.suite, scenario.name, scenario.algorithm,
+                   scenario.symmetry, scenario.partition, run_num)
+            if key in completed_keys:
+                total_skip += 1
+            else:
+                filtered_scenarios.append((scenario, run_num))
+
+    if progress and total_skip > 0:
+        print(
+            f"Skipping {total_skip}/{total_all} already completed. "
+            f"Running {len(filtered_scenarios)} remaining.",
+            file=sys.stderr,
+        )
+
+    if not filtered_scenarios:
+        if progress:
+            print("All experiments already completed.", file=sys.stderr)
+        return prior_results
+
+    total = len(filtered_scenarios)
     results: list[Result] = []
 
-    out = open(output_path, "w") if output_path else None
+    # Open in append mode when resuming, write mode otherwise
+    if output_path:
+        mode = "a" if resume and completed_keys else "w"
+        out = open(output_path, mode)
+    else:
+        out = None
 
     try:
         if workers == 1:
-            _run_sequential(scenarios, num_runs, timeout_s, total, results, out, progress)
+            _run_sequential_filtered(filtered_scenarios, timeout_s, total, results, out, progress)
         else:
-            _run_parallel(scenarios, num_runs, timeout_s, total, results, out, progress, workers)
+            _run_parallel_filtered(filtered_scenarios, timeout_s, total, results, out, progress, workers)
     finally:
         if out is not None:
             out.close()
 
-    return results
+    return prior_results + results
 
 
 def _run_sequential(
@@ -295,6 +384,30 @@ def _run_sequential(
                 _print_result(result)
 
 
+def _run_sequential_filtered(
+    work: list[tuple[Scenario, int]],
+    timeout_s: int,
+    total: int,
+    results: list[Result],
+    out: Any,
+    progress: bool,
+) -> None:
+    for idx, (scenario, run_num) in enumerate(work, 1):
+        if progress:
+            label = f"[{idx}/{total}] {scenario.suite} {scenario.name} r{run_num}"
+            print(f"  {label} ...", end="", file=sys.stderr, flush=True)
+
+        result = run_scenario(scenario, run_num, timeout_s)
+        results.append(result)
+
+        if out is not None:
+            out.write(json.dumps(asdict(result)) + "\n")
+            out.flush()
+
+        if progress:
+            _print_result(result)
+
+
 def _run_parallel(
     scenarios: list[Scenario],
     num_runs: int,
@@ -318,6 +431,36 @@ def _run_parallel(
 
     with multiprocessing.Pool(processes=workers, initializer=_pool_init) as pool:
         for idx, result in enumerate(pool.imap_unordered(_run_scenario_task, work), 1):
+            results.append(result)
+
+            if out is not None:
+                out.write(json.dumps(asdict(result)) + "\n")
+                out.flush()
+
+            if progress:
+                label = f"[{idx}/{total}] {result.suite} {result.name} r{result.run}"
+                print(f"  {label} ...", end="", file=sys.stderr, flush=True)
+                _print_result(result)
+
+
+def _run_parallel_filtered(
+    work: list[tuple[Scenario, int]],
+    timeout_s: int,
+    total: int,
+    results: list[Result],
+    out: Any,
+    progress: bool,
+    workers: int,
+) -> None:
+    import multiprocessing
+
+    pool_work = [(scenario, run_num, timeout_s) for scenario, run_num in work]
+
+    if progress:
+        print(f"\nParallel: {workers} workers, {total} tasks", file=sys.stderr)
+
+    with multiprocessing.Pool(processes=workers, initializer=_pool_init) as pool:
+        for idx, result in enumerate(pool.imap_unordered(_run_scenario_task, pool_work), 1):
             results.append(result)
 
             if out is not None:
