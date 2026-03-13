@@ -44,12 +44,13 @@ class Config:
 
 
 CONFIGS = [
+    # S-IBIS only — IBIS results already collected in logs/
     # 8x8, 8 agents, h=8 — the main event
-    Config("8x8_n8_ibis_symOFF", os.path.join(GRIDS, "8x8.txt"), 8, 8, "ibis", False),
-    Config("8x8_n8_ibis_symON",  os.path.join(GRIDS, "8x8.txt"), 8, 8, "ibis", True),
+    Config("8x8_n8_sibis_symOFF", os.path.join(GRIDS, "8x8.txt"), 8, 8, "sibis", False),
+    Config("8x8_n8_sibis_symON",  os.path.join(GRIDS, "8x8.txt"), 8, 8, "sibis", True),
     # 6x6, 6 agents, h=6 — calibration
-    Config("6x6_n6_ibis_symOFF", os.path.join(GRIDS, "6x6.txt"), 6, 6, "ibis", False),
-    Config("6x6_n6_ibis_symON",  os.path.join(GRIDS, "6x6.txt"), 6, 6, "ibis", True),
+    Config("6x6_n6_sibis_symOFF", os.path.join(GRIDS, "6x6.txt"), 6, 6, "sibis", False),
+    Config("6x6_n6_sibis_symON",  os.path.join(GRIDS, "6x6.txt"), 6, 6, "sibis", True),
 ]
 
 
@@ -115,6 +116,18 @@ def _run_config(cfg: Config) -> dict[str, Any]:
         if cfg.algorithm == "ibis":
             from rcmas.ibis import solve_ibis
             res = solve_ibis(
+                territory=territory,
+                num_agents=cfg.num_agents,
+                horizon=cfg.horizon,
+                max_iters=max_iters,
+                symmetry=cfg.symmetry,
+                timeout_ms=timeout_ms,
+                progress=True,
+                timing=True,
+            )
+        elif cfg.algorithm == "sibis":
+            from rcmas.ibis import solve_sibis
+            res = solve_sibis(
                 territory=territory,
                 num_agents=cfg.num_agents,
                 horizon=cfg.horizon,

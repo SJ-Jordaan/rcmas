@@ -166,14 +166,13 @@ def e6_random_scenarios(
             horizon = S // n
             if horizon < 2:
                 continue
-            for alg in ["ibis", "qibis", "cegar-ibis"]:
-                for sym in [False, True]:
-                    scenarios.append(Scenario(
-                        suite="E6", name=f"{name}_n{n}_{alg}_sym{sym}",
-                        grid_path=path, num_agents=n, horizon=horizon,
-                        algorithm=alg, symmetry=sym,
-                        description=f"Random connected: {name}, n={n}",
-                    ))
+            for sym in [False, True]:
+                scenarios.append(Scenario(
+                    suite="E6", name=f"{name}_n{n}_sym{sym}",
+                    grid_path=path, num_agents=n, horizon=horizon,
+                    algorithm="sibis", symmetry=sym,
+                    description=f"Random connected: {name}, n={n}",
+                ))
 
     # Medium connected grids
     for _ in range(num_grids // 3):
@@ -194,14 +193,13 @@ def e6_random_scenarios(
             horizon = S // n
             if horizon < 2:
                 continue
-            for alg in ["ibis", "qibis", "cegar-ibis"]:
-                for sym in [False, True]:
-                    scenarios.append(Scenario(
-                        suite="E6", name=f"{name}_n{n}_{alg}_sym{sym}",
-                        grid_path=path, num_agents=n, horizon=horizon,
-                        algorithm=alg, symmetry=sym,
-                        description=f"Random medium: {name}, n={n}",
-                    ))
+            for sym in [False, True]:
+                scenarios.append(Scenario(
+                    suite="E6", name=f"{name}_n{n}_sym{sym}",
+                    grid_path=path, num_agents=n, horizon=horizon,
+                    algorithm="sibis", symmetry=sym,
+                    description=f"Random medium: {name}, n={n}",
+                ))
 
     # Disconnected grids
     for _ in range(num_grids // 3):
@@ -222,13 +220,12 @@ def e6_random_scenarios(
             horizon = S // n
             if horizon < 2:
                 continue
-            for alg in ["ibis", "qibis", "cegar-ibis"]:
-                for sym in [False, True]:
-                    scenarios.append(Scenario(
-                        suite="E6", name=f"{name}_n{n}_{alg}_sym{sym}",
-                        grid_path=path, num_agents=n, horizon=horizon,
-                        algorithm=alg, symmetry=sym,
-                        description=f"Random disconnected: {name}, n={n}",
-                    ))
+            for sym in [False, True]:
+                scenarios.append(Scenario(
+                    suite="E6", name=f"{name}_n{n}_sym{sym}",
+                    grid_path=path, num_agents=n, horizon=horizon,
+                    algorithm="sibis", symmetry=sym,
+                    description=f"Random disconnected: {name}, n={n}",
+                ))
 
     return scenarios

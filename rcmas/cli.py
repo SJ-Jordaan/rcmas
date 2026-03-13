@@ -117,6 +117,16 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     ibis.add_argument("--render", action="store_true", help="Print ASCII state trace")
     ibis.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
 
+    # ── sibis: S-IBIS (SAT-based best-response) ─────────────────
+    sibis = sub.add_parser("sibis", help="Nash equilibrium via S-IBIS (SAT-based best-response)")
+    _add_common_args(sibis)
+    sibis.add_argument("--max-iters", type=int, default=25, help="Max best-response iterations")
+    sibis.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")
+    sibis.add_argument("--progress", action="store_true", help="Print per-iteration progress")
+    sibis.add_argument("--timing", action="store_true", help="Include solve timings")
+    sibis.add_argument("--render", action="store_true", help="Print ASCII state trace")
+    sibis.add_argument("--symmetry", action="store_true", help="Enable symmetry-breaking constraints")
+
     # ── qibis: Algorithm 2 (Q-IBIS) ──────────────────────────────
     qibis = sub.add_parser("qibis", help="Q-learning-guided IBIS (Algorithm 2)")
     _add_common_args(qibis)
@@ -131,7 +141,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     cegar = sub.add_parser("cegar", help="CEGAR-NE abstraction refinement (EUMAS Algorithm 1)")
     _add_common_args(cegar)
     cegar.add_argument("--partition", choices=["orbit", "discrete"], default="orbit", help="Initial partition type")
-    cegar.add_argument("--synthesiser", choices=["ibis", "qibis"], default="ibis", help="NE synthesiser for abstract/concrete games")
+    cegar.add_argument("--synthesiser", choices=["ibis", "qibis", "sibis"], default="ibis", help="NE synthesiser for abstract/concrete games")
     cegar.add_argument("--max-iters", type=int, default=25, help="Max refinement iterations")
     cegar.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")
     cegar.add_argument("--progress", action="store_true", help="Print per-iteration progress")
@@ -228,6 +238,25 @@ def main(argv: list[str] | None = None) -> int:
         from .ibis import solve_ibis
 
         res = solve_ibis(
+            territory=territory, num_agents=args.agents, horizon=args.horizon,
+            max_iters=args.max_iters, progress=args.progress,
+            timing=args.timing, timeout_ms=timeout_ms,
+            symmetry=args.symmetry, demands=args.demands,
+        )
+        print(f"sat={res.is_sat} reason={res.reason}")
+        if res.payoff_by_agent is not None:
+            print(f"payoff={res.payoff_by_agent}")
+        print(f"iterations={res.iterations} found_ne={res.found_ne}")
+
+        if args.render and res.final_solution is not None:
+            _render_trace(res.final_solution, territory)
+
+        return 0 if res.is_sat else 2
+
+    if args.mode == "sibis":
+        from .ibis import solve_sibis
+
+        res = solve_sibis(
             territory=territory, num_agents=args.agents, horizon=args.horizon,
             max_iters=args.max_iters, progress=args.progress,
             timing=args.timing, timeout_ms=timeout_ms,

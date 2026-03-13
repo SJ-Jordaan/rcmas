@@ -95,10 +95,25 @@ def _run_algorithm(
             "cegar_final_blocks": None,
         }
 
-    elif alg in ("cegar-ibis", "cegar-qibis"):
+    elif alg == "sibis":
+        from rcmas.ibis import solve_sibis
+
+        res = solve_sibis(
+            territory=territory, num_agents=n, horizon=h,
+            max_iters=max_iters, symmetry=sym, timeout_ms=timeout_ms,
+        )
+        return {
+            "found_ne": res.found_ne,
+            "payoff": list(res.payoff_by_agent) if res.payoff_by_agent else None,
+            "iterations": res.iterations,
+            "reason": res.reason,
+            "cegar_final_blocks": None,
+        }
+
+    elif alg in ("cegar-ibis", "cegar-qibis", "cegar-sibis"):
         from rcmas.cegar import solve_cegar
 
-        synthesiser = "ibis" if alg == "cegar-ibis" else "qibis"
+        synthesiser = {"cegar-ibis": "ibis", "cegar-qibis": "qibis", "cegar-sibis": "sibis"}[alg]
         res = solve_cegar(
             territory=territory, num_agents=n, horizon=h,
             initial_partition=scenario.partition,

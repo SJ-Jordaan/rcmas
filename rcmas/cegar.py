@@ -217,6 +217,31 @@ def _run_synthesiser(
             payoff_by_agent=res.payoff_by_agent,
             final_solution=res.final_solution,
         )
+    elif synthesiser == "sibis":
+        from .ibis import solve_sibis
+
+        res = solve_sibis(
+            territory=territory,
+            num_agents=num_agents,
+            horizon=horizon,
+            progress=progress,
+            timing=timing,
+            timeout_ms=timeout_ms,
+            symmetry=symmetry,
+            demands=demands,
+            weights=weights,
+            custom_neighbors=custom_neighbors,
+            weight_balance_target=weight_balance_target,
+        )
+        return _SynthResult(
+            is_sat=res.is_sat,
+            reason=res.reason,
+            found_ne=res.found_ne,
+            iterations=res.iterations,
+            strategy=res.strategy,
+            payoff_by_agent=res.payoff_by_agent,
+            final_solution=res.final_solution,
+        )
     else:
         raise ValueError(f"unknown synthesiser: {synthesiser!r}")
 
@@ -267,8 +292,8 @@ def solve_cegar(
         if progress:
             print(msg, file=sys.stderr, flush=True)
 
-    if synthesiser not in ("ibis", "qibis"):
-        raise ValueError("synthesiser must be 'ibis' or 'qibis'")
+    if synthesiser not in ("ibis", "qibis", "sibis"):
+        raise ValueError("synthesiser must be 'ibis', 'qibis', or 'sibis'")
 
     # Build initial partition
     if isinstance(initial_partition, str):

@@ -321,7 +321,7 @@ class TestCegarQibis:
     def test_cegar_invalid_synthesiser(self, territory_2x2: Territory):
         from rcmas.cegar import solve_cegar
 
-        with pytest.raises(ValueError, match="'ibis' or 'qibis'"):
+        with pytest.raises(ValueError, match="'ibis', 'qibis', or 'sibis'"):
             solve_cegar(
                 territory=territory_2x2,
                 num_agents=2,
