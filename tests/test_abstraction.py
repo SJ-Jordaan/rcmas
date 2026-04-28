@@ -8,9 +8,12 @@ from rcmas.abstraction import (
     AbstractRCMAS,
     LiftedStrategy,
     Partition,
+    bfs_bisect,
+    bfs_kway_partition,
     build_abstract_rcmas,
     compute_deviation_set,
     discrete_partition,
+    grid_partition,
     lift_strategy,
     orbit_partition,
     refine_partition,
@@ -259,3 +262,121 @@ class TestRefinePartition:
         assert refined.membership[0] == refined.membership[2]
         assert refined.membership[1] == refined.membership[3]
         assert refined.membership[0] != refined.membership[1]
+
+
+# ---------------------------------------------------------------------------
+# TestBfsBisect
+# ---------------------------------------------------------------------------
+
+class TestBfsBisect:
+    def test_splits_at_midpoint(self, territory_2x2: Territory) -> None:
+        """A 4-sector block should split into two halves."""
+        block = frozenset(range(4))
+        delta = bfs_bisect(block, territory_2x2)
+        assert len(delta) == 2
+        assert delta < block
+
+    def test_single_sector_returns_self(self, territory_2x2: Territory) -> None:
+        block = frozenset({0})
+        assert bfs_bisect(block, territory_2x2) == block
+
+    def test_produces_contiguous_halves_on_row(self) -> None:
+        """On a 1x4 row, BFS from sector 0 should keep {0,1} together."""
+        t = Territory.from_ascii(["...."])
+        block = frozenset(range(4))
+        delta = bfs_bisect(block, t)
+        assert len(delta) == 2
+        # BFS from sector 0: visits 0,1,2,3 in order. First half = {0,1}.
+        assert delta == frozenset({0, 1})
+
+    def test_contiguous_on_3x3(self, territory_3x3: Territory) -> None:
+        """On a 3x3 grid, both halves produced by BFS-bisect should be connected."""
+        block = frozenset(range(9))
+        delta = bfs_bisect(block, territory_3x3)
+        complement = block - delta
+        assert len(delta) == 4
+        assert len(complement) == 5
+        # Verify delta is connected via concrete adjacency
+        sectors = territory_3x3.ordered_sectors()
+        from rcmas.model import neighbors4
+        visited: set[int] = set()
+        stack = [min(delta)]
+        visited.add(min(delta))
+        while stack:
+            u = stack.pop()
+            for nb in neighbors4(sectors[u]):
+                j = territory_3x3.index_of(nb)
+                if j is not None and j in delta and j not in visited:
+                    visited.add(j)
+                    stack.append(j)
+        assert visited == delta
+
+
+# ---------------------------------------------------------------------------
+# TestGridPartition
+# ---------------------------------------------------------------------------
+
+class TestGridPartition:
+    def test_2x2_tiles_on_4x4(self) -> None:
+        t = Territory.from_ascii(["...."] * 4)
+        p = grid_partition(t, 2, 2)
+        assert len(p.blocks) == 4
+        assert all(len(b) == 4 for b in p.blocks)
+        assert frozenset().union(*p.blocks) == frozenset(range(16))
+
+    def test_1x1_tiles_is_discrete(self, territory_3x3: Territory) -> None:
+        p = grid_partition(territory_3x3, 1, 1)
+        assert len(p.blocks) == 9
+        assert all(len(b) == 1 for b in p.blocks)
+
+    def test_large_tile_single_block(self, territory_2x2: Territory) -> None:
+        p = grid_partition(territory_2x2, 10, 10)
+        assert len(p.blocks) == 1
+        assert len(p.blocks[0]) == 4
+
+    def test_non_square_tiles(self) -> None:
+        t = Territory.from_ascii(["......"] * 4)  # 6x4
+        p = grid_partition(t, 3, 2)
+        assert len(p.blocks) == 4  # 2 cols x 2 rows of tiles
+        assert all(len(b) == 6 for b in p.blocks)
+
+    def test_membership_consistent(self, territory_3x3: Territory) -> None:
+        p = grid_partition(territory_3x3, 2, 2)
+        for block_idx, block in enumerate(p.blocks):
+            for i in block:
+                assert p.membership[i] == block_idx
+
+
+# ---------------------------------------------------------------------------
+# TestBfsKwayPartition
+# ---------------------------------------------------------------------------
+
+class TestBfsKwayPartition:
+    def test_k_equals_S_is_discrete(self, territory_2x2: Territory) -> None:
+        p = bfs_kway_partition(territory_2x2, 4)
+        assert len(p.blocks) == 4
+        assert all(len(b) == 1 for b in p.blocks)
+
+    def test_k1_single_block(self, territory_3x3: Territory) -> None:
+        p = bfs_kway_partition(territory_3x3, 1)
+        assert len(p.blocks) == 1
+        assert len(p.blocks[0]) == 9
+
+    def test_covers_territory(self, territory_3x3: Territory) -> None:
+        p = bfs_kway_partition(territory_3x3, 3)
+        assert frozenset().union(*p.blocks) == frozenset(range(9))
+        assert len(p.blocks) == 3
+
+    def test_blocks_disjoint(self) -> None:
+        t = Territory.from_ascii(["......"] * 4)  # 6x4
+        p = bfs_kway_partition(t, 6)
+        all_sectors: list[int] = []
+        for b in p.blocks:
+            all_sectors.extend(b)
+        assert len(all_sectors) == len(set(all_sectors)) == 24
+
+    def test_membership_consistent(self, territory_3x3: Territory) -> None:
+        p = bfs_kway_partition(territory_3x3, 3)
+        for block_idx, block in enumerate(p.blocks):
+            for i in block:
+                assert p.membership[i] == block_idx

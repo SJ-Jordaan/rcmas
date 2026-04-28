@@ -13,9 +13,13 @@ from dataclasses import dataclass
 from .abstraction import (
     LiftedStrategy,
     Partition,
+    balanced_partition,
+    bfs_bisect,
+    bfs_kway_partition,
     build_abstract_rcmas,
     compute_deviation_set,
     discrete_partition,
+    grid_partition,
     lift_strategy,
     orbit_partition,
     refine_partition,
@@ -88,7 +92,15 @@ def verify_ne(
 
     owner_by_round = tuple(owner_snapshots)
     actions_by_round = lifted_strategy.actions_by_round
-    concrete_horizon = len(actions_by_round)
+    lifted_horizon = len(actions_by_round)
+
+    # The verification must use the full concrete horizon so that deviating
+    # agents have all m rounds available.  With weight_balance_target the
+    # lifted horizon already equals the concrete horizon; the assertion
+    # guards against silent divergence if that invariant is relaxed later.
+    assert horizon >= lifted_horizon, (
+        f"concrete horizon ({horizon}) < lifted horizon ({lifted_horizon})"
+    )
 
     policies: list[Policy] = []
     for a in range(num_agents):
@@ -99,7 +111,7 @@ def verify_ne(
     base_enc = build_base_encoding(
         territory=territory,
         num_agents=num_agents,
-        horizon=concrete_horizon,
+        horizon=horizon,
         require_victory=True,
         symmetry_breaking=symmetry,
         demands=demands,
@@ -165,6 +177,7 @@ def _run_synthesiser(
     weights: tuple[int, ...] | None = None,
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
+    require_victory: bool = True,
 ) -> _SynthResult:
     """Dispatch to IBIS or Q-IBIS and return a unified result."""
     if synthesiser == "ibis":
@@ -182,6 +195,7 @@ def _run_synthesiser(
             weights=weights,
             custom_neighbors=custom_neighbors,
             weight_balance_target=weight_balance_target,
+            require_victory=require_victory,
         )
         return _SynthResult(
             is_sat=res.is_sat,
@@ -232,6 +246,7 @@ def _run_synthesiser(
             weights=weights,
             custom_neighbors=custom_neighbors,
             weight_balance_target=weight_balance_target,
+            require_victory=require_victory,
         )
         return _SynthResult(
             is_sat=res.is_sat,
@@ -301,6 +316,23 @@ def solve_cegar(
             partition = orbit_partition(territory)
         elif initial_partition == "discrete":
             partition = discrete_partition(territory)
+        elif initial_partition.startswith("grid-"):
+            # e.g. "grid-2x2" → tile_w=2, tile_h=2
+            try:
+                dims = initial_partition[5:].split("x")
+                tw, th = int(dims[0]), int(dims[1])
+            except (IndexError, ValueError):
+                raise ValueError(f"invalid grid partition format: {initial_partition!r} (expected grid-WxH)")
+            partition = grid_partition(territory, tw, th)
+        elif initial_partition.startswith("bfs-"):
+            # e.g. "bfs-4" → k=4
+            try:
+                k = int(initial_partition[4:])
+            except ValueError:
+                raise ValueError(f"invalid bfs partition format: {initial_partition!r} (expected bfs-K)")
+            partition = bfs_kway_partition(territory, k)
+        elif initial_partition == "balanced":
+            partition = balanced_partition(territory, num_agents)
         else:
             raise ValueError(f"unknown partition type: {initial_partition!r}")
     else:
@@ -342,19 +374,6 @@ def solve_cegar(
         # 1. Build abstract RCMAS
         abstract = build_abstract_rcmas(territory, num_agents, partition)
 
-        # If the number of blocks is not divisible by num_agents, the abstract
-        # game is infeasible (require_victory can't be satisfied).  Refine by
-        # splitting the largest block.
-        if len(partition.blocks) % num_agents != 0:
-            _log(f"cegar iter={it} blocks={len(partition.blocks)} not divisible by {num_agents}, refining largest block")
-            largest_idx = max(range(len(partition.blocks)), key=lambda p: len(partition.blocks[p]))
-            block = partition.blocks[largest_idx]
-            sorted_sectors = sorted(block)
-            mid = len(sorted_sectors) // 2
-            delta = frozenset(sorted_sectors[:mid])
-            partition = refine_partition(partition, delta)
-            continue
-
         # If partition is too coarse (fewer blocks than agents), abstract
         # game has zero horizon — fall through to concrete.
         if abstract.horizon < 1:
@@ -383,8 +402,8 @@ def solve_cegar(
                 final_solution=concrete_result.final_solution,
             )
 
-        # 2. Synthesise NE on abstract game
-        concrete_demand = len(territory) // num_agents
+        # 2. Synthesise NE on abstract game (no victory/weight-balance
+        #    requirement — unclaimed blocks are permitted)
         abstract_result = _run_synthesiser(
             synthesiser=synthesiser,
             territory=abstract.territory,
@@ -392,7 +411,7 @@ def solve_cegar(
             horizon=abstract.horizon,
             weights=abstract.weights,
             custom_neighbors=abstract.neighbors,
-            weight_balance_target=concrete_demand,
+            require_victory=False,
             progress=False,
             timeout_ms=timeout_ms,
             symmetry=symmetry,
@@ -414,16 +433,14 @@ def solve_cegar(
                 # Cannot refine further — partition is (nearly) discrete
                 _log(f"cegar iter={it} cannot refine further, falling through to concrete")
                 continue  # will hit the discrete fallthrough check at top of loop
-            sorted_sectors = sorted(block)
-            mid = len(sorted_sectors) // 2
-            delta = frozenset(sorted_sectors[:mid])
+            delta = bfs_bisect(block, territory)
             partition = refine_partition(partition, delta)
             continue
 
         _log(f"cegar iter={it} abstract_ne={abstract_result.found_ne} abstract_payoff={abstract_result.payoff_by_agent}")
 
-        # 4. Lift abstract solution to concrete
-        lifted = lift_strategy(abstract, abstract_result.final_solution)
+        # 4. Lift abstract solution to concrete (extend to full concrete horizon)
+        lifted = lift_strategy(abstract, abstract_result.final_solution, concrete_horizon=horizon)
         _log(f"cegar iter={it} concrete_payoff={lifted.payoff_by_agent}")
 
         # 5. Verify NE in concrete game
@@ -431,7 +448,7 @@ def solve_cegar(
         dev_agent, dev_sol, dev_terminal = verify_ne(
             territory=territory,
             num_agents=num_agents,
-            horizon=len(lifted.actions_by_round),
+            horizon=horizon,
             lifted_strategy=lifted,
             timeout_ms=timeout_ms,
             symmetry=symmetry,
@@ -463,6 +480,21 @@ def solve_cegar(
 
         old_size = len(partition.blocks)
         partition = refine_partition(partition, delta)
+
+        # If the deviation set aligned with existing block boundaries (no
+        # new blocks), fall back to BFS-bisect of the largest multi-sector
+        # block to guarantee progress.
+        if len(partition.blocks) == old_size:
+            _log(f"cegar iter={it} no progress from deviation set, bisecting largest block")
+            largest_idx = max(
+                range(len(partition.blocks)),
+                key=lambda p: len(partition.blocks[p]),
+            )
+            block = partition.blocks[largest_idx]
+            if len(block) > 1:
+                delta_bisect = bfs_bisect(block, territory)
+                partition = refine_partition(partition, delta_bisect)
+
         _log(f"cegar iter={it} refined blocks={old_size}->{len(partition.blocks)}")
 
         if timing:

@@ -140,7 +140,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     # ── cegar: CEGAR-NE (EUMAS Algorithm 1) ─────────────────────
     cegar = sub.add_parser("cegar", help="CEGAR-NE abstraction refinement (EUMAS Algorithm 1)")
     _add_common_args(cegar)
-    cegar.add_argument("--partition", choices=["orbit", "discrete"], default="orbit", help="Initial partition type")
+    cegar.add_argument("--partition", default="balanced", help="Initial partition: balanced (n equal strips), orbit, discrete, grid-WxH (e.g. grid-2x2), bfs-K (e.g. bfs-4)")
     cegar.add_argument("--synthesiser", choices=["ibis", "qibis", "sibis"], default="ibis", help="NE synthesiser for abstract/concrete games")
     cegar.add_argument("--max-iters", type=int, default=25, help="Max refinement iterations")
     cegar.add_argument("--timeout-ms", type=int, default=0, help="Z3 timeout per solve (0=unset)")

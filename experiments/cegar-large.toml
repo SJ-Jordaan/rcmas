@@ -1,0 +1,33 @@
+# CEGAR large-instance experiments
+#
+# Extended timeout (8 hours) on grids from 6x6 to 8x8 to demonstrate the
+# benefit of abstraction refinement on instances where direct IBIS is
+# intractable.  Includes IBIS as baseline to confirm intractability.
+#
+# Usage:
+#   python -m experiments.run --config experiments/cegar-large.toml --runs 1 --workers 8 --timeout 28800 --output cegar-large-results.jsonl
+#   python -m experiments.run --config experiments/cegar-large.toml --list
+
+[suite]
+name = "cegar-large"
+
+[grids]
+symmetric = [
+    "6x6.txt",
+    "6x7.txt",
+    "7x5.txt",
+    "7x6.txt",
+    "7x7.txt",
+    "6x8.txt",
+    "8x4.txt",
+    "8x5.txt",
+    "8x6.txt",
+    "8x7.txt",
+    "8x8.txt"
+]
+
+[parameters]
+agents = [2, 3, 4]
+algorithms = ["sibis", "cegar-sibis"]
+partitions = ["discrete", "grid-2x2", "grid-3x3", "bfs-4", "bfs-6", "bfs-8", "balanced"]
+symmetry = [false]

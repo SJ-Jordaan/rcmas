@@ -64,6 +64,7 @@ def solve_ibis(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
+    require_victory: bool = True,
 ) -> IbisResult:
     """Run IBIS: iterative best-response NE search via SMT (Alg 1).
 
@@ -82,6 +83,7 @@ def solve_ibis(
         timeout_ms=timeout_ms, symmetry=symmetry,
         weights=weights, custom_neighbors=custom_neighbors,
         weight_balance_target=weight_balance_target, demands=demands,
+        require_victory=require_victory,
         find_best_improvement_fn=_find_best_improvement,
     )
 
@@ -101,6 +103,7 @@ def solve_sibis(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
+    require_victory: bool = True,
 ) -> IbisResult:
     """Run S-IBIS: SAT-based iterative best-response NE search.
 
@@ -129,6 +132,7 @@ def solve_sibis(
         timeout_ms=timeout_ms, symmetry=symmetry,
         weights=weights, custom_neighbors=custom_neighbors,
         weight_balance_target=weight_balance_target, demands=demands,
+        require_victory=require_victory,
         find_best_improvement_fn=br_fn,
     )
 
@@ -261,6 +265,7 @@ def _ibis_core(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
+    require_victory: bool = True,
     find_best_improvement_fn: BestResponseFn,
 ) -> IbisResult:
     """Iterative best-response loop with pluggable BR strategy."""
@@ -281,7 +286,7 @@ def _ibis_core(
     mrs = None if weights is not None else len(territory) // num_agents
     base_enc = build_base_encoding(
         territory=territory, num_agents=num_agents, horizon=horizon,
-        require_victory=True, symmetry_breaking=symmetry,
+        require_victory=require_victory, symmetry_breaking=symmetry,
         weights=weights, custom_neighbors=custom_neighbors,
         weight_balance_target=weight_balance_target,
         demands=demands,

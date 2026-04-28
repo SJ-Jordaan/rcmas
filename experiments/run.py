@@ -27,6 +27,7 @@ import argparse
 import sys
 
 from .analyze import full_report, load_results
+from .config import load_config
 from .gridgen import e6_random_scenarios
 from .runner import run_batch
 from .scenarios import all_scenarios
@@ -81,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         "--resume", action="store_true",
         help="Resume from existing output file, skipping completed experiments",
     )
+    parser.add_argument(
+        "--config", type=str, default=None, metavar="TOML_FILE",
+        help="Load scenarios from a TOML config file (overrides --suites)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -92,15 +97,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Build scenario list
-    suite_list = args.suites.split(",") if args.suites else None
-    scenarios = all_scenarios(suites=suite_list)
+    if args.config:
+        scenarios = load_config(args.config)
+    else:
+        suite_list = args.suites.split(",") if args.suites else None
+        scenarios = all_scenarios(suites=suite_list)
 
-    # Add E6 random scenarios if requested
-    if suite_list is None or "E6" in suite_list:
-        scenarios.extend(e6_random_scenarios(
-            num_grids=args.random_grids,
-            seed=args.random_seed,
-        ))
+        # Add E6 random scenarios if requested
+        if suite_list is None or "E6" in suite_list:
+            scenarios.extend(e6_random_scenarios(
+                num_grids=args.random_grids,
+                seed=args.random_seed,
+            ))
 
     if not scenarios:
         print("No scenarios matched.", file=sys.stderr)
@@ -108,20 +116,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # List mode
     if args.list:
-        print(f"{'Suite':>5s} {'Algorithm':>12s} {'Sym':>5s} {'S':>3s} {'n':>2s} {'h':>3s} {'Name'}")
+        print(f"{'Suite':>5s} {'Algorithm':>12s} {'Partition':>10s} {'Sym':>5s} {'S':>3s} {'n':>2s} {'h':>3s} {'Name'}")
         seen = set()
         for s in scenarios:
-            # Deduplicate display (same scenario appears for each run)
-            key = (s.suite, s.algorithm, s.symmetry, s.name)
+            key = (s.suite, s.algorithm, s.symmetry, s.partition, s.name)
             if key in seen:
                 continue
             seen.add(key)
-            # Read grid to get S
             with open(s.grid_path) as f:
                 from rcmas.model import Territory
                 t = Territory.from_ascii(f)
             S = len(t.sectors)
-            print(f"{s.suite:>5s} {s.algorithm:>12s} {str(s.symmetry):>5s} {S:>3d} {s.num_agents:>2d} {s.horizon:>3d} {s.name}")
+            part = s.partition if s.algorithm.startswith("cegar") else "-"
+            print(f"{s.suite:>5s} {s.algorithm:>12s} {part:>10s} {str(s.symmetry):>5s} {S:>3d} {s.num_agents:>2d} {s.horizon:>3d} {s.name}")
         print(f"\nTotal: {len(seen)} unique scenarios x {args.runs} runs = {len(seen) * args.runs} executions")
         return 0
 
