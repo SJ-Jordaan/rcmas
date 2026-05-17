@@ -9,7 +9,7 @@ This directory is a git submodule (`github.com/SJ-Jordaan/rcmas`). Commits here 
 
 ```bash
 ./setup.sh    # or: python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest -q     # 295 tests
+pytest -q
 ```
 
 ## Module map
