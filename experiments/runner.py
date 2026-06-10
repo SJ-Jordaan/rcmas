@@ -52,8 +52,28 @@ class _Timeout(Exception):
     pass
 
 
+# Raising from a signal handler is unreliable around Z3's ctypes layer: the
+# exception can be swallowed (inside a ctypes callback) or wrapped as
+# ctypes.ArgumentError (during argument conversion). The re-arm gives a
+# swallowed raise another chance to land at a safe bytecode boundary, and
+# _is_timeout_error recovers the wrapped case.
+_REARM_INTERVAL_S = 5
+
+
 def _alarm_handler(signum: int, frame: Any) -> None:
+    signal.alarm(_REARM_INTERVAL_S)
     raise _Timeout()
+
+
+def _is_timeout_error(e: BaseException) -> bool:
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, _Timeout):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return "_Timeout" in str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +196,15 @@ def run_scenario(
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
+        if elapsed >= timeout_s:
+            # The alarm's exception was swallowed and the run overran its
+            # budget; count it as a timeout like every other over-budget run.
+            return Result(
+                **base, status="timeout", found_ne=None, payoff=None,
+                iterations=None, time_s=float(timeout_s), reason="timeout",
+                cegar_final_blocks=None,
+            )
+
         return Result(
             **base,
             status="ok",
@@ -200,6 +229,12 @@ def run_scenario(
         elapsed = round(time.perf_counter() - t0, 3)
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
+        if _is_timeout_error(e):
+            return Result(
+                **base, status="timeout", found_ne=None, payoff=None,
+                iterations=None, time_s=float(timeout_s), reason="timeout",
+                cegar_final_blocks=None,
+            )
         return Result(
             **base, status="error", found_ne=None, payoff=None,
             iterations=None, time_s=elapsed, reason=str(e),
