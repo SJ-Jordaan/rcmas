@@ -1,0 +1,62 @@
+# Thesis evaluation — technique comparison up to 30 sectors
+#
+# Compares the six techniques of the thesis evaluation chapter:
+#   IBIS, S-IBIS, Q-IBIS (sym off);  Symmetry Reduction (sym on);
+#   CEGAR (orbit start, sym off);  CEGAR + Symmetry (orbit start, sym on).
+# The algorithms x symmetry cross-product yields these six plus IBIS+sym and
+# Q-IBIS+sym (the symmetry-effect and spurious-unsat measurements).
+#
+# CEGAR uses S-IBIS as its inner synthesiser (the most performant) and the
+# orbit partition as its starting abstraction.
+#
+# Usage:
+#   python -m experiments.run --config experiments/thesis-eval.toml \
+#       --runs 3 --workers 8 --timeout 300 --output thesis-eval.jsonl --resume
+#   python -m experiments.run --config experiments/thesis-eval.toml --list
+
+[suite]
+name = "thesis-eval"
+
+[grids]
+symmetric = [
+    "3x2.txt",
+    "4x2.txt",
+    "3x3.txt",
+    "4x3.txt",
+    "5x3.txt",
+    "4x4.txt",
+    "6x3.txt",
+    "5x4.txt",
+    "6x4.txt",
+    "5x5.txt",
+    "6x5.txt"
+]
+local_symmetry = [
+    "T-5x5.txt",
+    "L-4x4-2.txt",
+    "L-6x4-4.txt",
+    "L-5x5-4.txt",
+    "L-6x6-6.txt"
+]
+disconnected = [
+    "2x2-2x2.txt",
+    "3x2-2x1.txt",
+    "4x2-4x2.txt",
+    "3x3-3x3.txt",
+    "3x3-3x3-3x3.txt"
+]
+asymmetric = [
+    "5x5-13.txt",
+    "interesting.txt",
+    "6x6-21.txt",
+    "6x6-18.txt",
+    "6x6-15.txt",
+    "5x5-shaped.txt",
+    "8x8-34.txt"
+]
+
+[parameters]
+agents = [2, 3, 4, 5, 6]
+algorithms = ["ibis", "sibis", "qibis", "cegar-sibis"]
+partitions = ["orbit"]
+symmetry = [false, true]
