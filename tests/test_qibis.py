@@ -1,208 +1,658 @@
-"""Tests for qibis.py (Algorithm 2: Q-IBIS)."""
+"""Tests for qibis.py (thesis Algorithm 3, Section 4.9).
+
+- The loop of Algorithm 3, driven by brute-force best responses, reproduces
+  Example 4.7.1 through its certification round when the candidate sets
+  hold only the current actions, and reproduces it through its restricted
+  queries when they hold every action.
+- The restricted query on Z3 is checked against exhaustive enumeration of
+  the deviations that respect the candidate sets, and its models let the
+  opponents follow the canonical completion (Remark 4.9.1).
+- Every equilibrium that Q-IBIS returns on a tiny instance is checked by
+  enumeration of all deviations against its canonical completion
+  (Corollary 4.9.1).
+"""
 
 from __future__ import annotations
 
+import itertools
+import random
+
 import pytest
 
-from rcmas.model import Territory
-from rcmas.qibis import QibisConfig, solve_qibis
+import rcmas.smt_solve as smt_solve
+from rcmas.ibis import BestResponse, solve_ibis
+from rcmas.model import Territory, rewards_from_owner
+from rcmas.qibis import (
+    QibisConfig,
+    QibisLearner,
+    QibisResult,
+    SectorCandidates,
+    restricted_smt_best_response,
+    run_qibis_loop,
+    solve_qibis,
+)
+from rcmas.qlearning import LearningGame, LearningParams
+from rcmas.smt_solve import build_base_encoding
+from rcmas.strategy import CanonicalCompletion, Play, is_live
+
+from .brute_force import best_deviation, deviations, is_equilibrium, random_play
 
 z3 = pytest.importorskip("z3")
 
+RUNNING = ["..#.", "#...", ".#.#", "...#", "#.##"]
+FIG_3_1 = {
+    0: [11, 10, 5, 1],
+    1: [8, 7, 12, 9],
+    2: [3, 2, 6, 4],
+}  # thesis sector numbers
 
-# ===================================================================
-# Smoke tests
-# ===================================================================
+EXAMPLE_4_7_1 = [
+    (0, (2, 4, 4), (1, 0, 0), 0),
+    (1, (3, 2, 3), (0, 1, 0), 1),
+    (2, (2, 3, 3), (1, 0, 0), 0),
+    (3, (3, 2, 3), (0, 2, 0), 1),
+    (4, (2, 4, 2), (1, 0, 1), 0),
+    (5, (3, 3, 2), (0, 0, 1), 2),
+    (6, (3, 3, 3), (0, 0, 0), None),
+]
 
-class TestQibisSmokeTests:
-    def test_2x2_rl_disabled(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(max_iters=5, rl_episodes_per_iter=0, timeout_ms=2000),
+FAST = dict(offline_episodes=30, online_episodes=30)
+
+
+def _fig_3_1_play() -> Play:
+    return Play.from_actions(
+        12, 3, [[FIG_3_1[a][r] - 1 for a in range(3)] for r in range(4)]
+    )
+
+
+def _thesis_claims(play: Play) -> dict[int, list[int]]:
+    return {a: [i + 1 for i in play.claims_of(a)] for a in range(play.num_agents)}
+
+
+def _respects(run: Play, seq: tuple[int, ...], cand: SectorCandidates) -> bool:
+    """True if the deviator's claims *seq* lie in *cand* at every candidate state of *run*."""
+    return all(
+        run.states[t] not in cand or seq[t] in cand[run.states[t]]
+        for t in range(run.horizon)
+    )
+
+
+def _restricted_best(
+    play: Play, agent: int, nb, cand: SectorCandidates, demands=None, weights=None
+) -> tuple[int, tuple[int, ...], Play]:
+    """The restricted best response by enumeration: the lexicographically smallest optimum."""
+    comp = CanonicalCompletion(play)
+    n = play.num_agents
+    d = demands if demands is not None else (0,) * n
+    best = None
+    for seq, run in deviations(
+        comp.action, agent, len(play.states[0]), n, play.horizon
+    ):
+        if not _respects(run, seq, cand):
+            continue
+        r = rewards_from_owner(run.final_state, n, nb, weights)
+        if any(r[b] < d[b] for b in range(n)):
+            continue
+        if best is None or r[agent] > best[0]:
+            best = (r[agent], seq, run)
+    assert best is not None, "the play itself respects its candidate sets"
+    return best
+
+
+def _current_only(play: Play) -> list[SectorCandidates]:
+    """Candidate sets with k = 0: only the current action at every state of the play."""
+    return [
+        {play.states[t]: (play.actions[t][a],) for t in range(play.horizon)}
+        for a in range(play.num_agents)
+    ]
+
+
+def _all_actions(play: Play) -> list[SectorCandidates]:
+    """Candidate sets that allow every unoccupied sector at the states of the play."""
+    out = []
+    for _ in range(play.num_agents):
+        out.append(
+            {
+                play.states[t]: tuple(
+                    i for i, o in enumerate(play.states[t]) if o == -1
+                )
+                for t in range(play.horizon)
+            }
         )
-        assert res.is_sat
-        assert res.final_solution is not None
-        assert res.final_solution.final_state is not None
-        assert all(o != -1 for o in res.final_solution.final_state.owner_by_index)
+    return out
 
-    def test_2x2_rl_enabled(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=5, rl_episodes_per_iter=20, rl_top_k_actions=2,
-                timeout_ms=5000, seed=0,
+
+def _brute_loop(refine, demands, max_iters=30) -> QibisResult:
+    t = Territory.from_ascii(RUNNING)
+    nb = t.neighbor_map()
+
+    def restricted(play, a, cur, cand):
+        value, _, run = _restricted_best(play, a, nb, cand, demands)
+        return BestResponse("ok", value, run, None, 0)
+
+    def unrestricted(play, a, cur):
+        value, _, run = best_deviation(CanonicalCompletion(play), a, nb, demands)
+        return BestResponse("ok", value, run, None, 0)
+
+    return run_qibis_loop(
+        initial_play=_fig_3_1_play(),
+        initial_solution=None,
+        refine=refine,
+        restricted_best_response=restricted,
+        best_response=unrestricted,
+        rewards_of=lambda s: rewards_from_owner(s, 3, nb),
+        max_iters=max_iters,
+        territory=t,
+    )
+
+
+# ===================================================================
+# The loop of Algorithm 3 on the running example
+# ===================================================================
+
+
+class TestLoopOnExample471:
+    def test_certification_round_reproduces_ibis(self):
+        """With only current actions as candidates every restricted potential is 0,
+        and the certification round reproduces the run of Example 4.7.1."""
+        res = _brute_loop(_current_only, (2, 2, 2))
+        table = [(it.index, it.rewards, it.certified, it.chosen) for it in res.trace]
+        assert table == EXAMPLE_4_7_1
+        assert all(it.restricted == (0, 0, 0) for it in res.trace)
+        assert res.outcome == "ne" and res.iterations == 6
+        assert _thesis_claims(res.play) == {
+            0: [7, 10, 11, 5],
+            1: [8, 6, 2, 9],
+            2: [3, 4, 1, 12],
+        }
+
+    def test_unrestricted_candidates_skip_certification_until_the_end(self):
+        """With every action a candidate the restricted queries find the potentials
+        of Example 4.7.1, and the certification round is posed only in iteration 6."""
+        res = _brute_loop(_all_actions, (2, 2, 2))
+        table = [(it.index, it.rewards, it.restricted, it.chosen) for it in res.trace]
+        assert table == EXAMPLE_4_7_1
+        assert [it.certified for it in res.trace] == [()] * 6 + [(0, 0, 0)]
+        assert res.outcome == "ne"
+
+    def test_no_return_without_certification(self):
+        """Iteration 0: restricted potentials (0, 0, 0), but a can improve, so no return."""
+        res = _brute_loop(_current_only, (2, 2, 2), max_iters=0)
+        it = res.trace[0]
+        assert it.restricted == (0, 0, 0) and it.certified == (1, 0, 0)
+        assert it.chosen == 0 and it.improvement == (1, 0, 0)
+        assert res.outcome == "n/c" and res.reason == "max_iters"
+        assert _thesis_claims(res.play)[0] == [7, 10, 11, 1]
+
+    def test_remark_4_7_1_recurrence(self):
+        """With demands 0 the run returns in iteration 6 to the play of iteration 2."""
+        res = _brute_loop(_current_only, (0, 0, 0))
+        assert res.outcome == "n/c" and res.reason == "cycle" and res.iterations == 6
+
+
+def _line_plays(count: int) -> list[Play]:
+    plays = []
+    for perm in itertools.permutations(range(6)):
+        plays.append(Play.from_actions(6, 3, [perm[:3], perm[3:]]))
+        if len(plays) == count:
+            break
+    return plays
+
+
+class TestLoop:
+    def _run(self, restricted, unrestricted, max_iters=5, plays=None):
+        plays = plays or _line_plays(1)
+        return run_qibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            refine=lambda p: [{} for _ in range(3)],
+            restricted_best_response=restricted,
+            best_response=unrestricted,
+            rewards_of=lambda s: (1, 1, 1),
+            max_iters=max_iters,
+        )
+
+    def test_restricted_improvement_skips_certification(self):
+        plays = _line_plays(3)
+        calls = {"cert": 0}
+
+        def restricted(play, a, cur, cand):
+            if play == plays[0] and a == 2:
+                return BestResponse("ok", cur[a] + 1, plays[1], None, 1)
+            return BestResponse("ok", cur[a], None, None, 1)
+
+        def unrestricted(play, a, cur):
+            calls["cert"] += 1
+            return BestResponse("ok", cur[a], None, None, 1)
+
+        res = self._run(restricted, unrestricted, plays=plays)
+        assert res.trace[0].chosen == 2 and res.trace[0].certified == ()
+        assert res.outcome == "ne" and res.play == plays[1] and res.iterations == 1
+        assert calls["cert"] == 3
+
+    def test_unknown_in_restricted_query_stops(self):
+        res = self._run(
+            lambda p, a, cur, c: BestResponse(
+                "unknown" if a == 1 else "ok", cur[a], None, None, 1
+            ),
+            lambda p, a, cur: pytest.fail("no certification after unknown"),
+        )
+        assert res.outcome == "unk" and res.reason == "unknown" and not res.found_ne
+        assert res.trace[0].restricted == (0,)
+
+    def test_unknown_in_certification_stops(self):
+        res = self._run(
+            lambda p, a, cur, c: BestResponse("ok", cur[a], None, None, 1),
+            lambda p, a, cur: BestResponse(
+                "unknown" if a == 2 else "ok", cur[a], None, None, 1
             ),
         )
-        assert res.is_sat
-        assert res.final_solution is not None
-        assert res.final_solution.final_state is not None
-        assert all(o != -1 for o in res.final_solution.final_state.owner_by_index)
+        assert res.outcome == "unk" and res.trace[0].certified == (0, 0)
 
-    def test_1x2_trivial(self):
-        """Trivial: 2 agents on 1x2, 1 round."""
-        territory = Territory.from_ascii([".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=1,
-            cfg=QibisConfig(max_iters=3, rl_episodes_per_iter=0, timeout_ms=2000),
+    @pytest.mark.parametrize("where", ["restricted", "certification"])
+    def test_negative_potential_is_an_error(self, where):
+        bad = BestResponse("ok", 0, None, None, 1)
+        good = BestResponse("ok", 1, None, None, 1)
+        with pytest.raises(RuntimeError, match="negative"):
+            self._run(
+                lambda p, a, cur, c: bad if where == "restricted" else good,
+                lambda p, a, cur: bad,
+            )
+
+    def test_iteration_bound_and_recurrence(self):
+        plays = _line_plays(10)
+        nxt = {plays[k]: plays[k + 1] for k in range(9)}
+
+        def restricted(play, a, cur, cand):
+            return BestResponse(
+                "ok", cur[a] + (a == 0), nxt[play] if a == 0 else None, None, 1
+            )
+
+        res = self._run(restricted, None, max_iters=3, plays=plays)
+        assert res.reason == "max_iters" and res.iterations == 3
+        assert len(res.trace) == 4 and res.play == plays[4]
+
+        back = {plays[0]: plays[1], plays[1]: plays[0]}
+        res = self._run(
+            lambda p, a, cur, c: BestResponse(
+                "ok", cur[a] + (a == 0), back[p] if a == 0 else None, None, 1
+            ),
+            None,
+            max_iters=10,
+            plays=plays,
         )
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert res.payoff_by_agent == (1, 1)
+        assert res.reason == "cycle" and res.outcome == "n/c" and res.iterations == 2
 
 
 # ===================================================================
-# Convergence
+# The restricted query on Z3 (line 14, Remark 4.9.1)
 # ===================================================================
 
-class TestQibisConvergence:
-    def test_terminates_within_max_iters(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(max_iters=3, rl_episodes_per_iter=0, timeout_ms=2000),
+
+def _random_candidates(play: Play, agent: int, rng: random.Random) -> SectorCandidates:
+    """Random candidate sets: the play's states with the current action, plus visited states."""
+    n = play.num_agents
+    S = len(play.states[0])
+    comp = CanonicalCompletion(play)
+    cand: SectorCandidates = {}
+    for t in range(play.horizon):
+        s = play.states[t]
+        free = [i for i in range(S) if s[i] == -1]
+        extra = rng.sample(free, rng.randint(0, min(2, len(free))))
+        cand[s] = tuple(sorted({play.actions[t][agent], *extra}))
+    runs = [run for _, run in deviations(comp.action, agent, S, n, play.horizon)]
+    for run in rng.sample(runs, min(6, len(runs))):
+        for t in range(1, run.horizon):
+            s = run.states[t]
+            if s in cand or rng.random() < 0.5:
+                continue
+            free = [i for i in range(S) if s[i] == -1]
+            cand[s] = tuple(sorted(rng.sample(free, rng.randint(0, min(2, len(free))))))
+    return cand
+
+
+RESTRICTED_CASES = [
+    (["...", "..."], 2, None, 0),
+    (["...", "..."], 3, None, 1),
+    (["...", "...", "..."], 2, None, 2),  # n does not divide |T|
+    (["...", "...", "..."], 2, (2, 2), 3),
+]
+
+
+class TestRestrictedQuery:
+    @pytest.mark.parametrize("grid,n,demands,seed", RESTRICTED_CASES)
+    def test_matches_enumeration(self, grid, n, demands, seed):
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        base = build_base_encoding(
+            territory=t, num_agents=n, horizon=m, demands=demands
         )
-        assert res.iterations <= 3
+        br = restricted_smt_best_response(base)
+        rng = random.Random(seed)
+        d = demands or (0,) * n
+        play = None
+        while play is None:
+            cand_play = random_play(len(t), n, m, rng)
+            r = rewards_from_owner(cand_play.final_state, n, nb)
+            if all(r[a] >= d[a] for a in range(n)):
+                play = cand_play
+        comp = CanonicalCompletion(play)
+        current = rewards_from_owner(play.final_state, n, nb)
+        for a in range(n):
+            cand = _random_candidates(play, a, rng)
+            expected, _, _ = _restricted_best(play, a, nb, cand, demands)
+            res = br(play, a, current, cand)
+            assert res.status == "ok" and res.play is not None
+            assert res.reward == expected >= current[a]
+            assert res.reward == rewards_from_owner(res.play.final_state, n, nb)[a]
+            # Remark 4.9.1: the opponents follow the canonical completion.
+            for step in range(res.play.horizon):
+                s = res.play.states[step]
+                for b in range(n):
+                    if b != a:
+                        assert res.play.actions[step][b] == comp.action(s, b)
+            # The deviator keeps to its candidates at every candidate state.
+            assert _respects(res.play, res.play.claims_of(a), cand)
+            assert all(x >= y for x, y in zip(res.solution.payoff_by_agent, d))
 
-    def test_reason_is_valid(self):
-        territory = Territory.from_ascii(["..", ".."])
+    def test_current_action_only_returns_the_play_value(self):
+        """With k = 0 the deviator cannot leave the play: IP = 0, never nil."""
+        t = Territory.from_ascii(["...", "...", "..."])
+        base = build_base_encoding(territory=t, num_agents=2, horizon=4)
+        play = random_play(9, 2, 4, random.Random(7))
+        current = rewards_from_owner(play.final_state, 2, t.neighbor_map())
+        br = restricted_smt_best_response(base)
+        for a, cand in enumerate(_current_only(play)):
+            res = br(play, a, current, cand)
+            assert res.status == "ok" and res.reward == current[a]
+            assert res.play.claims_of(a) == play.claims_of(a)
+
+    def test_unsatisfiable_restricted_query_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(smt_solve, "_check", lambda s, *a: z3.unsat)
+        t = Territory.from_ascii(["..", ".."])
+        base = build_base_encoding(territory=t, num_agents=2, horizon=2)
+        play = Play.from_actions(4, 2, [[0, 1], [2, 3]])
+        with pytest.raises(RuntimeError, match="unsatisfiable"):
+            restricted_smt_best_response(base)(play, 0, (2, 2), _current_only(play)[0])
+
+
+# ===================================================================
+# The learners (lines 1, 11 and 13)
+# ===================================================================
+
+
+class TestLearner:
+    def _learner(self, seed=0, k=3):
+        t = Territory.from_ascii(["...", "...", "..."])
+        game = LearningGame.from_territory(t, 2)
+        return game, QibisLearner(game, LearningParams(), k=k, seed=seed)
+
+    def test_candidate_sets(self):
+        game, learner = self._learner()
+        learner.pretrain(40)
+        play = random_play(9, 2, 4, random.Random(1))
+        cands = learner.refine(play, 40)
+        assert len(cands) == 2
+        for a, cand in enumerate(cands):
+            for t in range(play.horizon):
+                s = play.states[t]
+                assert play.actions[t][a] in cand[s]
+            for s, js in cand.items():
+                assert is_live(s, 2)
+                assert 1 <= len(js) <= 4  # TopK plus the current action
+                assert all(s[j] == -1 for j in js)
+            off_play = [s for s in cand if play.step_of(s) is None]
+            assert off_play, "online training visits states off the play"
+            assert all(len(cand[s]) <= 3 for s in off_play)
+
+    def test_k_zero_keeps_only_current_actions(self):
+        _, learner = self._learner(k=0)
+        play = random_play(9, 2, 4, random.Random(2))
+        cands = learner.refine(play, 20)
+        assert cands[0] == {
+            **{s: () for s in cands[0] if play.step_of(s) is None},
+            **_current_only(play)[0],
+        }
+
+    def test_tables_persist_and_runs_are_reproducible(self):
+        play = random_play(9, 2, 4, random.Random(3))
+        _, one = self._learner(seed=5)
+        _, two = self._learner(seed=5)
+        one.pretrain(30)
+        two.pretrain(30)
+        after_pretrain = {s: dict(r) for s, r in one.tables[0].items()}
+        assert one.refine(play, 30) == two.refine(play, 30)
+        assert one.tables == two.tables
+        assert set(after_pretrain) <= set(one.tables[0])
+        assert one.tables[0] != after_pretrain
+
+    def test_online_opponents_follow_completion(self, monkeypatch):
+        """Line 11: while Q_a is trained, the other agents follow the completion."""
+        import rcmas.qibis as qibis_mod
+
+        seen = []
+        real = qibis_mod.train_q
+
+        def spy(q, game, agent, *, opponents, episodes, params, rng):
+            seen.append(opponents)
+            return real(
+                q,
+                game,
+                agent,
+                opponents=opponents,
+                episodes=episodes,
+                params=params,
+                rng=rng,
+            )
+
+        monkeypatch.setattr(qibis_mod, "train_q", spy)
+        _, learner = self._learner()
+        learner.pretrain(2)
+        assert seen == [None, None]
+        play = random_play(9, 2, 4, random.Random(4))
+        learner.refine(play, 2)
+        comp = CanonicalCompletion(play)
+        for opp in seen[2:]:
+            s = play.states[1]
+            assert opp(s, 0) == comp.action(s, 0) and opp(s, 1) == comp.action(s, 1)
+
+
+# ===================================================================
+# Q-IBIS on Z3: soundness against enumeration (Corollary 4.9.1)
+# ===================================================================
+
+SOUNDNESS_CASES = [
+    (["..", ".."], 2, None, 3),
+    (["...", "..."], 3, None, 3),
+    (["...", "...", "..."], 2, None, 1),  # n does not divide |T|
+    ([".....", "....."], 3, None, 3),  # n does not divide |T|
+    (["...", "...", "..."], 3, (2, 2, 2), 1),
+    (["..#", "...", ".#."], 2, (1, 1), 3),
+]
+
+
+class TestSoundness:
+    @pytest.mark.parametrize("grid,n,demands,k", SOUNDNESS_CASES)
+    def test_returned_equilibria_are_equilibria(self, grid, n, demands, k):
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        cfg = QibisConfig(top_k=k, demands=demands, **FAST)
+        res = solve_qibis(territory=t, num_agents=n, cfg=cfg)
+        assert res.outcome in ("ne", "n/c")
+        assert res.play is not None and res.is_sat
+        assert res.rewards == rewards_from_owner(res.play.final_state, n, nb)
+        assert res.strategy == res.play.to_coords(t)
+        assert res.final_solution is not None and res.final_solution.play == res.play
+        d = demands or (0,) * n
+        assert all(r >= x for r, x in zip(res.rewards, d))
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, demands)
+            last = res.trace[-1]
+            assert last.restricted == (0,) * n and last.certified == (0,) * n
+            comp = res.completion()
+            assert comp is not None and comp.play == res.play
+
+    def test_certification_from_figure_3_1(self):
+        """k = 0 from the play of Figure 3.1: restricted (0, 0, 0), certified (1, 0, 0)."""
+        t = Territory.from_ascii(RUNNING)
+        cfg = QibisConfig(top_k=0, demands=(2, 2, 2), max_iters=0, **FAST)
         res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(max_iters=5, rl_episodes_per_iter=0, timeout_ms=2000),
+            territory=t, num_agents=3, cfg=cfg, initial_play=_fig_3_1_play()
         )
-        assert res.reason in ("ne", "cycle", "max_iters", "unsat", "unknown")
+        it = res.trace[0]
+        assert it.rewards == (2, 4, 4)
+        assert it.restricted == (0, 0, 0) and it.certified == (1, 0, 0)
+        assert it.chosen == 0 and res.rewards[0] == 3
+        assert res.reason == "max_iters" and res.iterations == 0
+
+    def test_certification_equals_ibis_potentials(self):
+        """The certification round poses the IBIS query: equal potentials in iteration 0."""
+        t = Territory.from_ascii(["...", "...", "..."])
+        play = random_play(9, 2, 4, random.Random(11))
+        cfg = QibisConfig(top_k=0, max_iters=0, **FAST)
+        q = solve_qibis(territory=t, num_agents=2, cfg=cfg, initial_play=play)
+        i = solve_ibis(territory=t, num_agents=2, max_iters=0, initial_play=play)
+        expected = i.trace[0].improvement
+        assert q.trace[0].improvement == expected
+        if any(expected):
+            assert q.trace[0].restricted == (0, 0)
+
+    def test_weighted_abstract_game(self):
+        """Q-IBIS runs on a weighted game with block adjacency (Section 6.1)."""
+        abstract = Territory.from_ascii([".....", ""])
+        w = (2, 1, 3, 1, 2)
+        nb = {0: [1, 2], 1: [0, 3], 2: [0, 4], 3: [1], 4: [2]}
+        res = solve_qibis(
+            territory=abstract,
+            num_agents=2,
+            cfg=QibisConfig(**FAST),
+            weights=w,
+            custom_neighbors=nb,
+        )
+        assert res.play is not None
+        assert res.rewards == rewards_from_owner(res.play.final_state, 2, nb, w)
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, None, w)
 
 
 # ===================================================================
-# Input validation
+# Outcomes, solver answers and symmetry
 # ===================================================================
 
-class TestQibisValidation:
+
+class TestOutcomes:
+    def test_no_satisfying_strategy(self):
+        t = Territory.from_ascii(["...", "...", "..."])
+        res = solve_qibis(
+            territory=t, num_agents=3, cfg=QibisConfig(demands=(4, 0, 0), **FAST)
+        )
+        assert res.outcome == "uns" and res.reason == "unsat" and not res.is_sat
+        assert res.play is None
+
+    def test_unknown_in_initial_query(self, monkeypatch):
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        t = Territory.from_ascii(["..", ".."])
+        res = solve_qibis(territory=t, num_agents=2, cfg=QibisConfig(**FAST))
+        assert res.outcome == "unk" and res.reason == "unknown" and not res.is_sat
+
+    @pytest.mark.parametrize("call,phase", [(2, "restricted"), (4, "certification")])
+    def test_unknown_stops_the_run(self, monkeypatch, call, phase):
+        """Checks: 1 initial, 2-3 restricted, 4-5 certification (k = 0)."""
+        real = smt_solve._check
+        calls = {"n": 0}
+
+        def nth_unknown(s, *a):
+            calls["n"] += 1
+            return z3.unknown if calls["n"] == call else real(s, *a)
+
+        monkeypatch.setattr(smt_solve, "_check", nth_unknown)
+        t = Territory.from_ascii(["...", "..."])
+        res = solve_qibis(territory=t, num_agents=2, cfg=QibisConfig(top_k=0, **FAST))
+        assert res.outcome == "unk" and not res.found_ne and res.play is not None
+        it = res.trace[0]
+        if phase == "restricted":
+            assert it.restricted == () and it.certified == ()
+        else:
+            assert it.restricted == (0, 0) and it.certified == ()
+
+    def test_symmetry_only_in_initial_query(self, monkeypatch):
+        calls = {"n": 0}
+        real = smt_solve.symmetry_constraints
+
+        def spy(*args, **kwargs):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(smt_solve, "symmetry_constraints", spy)
+        t = Territory.from_ascii(["...", "...", "..."])
+        res = solve_qibis(
+            territory=t, num_agents=3, cfg=QibisConfig(symmetry=True, **FAST)
+        )
+        assert res.outcome in ("ne", "n/c") and calls["n"] == 1
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, t.neighbor_map())
+        solve_qibis(territory=t, num_agents=3, cfg=QibisConfig(symmetry=False, **FAST))
+        assert calls["n"] == 1
+
+
+# ===================================================================
+# Input validation and trivial games
+# ===================================================================
+
+
+class TestValidation:
     def test_zero_agents_raises(self):
-        territory = Territory.from_ascii([".."])
         with pytest.raises(ValueError, match="num_agents"):
-            solve_qibis(territory=territory, num_agents=0, horizon=1, cfg=QibisConfig())
+            solve_qibis(
+                territory=Territory.from_ascii([".."]), num_agents=0, cfg=QibisConfig()
+            )
 
-    def test_zero_horizon_raises(self):
-        territory = Territory.from_ascii([".."])
+    def test_horizon_must_be_m(self):
         with pytest.raises(ValueError, match="horizon"):
-            solve_qibis(territory=territory, num_agents=1, horizon=0, cfg=QibisConfig())
+            solve_qibis(
+                territory=Territory.from_ascii([".."]),
+                num_agents=1,
+                horizon=1,
+                cfg=QibisConfig(),
+            )
 
-    def test_zero_max_iters_raises(self):
-        territory = Territory.from_ascii([".."])
+    def test_negative_parameters_raise(self):
+        t = Territory.from_ascii([".."])
         with pytest.raises(ValueError, match="max_iters"):
-            solve_qibis(territory=territory, num_agents=1, horizon=1, cfg=QibisConfig(max_iters=0))
+            solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(max_iters=-1))
+        with pytest.raises(ValueError, match="top_k"):
+            solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(top_k=-1))
 
-
-# ===================================================================
-# Symmetry integration
-# ===================================================================
-
-class TestQibisSymmetry:
-    def test_qibis_symmetry_bootstrap_sat(self):
-        """2x2, A=2, H=2 with symmetry+bootstrap produces a SAT result."""
-        territory = Territory.from_ascii(["..", ".."])
+    def test_zero_iteration_bound_runs_one_iteration(self):
+        t = Territory.from_ascii(["..", ".."])
         res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=50,
-                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=100,
-                rl_top_k_actions=2, timeout_ms=5000, seed=42, symmetry=True,
-            ),
+            territory=t, num_agents=2, cfg=QibisConfig(max_iters=0, **FAST)
         )
-        assert res.is_sat
+        assert len(res.trace) == 1 and res.iterations == 0
 
-    def test_qibis_symmetry_finds_ne(self):
-        """2x2, A=2, H=2 with symmetry+bootstrap finds NE."""
-        territory = Territory.from_ascii(["..", ".."])
+    def test_trivial_one_round(self):
         res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=50,
-                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=100,
-                rl_top_k_actions=2, timeout_ms=5000, seed=42, symmetry=True,
-            ),
+            territory=Territory.from_ascii([".."]),
+            num_agents=2,
+            horizon=1,
+            cfg=QibisConfig(**FAST),
         )
-        assert res.found_ne
+        assert res.outcome == "ne" and res.rewards == (1, 1)
 
-    def test_qibis_3x3_symmetry(self):
-        """3x3, A=3, H=3 with symmetry+bootstrap (9 claims = 9 sectors)."""
-        territory = Territory.from_ascii(["...", "...", "..."])
+    def test_horizon_zero_game(self):
+        """|T| < |Agt|: the empty play is an equilibrium (no agent acts)."""
         res = solve_qibis(
-            territory=territory, num_agents=3, horizon=3,
-            cfg=QibisConfig(
-                max_iters=15, rl_episodes_per_iter=100,
-                rl_bootstrap_initial_profile=True, rl_bootstrap_episodes=200,
-                rl_top_k_actions=3, timeout_ms=10000, seed=42, symmetry=True,
-            ),
+            territory=Territory.from_ascii(["."]), num_agents=2, cfg=QibisConfig(**FAST)
         )
-        assert res.is_sat
+        assert res.outcome == "ne" and res.rewards == (0, 0)
 
-
-# ===================================================================
-# Normalization
-# ===================================================================
-
-class TestQibisNormalization:
-    def test_normalized_rewards_finds_ne(self):
-        """2x2, A=2, H=2 with normalize_rewards=True finds NE."""
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=50,
-                rl_top_k_actions=2, timeout_ms=5000, seed=0,
-                normalize_rewards=True,
-            ),
-        )
-        assert res.is_sat
-        assert res.found_ne
-
-    def test_unnormalized_rewards_finds_ne(self):
-        """2x2, A=2, H=2 with normalize_rewards=False also finds NE."""
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=50,
-                rl_top_k_actions=2, timeout_ms=5000, seed=0,
-                normalize_rewards=False,
-            ),
-        )
-        assert res.is_sat
-        assert res.found_ne
-
-
-# ===================================================================
-# Quality
-# ===================================================================
-
-class TestQibisQuality:
-    def test_2x2_payoff_is_optimal(self):
-        """2x2, A=2, H=2: each agent claims 2 sectors, payoff=(2,2)."""
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=0, timeout_ms=5000,
-            ),
-        )
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert sum(res.payoff_by_agent) == 4
-        assert res.payoff_by_agent == (2, 2)
-
-    def test_deviation_not_profitable(self):
-        """After finding NE, verify payoff is at least as good as (1,1)."""
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_qibis(
-            territory=territory, num_agents=2, horizon=2,
-            cfg=QibisConfig(
-                max_iters=10, rl_episodes_per_iter=0, timeout_ms=5000,
-            ),
-        )
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        for payoff in res.payoff_by_agent:
-            assert payoff >= 1
+    def test_initial_play_must_match(self):
+        t = Territory.from_ascii(["..", ".."])
+        with pytest.raises(ValueError, match="initial_play"):
+            solve_qibis(
+                territory=t,
+                num_agents=2,
+                cfg=QibisConfig(**FAST),
+                initial_play=Play.from_actions(4, 2, [[0, 1]]),
+            )

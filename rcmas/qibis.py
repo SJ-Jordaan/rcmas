@@ -1,7 +1,50 @@
-"""Algorithm 2: Q-IBIS (Q-learning-guided IBIS).
+"""Q-IBIS: Q-learning-guided iterative synthesis (thesis Algorithm 3, Section 4.9).
 
-Combines SMT-based best-response synthesis with Q-learning proposals
-to reduce the search space and improve scalability.
+Q-IBIS runs the loop of IBIS (Algorithm 1) on a single play, but restricts
+each best-response query to a few candidate actions that Q-learners rank
+highest, and checks every candidate equilibrium with unrestricted queries
+before it returns it:
+
+1. (line 1) every agent's Q-table is pre-trained against uniformly random
+   opponents for ``E_off`` episodes;
+2. (lines 2-6) the initial play ``pi^0`` is the play of a model of
+   ``smt(F)``; with symmetry reduction on, this is the only query that
+   carries the symmetry-breaking constraints (Section 5.4.5, Section 7.1);
+3. (lines 8-10) in iteration ``i`` the run stops if ``pi^i`` occurred
+   before (outcome ``"n/c"``);
+4. (line 11) every Q-table is trained further for ``E_on`` episodes while
+   the other agents follow the canonical completion ``alpha^i`` of ``pi^i``
+   (Definition 4.4.2);
+5. (lines 13-15) for every agent ``a``, ``V^i_a`` is the set of live states
+   visited in that training together with ``s^i_0, ..., s^i_{m-1}``, and
+   ``Cand^{a,i}(s)`` is ``TopK(Q_a, s, k)`` (Definition 2.4.4) plus, at
+   ``s = s^i_t``, the current action ``ap^i_t(a)``.  The restricted query
+   ``smt(G_a(pi^i) and [Cand^{a,i}], reward_a)`` is posed with the
+   state-guarded candidate constraint, and
+   ``IP^i(a) = r_a(pi_{beta_a}) - r_a(pi^i)`` on final states.  The
+   assignment that encodes ``pi^i`` is a model of the restricted query
+   (Corollary 4.3.3(3)), so the query never returns nil and ``IP^i(a) >= 0``;
+   a violation of either is a bug and raises :class:`RuntimeError`;
+6. (lines 17-25) if every restricted potential is 0, a certification round
+   poses the unrestricted best-response query ``smt(G_a(pi^i), reward_a)``
+   (Definition 4.7.1) for every agent.  If every potential is still 0, the
+   canonical completion of ``pi^i`` is a demand-constrained Nash equilibrium
+   (Lemma 4.7.2(4), Corollary 4.9.1) and the run returns it; otherwise the
+   update uses the unrestricted potentials;
+7. (lines 26-27) the agent with the largest potential, the smallest index
+   on ties, replaces the play by its best-response play.
+
+In every query the opponents of the deviating agent follow the canonical
+completion of the current play, through the opponent constraint
+``[Fix^a_pi]`` (Remark 4.9.1).  No query except the initial one contains
+symmetry-breaking constraints.  When Z3 answers a query with unknown, the
+run stops with outcome ``"unk"`` and never reads the answer as the absence
+of an improvement (Section 7.1).
+
+The result has the fields of :class:`~rcmas.ibis.IbisResult`: ``play``,
+``rewards`` (``payoff_by_agent``), ``outcome`` (``"ne"``, ``"n/c"``,
+``"unk"`` or ``"uns"``), ``reason`` and ``iterations``, the index ``i`` of
+the iteration in which the run stopped (``N`` if the bound is reached).
 """
 
 from __future__ import annotations
@@ -10,62 +53,79 @@ import random
 import sys
 import time
 from dataclasses import dataclass
+from typing import Callable
 
-from .model import Coord, State, Territory, evolve, largest_region_size, scores
+from .ibis import OUTCOME_BY_REASON, BestResponse, BestResponseFn, smt_best_response
+from .model import Coord, Territory
 from .qlearning import (
-    _encode_action,
-    _encode_state,
-    action_key,
-    best_q_action,
-    compute_shaped_reward,
-    compute_truncation_reward,
-    decode_action,
-    detect_collisions,
-    epsilon_schedule,
-    state_key,
-    top_k_actions,
-)
-from .smt_solve import BaseEncoding, SmtSolution, build_base_encoding, solve_from_base, solve_smt_game
-from .strategy import (
-    ActionCandidates,
-    Policy,
+    LearningGame,
+    LearningParams,
+    QValues,
     StateKey,
-    fallback_action,
-    freeze_profile,
-    policy_action,
-    policy_from_solution,
+    top_k,
+    train_q,
 )
-from .symmetry import SymmetryInfo, canonical_state, invert_automorphism, symmetry_info
+from .smt_solve import (
+    BaseEncoding,
+    ExtraConstraints,
+    SmtSolution,
+    best_response_from_base,
+    build_base_encoding,
+    find_feasible_from_base,
+)
+from .strategy import ActionCandidates, CanonicalCompletion, Play, canonical_completion
+
+SectorCandidates = dict[StateKey, tuple[int, ...]]
+"""``Cand^{a,i}``: state -> indices of the candidate sectors of one agent."""
+
+RefineFn = Callable[[Play], list[SectorCandidates]]
+"""Line 11 and line 13 of Algorithm 3: train against the completion of a play, return ``Cand^{a,i}`` per agent."""
+
+RestrictedBestResponseFn = Callable[
+    [Play, int, tuple[int, ...], SectorCandidates], BestResponse
+]
+"""``(pi, a, rewards of pi, Cand^{a,i}) -> beta_a`` of the restricted query (line 14)."""
 
 
-@dataclass(frozen=True, slots=True)
-class QibisResult:
-    is_sat: bool
-    reason: str
-    found_ne: bool
-    iterations: int
-    payoff_by_agent: tuple[int, ...] | None
-    final_solution: SmtSolution | None
-    strategy: tuple[tuple[Coord | None, ...], ...] | None = None
+# ---------------------------------------------------------------------------
+# Configuration and results
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class QibisConfig:
-    max_iters: int = 25
-    rl_episodes_per_iter: int = 1000
-    rl_alpha: float = 0.1
-    rl_gamma: float = 0.99
-    rl_epsilon_start: float = 0.7
-    rl_epsilon_end: float = 0.05
-    rl_top_k_actions: int = 3
-    rl_persist_q: bool = False
-    rl_pretrain_from_smt_base: bool = True
-    rl_bootstrap_initial_profile: bool = True
-    rl_bootstrap_episodes: int = 800
-    defeat_penalty: float = 10.0
-    step_success_reward: float = 0.1
-    delta_region_reward: float = 1.0
-    terminal_score_reward: float = 5.0
+    """Parameters of Q-IBIS; the defaults are those of Section 4.9 and Chapter 7.
+
+    Attributes:
+        max_iters: the iteration bound ``N`` (the loop runs ``i = 0..N``).
+        top_k: ``k`` of ``TopK``.
+        offline_episodes: ``E_off``, episodes per agent of the pre-training.
+        online_episodes: ``E_on``, episodes per agent in every iteration.
+        learning_rate: ``eta``.
+        discount: ``gamma``.
+        epsilon_start, epsilon_end: linear exploration schedule of every
+            training run.
+        step_reward, growth_reward, terminal_reward, collision_penalty,
+            normalize_rewards: the shaped reward of Section 4.9.
+        timeout_ms: Z3 timeout per query (an expired query answers unknown).
+        progress, timing: log every iteration to stderr, with times.
+        seed: seed of the learners' random number generators.
+        symmetry: add the symmetry-breaking constraints to the initial query.
+        demands: ``d(a)`` for every agent (``None`` = all 0).
+    """
+
+    max_iters: int = 30
+    top_k: int = 3
+    offline_episodes: int = 800
+    online_episodes: int = 1000
+    learning_rate: float = 0.1
+    discount: float = 0.99
+    epsilon_start: float = 0.7
+    epsilon_end: float = 0.05
+    step_reward: float = 0.1
+    growth_reward: float = 1.0
+    terminal_reward: float = 5.0
+    collision_penalty: float = 10.0
     normalize_rewards: bool = True
     timeout_ms: int | None = None
     progress: bool = False
@@ -74,633 +134,485 @@ class QibisConfig:
     symmetry: bool = False
     demands: tuple[int, ...] | None = None
 
-
-def _log(progress: bool, msg: str) -> None:
-    if progress:
-        print(msg, file=sys.stderr, flush=True)
-
-
-def _symmetry_filter_round0(
-    options: list[Coord],
-    agent_id: int,
-    num_agents: int,
-    territory: Territory,
-    sym: SymmetryInfo,
-    opponent_actions: dict[int, Coord | None],
-    demands: tuple[int, ...] | None = None,
-) -> list[Coord]:
-    """Filter round-0 actions to respect lex-leader and spatial canon.
-
-    Ensures Q-learning only explores actions compatible with the SMT
-    symmetry-breaking constraints so that the resulting candidates never
-    conflict with lex-leader / spatial canonicalization during solving.
-    """
-    # Determine demand-class membership
-    if demands is None:
-        class_members = list(range(num_agents))
-    else:
-        from .symmetry import demand_classes as _dc
-
-        class_members = next(cls for cls in _dc(demands) if agent_id in cls)
-
-    pos = class_members.index(agent_id)
-
-    # Lex-leader bounds from fixed opponents within the same demand class
-    lower = -1
-    if pos > 0:
-        prev = class_members[pos - 1]
-        c = opponent_actions.get(prev)
-        if c is not None:
-            idx = territory.index_of(c)
-            if idx is not None:
-                lower = idx
-
-    upper = len(territory) + 1
-    if pos < len(class_members) - 1:
-        nxt = class_members[pos + 1]
-        c = opponent_actions.get(nxt)
-        if c is not None:
-            idx = territory.index_of(c)
-            if idx is not None:
-                upper = idx
-
-    # Spatial canonicalization: first agent restricted to orbit representatives
-    reps = set(sym.representatives) if agent_id == 0 else None
-
-    filtered = [
-        c
-        for c in options
-        if (cidx := territory.index_of(c)) is not None
-        and lower <= cidx <= upper
-        and (reps is None or cidx in reps)
-    ]
-    return filtered if filtered else options
-
-
-def _solver_policies(policies: list[Policy]) -> tuple[Policy | None, ...]:
-    """Convert empty policies to None for solver compatibility.
-
-    An empty dict forces the deterministic default action (which is
-    agent-id-dependent), conflicting with symmetry-breaking constraints.
-    None means unconstrained — the solver picks the action freely.
-    """
-    return tuple(p if p else None for p in policies)
-
-
-def _evaluate_profile(
-    territory: Territory, num_agents: int, horizon: int,
-    policies: list[Policy], cfg: QibisConfig,
-    base_enc: BaseEncoding | None = None,
-) -> SmtSolution:
-    if base_enc is not None:
-        return solve_from_base(
-            base_enc,
-            objective="sum", fixed_policy_by_agent=_solver_policies(policies),
-            debug=True, timeout_ms=cfg.timeout_ms,
-        )
-    return solve_smt_game(
-        territory=territory, num_agents=num_agents, horizon=horizon,
-        objective="sum", fixed_policy_by_agent=_solver_policies(policies),
-        require_victory=True, debug=True, timeout_ms=cfg.timeout_ms,
-        symmetry_breaking=cfg.symmetry, demands=cfg.demands,
-    )
-
-
-def _train_best_response_q(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    agent_id: int,
-    opponents: list[Policy],
-    cfg: QibisConfig,
-    q_init: dict[str, dict[str, float]] | None = None,
-    seen_states_init: set[StateKey] | None = None,
-    episodes: int | None = None,
-    sym: SymmetryInfo | None = None,
-) -> tuple[Policy, ActionCandidates, dict[str, dict[str, float]], set[StateKey]]:
-    """Train a single agent's best-response Q-table against fixed opponents."""
-    q: dict[str, dict[str, float]] = {} if q_init is None else q_init
-    seen_states: set[StateKey] = set() if seen_states_init is None else seen_states_init
-
-    rng = random.Random(cfg.seed + 1000 + agent_id)
-    total_episodes = cfg.rl_episodes_per_iter if episodes is None else int(episodes)
-    if total_episodes <= 0:
-        return {}, {}, q, seen_states
-
-    for episode in range(total_episodes):
-        eps = epsilon_schedule(cfg.rl_epsilon_start, cfg.rl_epsilon_end, max(1, total_episodes - 1), episode)
-        state = State.initial(territory, num_agents)
-        rounds = 0
-
-        while True:
-            if rounds >= horizon:
-                break
-            if state.is_terminal():
-                break
-
-            actions: dict[int, Coord | None] = {}
-            for other in range(num_agents):
-                if other == agent_id:
-                    continue
-                actions[other] = policy_action(opponents[other], state, other)
-
-            options = list(state.available_actions())
-            # At round 0 with symmetry, restrict to lex-leader / spatial-
-            # canon compatible actions so the Q-table never learns values
-            # for actions the SMT solver would reject.
-            if sym is not None and rounds == 0:
-                options = _symmetry_filter_round0(
-                    options, agent_id, num_agents, territory, sym,
-                    actions, demands=cfg.demands,
-                )
-            if not options:
-                actions[agent_id] = None
-                colliders = detect_collisions(actions)
-                if colliders:
-                    defeated = True
-                    next_state = state
-                else:
-                    next_state = evolve(state, actions)
-                    defeated = False
-            else:
-                if rng.random() < eps:
-                    act = rng.choice(options)
-                else:
-                    if sym is not None:
-                        canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
-                        inv_sigma = invert_automorphism(sigma)
-                        sk = state_key(canon_owner)
-                        canon_aks = [str(sigma[int(action_key(state, c))]) for c in options]
-                        best = best_q_action(q, sk, canon_aks)
-                        if best is None:
-                            act = rng.choice(options)
-                        else:
-                            raw_idx = inv_sigma[int(best)]
-                            act = state.ordered_sectors[raw_idx]
-                    else:
-                        sk = state_key(state.owner_by_index)
-                        aks = [action_key(state, c) for c in options]
-                        best = best_q_action(q, sk, aks)
-                        act = rng.choice(options) if best is None else decode_action(state, best)
-                actions[agent_id] = act
-                colliders = detect_collisions(actions)
-                if colliders:
-                    defeated = True
-                    next_state = state
-                else:
-                    next_state = evolve(state, actions)
-                    defeated = False
-
-            # Reward shaping
-            r = compute_shaped_reward(
-                prev_state=state, next_state=next_state, agent_id=agent_id,
-                agent_acted=(actions.get(agent_id) is not None),
-                defeated=defeated, is_collider=(agent_id in colliders),
-                territory_size=len(territory),
-                collision_penalty=cfg.defeat_penalty,
-                step_reward=cfg.step_success_reward,
-                region_growth_reward=cfg.delta_region_reward,
-                terminal_reward=cfg.terminal_score_reward,
-                normalize=cfg.normalize_rewards,
-            )
-
-            will_truncate = (not defeated and not next_state.is_terminal() and rounds + 1 >= horizon)
-            terminal = defeated or next_state.is_terminal() or will_truncate
-            if will_truncate:
-                r += compute_truncation_reward(
-                    next_state, agent_id, len(territory),
-                    terminal_reward=cfg.terminal_score_reward,
-                    normalize=cfg.normalize_rewards,
-                )
-
-            # Q update
-            act_chosen = actions.get(agent_id)
-            if act_chosen is not None:
-                if sym is not None:
-                    canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
-                    s = state_key(canon_owner)
-                    a = str(sigma[int(action_key(state, act_chosen))])
-                else:
-                    s = state_key(state.owner_by_index)
-                    a = action_key(state, act_chosen)
-                seen_states.add(tuple(state.owner_by_index))
-
-                if terminal:
-                    target = r
-                else:
-                    if sym is not None:
-                        next_canon, next_sigma = canonical_state(next_state.owner_by_index, sym.automorphisms)
-                        next_sk = state_key(next_canon)
-                        next_opts = list(next_state.available_actions())
-                        next_aks = [str(next_sigma[int(action_key(next_state, c))]) for c in next_opts]
-                    else:
-                        next_sk = state_key(next_state.owner_by_index)
-                        next_opts = list(next_state.available_actions())
-                        next_aks = [action_key(next_state, c) for c in next_opts]
-                    best_next = best_q_action(q, next_sk, next_aks)
-                    next_max = 0.0 if best_next is None else q.get(next_sk, {}).get(best_next, 0.0)
-                    target = r + cfg.rl_gamma * next_max
-
-                old = q.get(s, {}).get(a, 0.0)
-                new = (1.0 - cfg.rl_alpha) * old + cfg.rl_alpha * float(target)
-                q.setdefault(s, {})[a] = new
-
-            state = next_state
-            rounds += 1
-            if terminal:
-                break
-
-    # Convert to policy + candidates
-    policy: Policy = {}
-    candidates: ActionCandidates = {}
-    for st in seen_states:
-        gs = State(territory=territory, num_agents=num_agents, owner_by_index=st, round_index=0)
-        options = list(gs.available_actions())
-        if not options:
-            policy[st] = None
-            candidates[st] = (None,)
-            continue
-        if sym is not None:
-            canon_owner, sigma = canonical_state(gs.owner_by_index, sym.automorphisms)
-            inv_sigma = invert_automorphism(sigma)
-            sk = state_key(canon_owner)
-            canon_aks = [str(sigma[int(action_key(gs, c))]) for c in options]
-            topk = top_k_actions(q, sk, canon_aks, k=cfg.rl_top_k_actions)
-            if not topk:
-                policy[st] = options[0]
-                candidates[st] = (options[0],)
-                continue
-            decoded = tuple(gs.ordered_sectors[inv_sigma[int(ak)]] for ak in topk)
-        else:
-            sk = state_key(gs.owner_by_index)
-            aks = [action_key(gs, c) for c in options]
-            topk = top_k_actions(q, sk, aks, k=cfg.rl_top_k_actions)
-            if not topk:
-                policy[st] = options[0]
-                candidates[st] = (options[0],)
-                continue
-            decoded = tuple(decode_action(gs, ak) for ak in topk)
-        candidates[st] = decoded
-        policy[st] = decoded[0]
-
-    return policy, candidates, q, seen_states
-
-
-def _pretrain_q_from_smt_trace(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    agent_id: int,
-    sol: SmtSolution,
-    cfg: QibisConfig,
-    q: dict[str, dict[str, float]],
-    seen_states: set[StateKey],
-    sym: SymmetryInfo | None = None,
-) -> None:
-    """Replay an SMT solution trace into a Q-table."""
-    if sol.owner_by_round is None or sol.actions_by_round is None:
-        return
-    T = min(horizon, len(sol.actions_by_round), max(0, len(sol.owner_by_round) - 1))
-    for t in range(T):
-        state = State(territory=territory, num_agents=num_agents, owner_by_index=sol.owner_by_round[t], round_index=t)
-        actions_step = sol.actions_by_round[t]
-        actions: dict[int, Coord | None] = {i: actions_step[i] for i in range(num_agents)}
-
-        colliders = detect_collisions(actions)
-        if colliders:
-            defeated = True
-            next_state = state
-        else:
-            next_state = evolve(state, actions)
-            defeated = False
-
-        r = compute_shaped_reward(
-            prev_state=state, next_state=next_state, agent_id=agent_id,
-            agent_acted=(actions.get(agent_id) is not None),
-            defeated=defeated, is_collider=(agent_id in colliders),
-            territory_size=len(territory),
-            collision_penalty=cfg.defeat_penalty,
-            step_reward=cfg.step_success_reward,
-            region_growth_reward=cfg.delta_region_reward,
-            terminal_reward=cfg.terminal_score_reward,
-            normalize=cfg.normalize_rewards,
+    def learning_params(self) -> LearningParams:
+        """The hyperparameters of the learner."""
+        return LearningParams(
+            learning_rate=self.learning_rate,
+            discount=self.discount,
+            epsilon_start=self.epsilon_start,
+            epsilon_end=self.epsilon_end,
+            step_reward=self.step_reward,
+            growth_reward=self.growth_reward,
+            terminal_reward=self.terminal_reward,
+            collision_penalty=self.collision_penalty,
+            normalize=self.normalize_rewards,
         )
 
-        will_truncate = (not defeated and not next_state.is_terminal() and t + 1 >= horizon)
-        terminal = defeated or next_state.is_terminal() or will_truncate
-        if will_truncate:
-            r += compute_truncation_reward(
-                next_state, agent_id, len(territory),
-                terminal_reward=cfg.terminal_score_reward,
-                normalize=cfg.normalize_rewards,
+
+@dataclass(frozen=True, slots=True)
+class QibisIteration:
+    """One iteration of Algorithm 3.
+
+    Attributes:
+        index: the iteration ``i``.
+        rewards: ``r_a(pi^i)`` for every agent.
+        restricted: ``IP^i(a)`` of the restricted queries (line 15); shorter
+            than ``|Agt|`` if the iteration stopped early.
+        certified: ``IP^i(a)`` of the certification round (line 20), or
+            ``()`` if the round was not posed.
+        chosen: ``a*``, or ``None`` if the play was not updated.
+        checks: number of solver checks posed in the iteration.
+        candidate_states: ``|V^i_a|`` for every agent.
+    """
+
+    index: int
+    rewards: tuple[int, ...]
+    restricted: tuple[int, ...]
+    certified: tuple[int, ...]
+    chosen: int | None
+    checks: int
+    candidate_states: tuple[int, ...] = ()
+
+    @property
+    def improvement(self) -> tuple[int, ...]:
+        """The potentials that decide the iteration: certified if posed, else restricted."""
+        return self.certified if self.certified else self.restricted
+
+
+@dataclass(frozen=True, slots=True)
+class QibisResult:
+    """Result of Q-IBIS, with the fields of :class:`~rcmas.ibis.IbisResult`.
+
+    Attributes:
+        is_sat: a satisfying play was found (``play`` is set).
+        reason: ``"ne"``, ``"cycle"``, ``"max_iters"``, ``"unknown"`` or ``"unsat"``.
+        found_ne: the canonical completion of ``play`` is an equilibrium.
+        iterations: index ``i`` of the last iteration that ran (``N`` if the
+            bound was reached, with ``play`` the play produced in iteration ``N``).
+        strategy: the profiles of ``play`` as coordinates.
+        payoff_by_agent: ``r_a(play)``, evaluated on the final state.
+        final_solution: the SMT model whose play is ``play`` (``None`` for a
+            given initial play).
+        play: the final play ``pi^i`` (tool sector indices).
+        outcome: ``"ne"``, ``"n/c"``, ``"unk"`` or ``"uns"``.
+        trace: one :class:`QibisIteration` per iteration.
+
+    The returned joint strategy is ``completion()``, the canonical
+    completion of ``play`` (Definition 4.4.2).
+    """
+
+    is_sat: bool
+    reason: str
+    found_ne: bool
+    iterations: int
+    strategy: tuple[tuple[Coord | None, ...], ...] | None
+    payoff_by_agent: tuple[int, ...] | None
+    final_solution: SmtSolution | None
+    play: Play | None = None
+    outcome: str = ""
+    trace: tuple[QibisIteration, ...] = ()
+
+    @property
+    def rewards(self) -> tuple[int, ...] | None:
+        """``r_a(play)`` (alias of ``payoff_by_agent``)."""
+        return self.payoff_by_agent
+
+    def completion(self) -> CanonicalCompletion | None:
+        """The canonical completion of the final play, or ``None``."""
+        return None if self.play is None else canonical_completion(self.play)
+
+
+# ---------------------------------------------------------------------------
+# The learners (lines 1, 11 and 13)
+# ---------------------------------------------------------------------------
+
+
+class QibisLearner:
+    """The Q-tables ``Q_a`` of a run and the candidate sets they induce.
+
+    Each agent has its own table and its own random number generator, seeded
+    from *seed*, so a run is reproducible.  The tables persist over the
+    whole run: :meth:`pretrain` is line 1 of Algorithm 3, and
+    :meth:`refine` is lines 11 and 13 of every iteration.
+    """
+
+    def __init__(
+        self,
+        game: LearningGame,
+        params: LearningParams,
+        *,
+        k: int,
+        seed: int = 0,
+    ) -> None:
+        if k < 0:
+            raise ValueError("top_k must be >= 0")
+        self.game = game
+        self.params = params
+        self.k = k
+        self.tables: list[QValues] = [{} for _ in range(game.num_agents)]
+        self.rngs = [random.Random(f"qibis:{seed}:{a}") for a in range(game.num_agents)]
+
+    def pretrain(self, episodes: int) -> None:
+        """Line 1: train every ``Q_a`` against uniformly random opponents."""
+        for a in range(self.game.num_agents):
+            train_q(
+                self.tables[a],
+                self.game,
+                a,
+                opponents=None,
+                episodes=episodes,
+                params=self.params,
+                rng=self.rngs[a],
             )
 
-        act_chosen = actions.get(agent_id)
-        if act_chosen is None:
-            continue
+    def candidates(
+        self, play: Play, agent: int, visited: set[StateKey]
+    ) -> SectorCandidates:
+        """``Cand^{a,i}`` over ``V^i_a = visited + {s_0, ..., s_{m-1}}`` (line 13)."""
+        q = self.tables[agent]
+        out: SectorCandidates = {}
+        states = set(visited)
+        states.update(play.states[: play.horizon])
+        for s in states:
+            chosen = set(top_k(q, s, self.game.options(s), self.k))
+            t = play.step_of(s)
+            if t is not None:
+                chosen.add(play.actions[t][agent])
+            out[s] = tuple(sorted(chosen))
+        return out
 
-        if sym is not None:
-            canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
-            s = state_key(canon_owner)
-            a = str(sigma[int(action_key(state, act_chosen))])
-        else:
-            s = state_key(state.owner_by_index)
-            a = action_key(state, act_chosen)
-        seen_states.add(tuple(state.owner_by_index))
+    def refine(self, play: Play, episodes: int) -> list[SectorCandidates]:
+        """Line 11 and line 13: train every ``Q_a`` against the completion of *play*.
 
-        if terminal:
-            target = r
-        else:
-            if sym is not None:
-                next_canon, next_sigma = canonical_state(next_state.owner_by_index, sym.automorphisms)
-                next_sk = state_key(next_canon)
-                next_opts = list(next_state.available_actions())
-                next_aks = [str(next_sigma[int(action_key(next_state, c))]) for c in next_opts]
-            else:
-                next_sk = state_key(next_state.owner_by_index)
-                next_opts = list(next_state.available_actions())
-                next_aks = [action_key(next_state, c) for c in next_opts]
-            best_next = best_q_action(q, next_sk, next_aks)
-            next_max = 0.0 if best_next is None else q.get(next_sk, {}).get(best_next, 0.0)
-            target = r + cfg.rl_gamma * next_max
-
-        old = q.get(s, {}).get(a, 0.0)
-        new = (1.0 - cfg.rl_alpha) * old + cfg.rl_alpha * float(target)
-        q.setdefault(s, {})[a] = new
+        The other agents follow the canonical completion of *play*.  Returns
+        ``Cand^{a,i}`` for every agent.
+        """
+        completion = canonical_completion(play)
+        out: list[SectorCandidates] = []
+        for a in range(self.game.num_agents):
+            visited = train_q(
+                self.tables[a],
+                self.game,
+                a,
+                opponents=completion.action,
+                episodes=episodes,
+                params=self.params,
+                rng=self.rngs[a],
+            )
+            out.append(self.candidates(play, a, visited))
+        return out
 
 
-def _bootstrap_profile_from_q(
+# ---------------------------------------------------------------------------
+# The restricted query (line 14)
+# ---------------------------------------------------------------------------
+
+
+def restricted_smt_best_response(
+    base: BaseEncoding, timeout_ms: int | None = None
+) -> RestrictedBestResponseFn:
+    """The restricted query ``smt(G_a(pi) and [Cand^{a,i}], reward_a)`` (line 14).
+
+    The candidate constraint is state-guarded: at a candidate state ``s``
+    reached at step ``t`` the action of ``a`` is one of ``Cand^{a,i}(s)``,
+    and ``a`` is free at every other state.
+    """
+    sectors = base.territory.ordered_sectors()
+    n = base.num_agents
+
+    def br(
+        play: Play, agent: int, current: tuple[int, ...], cand: SectorCandidates
+    ) -> BestResponse:
+        coords: ActionCandidates = {
+            s: tuple(sectors[j] for j in js) for s, js in cand.items()
+        }
+        per_agent = tuple(coords if b == agent else None for b in range(n))
+        sol = best_response_from_base(
+            base,
+            play,
+            agent,
+            action_candidates_by_agent=per_agent,
+            timeout_ms=timeout_ms,
+        )
+        if sol.reason == "unknown":
+            return BestResponse("unknown", current[agent], None, None, 1)
+        if not sol.is_sat:
+            raise RuntimeError(
+                "restricted best-response query unsatisfiable, although the current "
+                "play is a model of it (Section 4.9)"
+            )
+        assert sol.play is not None and sol.payoff_by_agent is not None
+        return BestResponse("ok", sol.payoff_by_agent[agent], sol.play, sol, 1)
+
+    return br
+
+
+# ---------------------------------------------------------------------------
+# The loop of Algorithm 3 (lines 7-29)
+# ---------------------------------------------------------------------------
+
+
+def run_qibis_loop(
     *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    q_by_agent: list[dict[str, dict[str, float]]],
-    sym: SymmetryInfo | None = None,
-) -> list[Policy]:
-    """Derive a collision-free initial policy profile from Q-tables via greedy rollout."""
-    policies: list[Policy] = [{} for _ in range(num_agents)]
-    state = State.initial(territory, num_agents)
-    rounds = 0
+    initial_play: Play,
+    initial_solution: SmtSolution | None,
+    refine: RefineFn,
+    restricted_best_response: RestrictedBestResponseFn,
+    best_response: BestResponseFn,
+    rewards_of: Callable[[StateKey], tuple[int, ...]],
+    max_iters: int,
+    territory: Territory | None = None,
+    log: Callable[[str], None] | None = None,
+) -> QibisResult:
+    """Run lines 7-29 of Algorithm 3 from *initial_play*.
 
-    while rounds < horizon and not state.is_terminal():
-        options = list(state.available_actions())
-        if not options:
-            break
+    *refine* trains the learners against the completion of a play and
+    returns the candidate sets (lines 11 and 13); *restricted_best_response*
+    answers the restricted query (line 14); *best_response* answers the
+    unrestricted query of the certification round (line 19).  *rewards_of*
+    evaluates ``r_a`` on a final control vector.  The loop runs for
+    ``i = 0, ..., max_iters``.
+    """
 
-        chosen_by_agent: dict[int, Coord | None] = {}
-        taken: set[Coord] = set()
-        prev_action_idx = -1
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
 
-        for a in range(num_agents):
-            if sym is not None:
-                canon_owner, sigma = canonical_state(state.owner_by_index, sym.automorphisms)
-                inv_sigma = invert_automorphism(sigma)
-                sk = state_key(canon_owner)
-                canon_aks = [str(sigma[int(action_key(state, c))]) for c in options]
-                ranked = top_k_actions(q_by_agent[a], sk, canon_aks, k=len(canon_aks))
-                if ranked:
-                    ranked_coords = [state.ordered_sectors[inv_sigma[int(ak)]] for ak in ranked]
-                else:
-                    ranked_coords = list(options)
-            else:
-                sk = state_key(state.owner_by_index)
-                aks = [action_key(state, c) for c in options]
-                ranked = top_k_actions(q_by_agent[a], sk, aks, k=len(aks))
-                ranked_coords = [decode_action(state, ak) for ak in ranked] if ranked else list(options)
+    def _result(
+        reason: str, play: Play, sol: SmtSolution | None, iterations: int
+    ) -> QibisResult:
+        coords = play.to_coords(territory) if territory is not None else None
+        return QibisResult(
+            is_sat=True,
+            reason=reason,
+            found_ne=reason == "ne",
+            iterations=iterations,
+            strategy=coords,
+            payoff_by_agent=rewards_of(play.final_state),
+            final_solution=sol,
+            play=play,
+            outcome=OUTCOME_BY_REASON[reason],
+            trace=tuple(trace),
+        )
 
-            # Symmetry-constrained filtering for round 0
-            if sym is not None and rounds == 0:
-                if a == 0:
-                    valid_indices = set(sym.representatives)
-                    ranked_coords = [c for c in ranked_coords
-                                     if territory.index_of(c) in valid_indices]
-                else:
-                    ranked_coords = [c for c in ranked_coords
-                                     if territory.index_of(c) is not None
-                                     and territory.index_of(c) >= prev_action_idx]
+    def _potential(
+        br: BestResponse, a: int, current: tuple[int, ...], kind: str
+    ) -> int:
+        ip = br.reward - current[a]
+        if ip < 0:
+            raise RuntimeError(
+                f"negative improvement potential for agent {a} in the {kind} query "
+                "(Section 4.9 and Lemma 4.7.2(3) violated)"
+            )
+        return ip
 
-            pick = None
-            for c in ranked_coords:
-                if c not in taken:
-                    pick = c
-                    break
+    if max_iters < 0:
+        raise ValueError("max_iters must be >= 0")
 
-            chosen_by_agent[a] = pick
-            if pick is not None:
-                taken.add(pick)
-                if sym is not None and rounds == 0:
-                    prev_action_idx = territory.index_of(pick)
+    play = initial_play
+    solution = initial_solution
+    seen: set[Play] = set()
+    trace: list[QibisIteration] = []
+    n = play.num_agents
 
-        key: StateKey = tuple(state.owner_by_index)
-        for a in range(num_agents):
-            policies[a][key] = chosen_by_agent[a]
+    for i in range(max_iters + 1):
+        current = rewards_of(play.final_state)
+        if play in seen:
+            _log(f"iter={i} play recurs")
+            trace.append(QibisIteration(i, current, (), (), None, 0))
+            return _result("cycle", play, solution, i)
+        seen.add(play)
 
-        colliders = detect_collisions(chosen_by_agent)
-        if colliders:
-            break
-        next_state = evolve(state, chosen_by_agent)
-        state = next_state
-        rounds += 1
+        candidates = refine(play)
+        sizes = tuple(len(c) for c in candidates)
+        _log(f"iter={i} rewards={current} candidate_states={sizes}")
 
-    return policies
+        restricted: list[int] = []
+        responses: list[BestResponse] = []
+        checks = 0
+        for a in range(n):
+            br = restricted_best_response(play, a, current, candidates[a])
+            checks += br.checks
+            if br.status == "unknown":
+                _log(f"iter={i} agent={a} restricted query: solver answered unknown")
+                trace.append(
+                    QibisIteration(
+                        i, current, tuple(restricted), (), None, checks, sizes
+                    )
+                )
+                return _result("unknown", play, solution, i)
+            restricted.append(_potential(br, a, current, "restricted"))
+            responses.append(br)
+            _log(f"iter={i} agent={a} restricted best_response={br.reward}")
+
+        certified: list[int] = []
+        if all(ip == 0 for ip in restricted):
+            responses = []
+            for a in range(n):
+                br = best_response(play, a, current)
+                checks += br.checks
+                if br.status == "unknown":
+                    _log(f"iter={i} agent={a} certification: solver answered unknown")
+                    trace.append(
+                        QibisIteration(
+                            i,
+                            current,
+                            tuple(restricted),
+                            tuple(certified),
+                            None,
+                            checks,
+                            sizes,
+                        )
+                    )
+                    return _result("unknown", play, solution, i)
+                certified.append(_potential(br, a, current, "certification"))
+                responses.append(br)
+                _log(f"iter={i} agent={a} certified best_response={br.reward}")
+            if all(ip == 0 for ip in certified):
+                trace.append(
+                    QibisIteration(
+                        i,
+                        current,
+                        tuple(restricted),
+                        tuple(certified),
+                        None,
+                        checks,
+                        sizes,
+                    )
+                )
+                _log(f"iter={i} rewards={current} equilibrium certified")
+                return _result("ne", play, solution, i)
+            potentials = certified
+        else:
+            potentials = restricted
+
+        chosen = max(range(n), key=lambda a: (potentials[a], -a))
+        trace.append(
+            QibisIteration(
+                i, current, tuple(restricted), tuple(certified), chosen, checks, sizes
+            )
+        )
+        new_play = responses[chosen].play
+        assert new_play is not None
+        _log(f"iter={i} ip={tuple(potentials)} update agent={chosen}")
+        play = new_play
+        solution = responses[chosen].solution
+
+    return _result("max_iters", play, solution, max_iters)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def _validate(
+    territory: Territory, num_agents: int, horizon: int | None, cfg: QibisConfig
+) -> int:
+    if num_agents <= 0:
+        raise ValueError("num_agents must be >= 1")
+    m = len(territory) // num_agents
+    if horizon is None:
+        horizon = m
+    if horizon != m:
+        raise ValueError(
+            f"horizon must be m = floor(|T|/|Agt|) = {m} (Definition 3.9.1), got {horizon}"
+        )
+    if cfg.max_iters < 0:
+        raise ValueError("max_iters must be >= 0")
+    if cfg.top_k < 0:
+        raise ValueError("top_k must be >= 0")
+    if cfg.offline_episodes < 0 or cfg.online_episodes < 0:
+        raise ValueError("the numbers of episodes must be >= 0")
+    return horizon
 
 
 def solve_qibis(
     *,
     territory: Territory,
     num_agents: int,
-    horizon: int,
-    cfg: QibisConfig,
+    horizon: int | None = None,
+    cfg: QibisConfig = QibisConfig(),
+    weights: tuple[int, ...] | None = None,
+    custom_neighbors: dict[int, list[int]] | None = None,
+    weight_balance_target: int | None = None,
+    initial_constraints: ExtraConstraints | None = None,
+    initial_play: Play | None = None,
 ) -> QibisResult:
-    """Run Q-IBIS: Q-learning-guided iterative best-response (Alg 2)."""
-    if num_agents <= 0:
-        raise ValueError("num_agents must be >= 1")
-    if horizon <= 0:
-        raise ValueError("horizon must be >= 1")
-    if cfg.max_iters <= 0:
-        raise ValueError("max_iters must be >= 1")
+    """Run Q-IBIS (Algorithm 3) with the parameters of *cfg*.
 
-    sym = symmetry_info(territory) if cfg.symmetry else None
-
-    policies: list[Policy] = [{} for _ in range(num_agents)]
-    seen_profiles: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
-
-    q_by_agent: list[dict[str, dict[str, float]] | None] = [None] * num_agents
-    seen_states_by_agent: list[set[StateKey] | None] = [None] * num_agents
-
-    # RL bootstrap
-    if cfg.rl_episodes_per_iter > 0 and cfg.rl_bootstrap_initial_profile and cfg.rl_bootstrap_episodes > 0:
-        _log(cfg.progress, f"bootstrap rl_episodes={cfg.rl_bootstrap_episodes}")
-        q_boot: list[dict[str, dict[str, float]]] = []
-        for a in range(num_agents):
-            _, _, q_next, seen_next = _train_best_response_q(
-                territory=territory, num_agents=num_agents, horizon=horizon,
-                agent_id=a, opponents=policies, cfg=cfg,
-                episodes=cfg.rl_bootstrap_episodes, sym=sym,
-            )
-            q_boot.append(q_next)
-            if cfg.rl_persist_q:
-                q_by_agent[a] = q_next
-                seen_states_by_agent[a] = seen_next
-
-        policies = _bootstrap_profile_from_q(
-            territory=territory, num_agents=num_agents, horizon=horizon,
-            q_by_agent=q_boot, sym=sym,
-        )
-        _log(cfg.progress, f"bootstrap policy_sizes={[len(p) for p in policies]}")
-
-    # Build base encoding once — caches expensive constraint expressions (O(S³))
-    # Prune cr variables for sector pairs whose BFS distance exceeds the demand.
-    base_enc = build_base_encoding(
-        territory=territory, num_agents=num_agents, horizon=horizon,
-        require_victory=True, symmetry_breaking=cfg.symmetry,
-        demands=cfg.demands,
-        max_region_size=len(territory) // num_agents,
-    )
-
+    *horizon* must be ``m = floor(|T|/|Agt|)`` (``None`` selects it).
+    *weights* and *custom_neighbors* describe an abstract RCMAS (Definition
+    6.1.2); grid symmetry is then skipped, and the symmetry constraints of
+    the abstract game can be passed as *initial_constraints*, which are
+    added to the initial query only.  *initial_play* replaces the initial
+    query.
+    """
+    h = _validate(territory, num_agents, horizon, cfg)
     t0 = time.perf_counter()
 
-    for it in range(1, cfg.max_iters + 1):
-        iter_t0 = time.perf_counter()
-        key = freeze_profile(policies)
-        if key in seen_profiles:
-            base = _evaluate_profile(territory, num_agents, horizon, policies, cfg, base_enc)
+    def _log(msg: str) -> None:
+        if cfg.progress:
             if cfg.timing:
-                _log(cfg.progress, f"done reason=cycle iterations={it - 1} total_time_s={time.perf_counter() - t0:.3f}")
-            return QibisResult(base.is_sat, "cycle", False, it - 1, base.payoff_by_agent, base, base.actions_by_round)
-        seen_profiles.add(key)
+                msg = f"{msg} t={time.perf_counter() - t0:.3f}s"
+            print(msg, file=sys.stderr, flush=True)
 
-        base_eval_t0 = time.perf_counter()
-        base = _evaluate_profile(territory, num_agents, horizon, policies, cfg, base_enc)
-        base_eval_dt = time.perf_counter() - base_eval_t0
+    base = build_base_encoding(
+        territory=territory,
+        num_agents=num_agents,
+        horizon=h,
+        demands=cfg.demands,
+        weights=weights,
+        custom_neighbors=custom_neighbors,
+        weight_balance_target=weight_balance_target,
+    )
+    game = LearningGame.from_territory(
+        territory, num_agents, weights=weights, custom_neighbors=custom_neighbors
+    )
+    learner = QibisLearner(game, cfg.learning_params(), k=cfg.top_k, seed=cfg.seed)
 
-        if not base.is_sat:
-            if cfg.timing:
-                _log(cfg.progress, f"iter={it} base_eval reason={base.reason} time_s={base_eval_dt:.3f}")
-            return QibisResult(False, base.reason, False, it - 1, None, base, base.actions_by_round)
-        if base.payoff_by_agent is None:
-            return QibisResult(False, "missing_debug_payoff", False, it - 1, None, base, base.actions_by_round)
+    # Line 1: offline pre-training against random opponents.
+    learner.pretrain(cfg.offline_episodes)
+    _log(f"pretrained episodes={cfg.offline_episodes} per agent")
 
-        base_payoff = base.payoff_by_agent
-        if cfg.timing:
-            _log(cfg.progress, f"iter={it} base_payoff={base_payoff} base_eval_time_s={base_eval_dt:.3f}")
-        else:
-            _log(cfg.progress, f"iter={it} base_payoff={base_payoff}")
-
-        best_agent: int | None = None
-        best_ratio: float = 1.0
-        best_delta: int = 0
-        best_learned: Policy | None = None
-        best_learned_states: int = 0
-
-        candidates_by_agent: list[ActionCandidates | None] = [None] * num_agents
-
-        for a in range(num_agents):
-            # 1) RL proposal
-            if cfg.rl_episodes_per_iter > 0:
-                rl_t0 = time.perf_counter()
-                q_seed = q_by_agent[a] if cfg.rl_persist_q else {}
-                seen_seed = seen_states_by_agent[a] if cfg.rl_persist_q else set()
-
-                if cfg.rl_pretrain_from_smt_base:
-                    _pretrain_q_from_smt_trace(
-                        territory=territory, num_agents=num_agents, horizon=horizon,
-                        agent_id=a, sol=base, cfg=cfg,
-                        q=q_seed if q_seed is not None else {},
-                        seen_states=seen_seed if seen_seed is not None else set(),
-                        sym=sym,
-                    )
-
-                proposal, candidates, q_next, seen_states_next = _train_best_response_q(
-                    territory=territory, num_agents=num_agents, horizon=horizon,
-                    agent_id=a, opponents=policies, cfg=cfg,
-                    q_init=q_seed, seen_states_init=seen_seed, sym=sym,
-                )
-                candidates_by_agent[a] = candidates
-                if cfg.rl_persist_q:
-                    q_by_agent[a] = q_next
-                    seen_states_by_agent[a] = seen_states_next
-                rl_dt = time.perf_counter() - rl_t0
-                if cfg.timing:
-                    _log(cfg.progress, f"iter={it} agent={a} rl_states={len(proposal)} rl_time_s={rl_dt:.3f}")
-                else:
-                    _log(cfg.progress, f"iter={it} agent={a} rl_states={len(proposal)}")
-
-            # 2) SMT best-response
-            fixed: list[Policy | None] = [None if other == a else (policies[other] if policies[other] else None) for other in range(num_agents)]
-            action_cands = None
-            cand = candidates_by_agent[a]
-            if cand is not None and cfg.rl_top_k_actions > 0:
-                action_cands = tuple(cand if i == a else None for i in range(num_agents))
-
-            br_t0 = time.perf_counter()
-            br = solve_from_base(
-                base_enc,
-                objective=a, fixed_policy_by_agent=tuple(fixed),
-                action_candidates_by_agent=action_cands,
-                enforce_state_only_for_agents=(a,),
-                debug=True, timeout_ms=cfg.timeout_ms,
+    # Lines 2-6: the initial play, from smt(F).
+    if initial_play is None:
+        abstract = weights is not None or custom_neighbors is not None
+        if cfg.symmetry and abstract and initial_constraints is None:
+            _log(
+                "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
             )
-            br_dt = time.perf_counter() - br_t0
+        init = find_feasible_from_base(
+            base,
+            symmetry=cfg.symmetry and not abstract,
+            extra_constraints=initial_constraints,
+            timeout_ms=cfg.timeout_ms,
+        )
+        if init.reason == "unknown":
+            _log("initial query: solver answered unknown")
+            return QibisResult(
+                False, "unknown", False, 0, None, None, None, outcome="unk"
+            )
+        if not init.is_sat:
+            _log("initial query unsatisfiable: no satisfying strategy exists")
+            return QibisResult(
+                False, "unsat", False, 0, None, None, None, outcome="uns"
+            )
+        assert init.play is not None
+        start, start_sol = init.play, init
+    else:
+        if initial_play.num_agents != num_agents or initial_play.horizon != h:
+            raise ValueError("initial_play does not match the game")
+        start, start_sol = initial_play, None
 
-            if not br.is_sat:
-                if cfg.timing:
-                    _log(cfg.progress, f"iter={it} agent={a} smt_br reason={br.reason} time_s={br_dt:.3f}")
-                else:
-                    _log(cfg.progress, f"iter={it} agent={a} smt_br reason={br.reason}")
-                if br.reason == "unknown":
-                    return QibisResult(False, "unknown", False, it - 1, base_payoff, base, base.actions_by_round)
-                continue
-
-            if br.payoff_by_agent is None:
-                return QibisResult(False, "missing_debug_payoff", False, it - 1, base_payoff, br, br.actions_by_round)
-
-            new_payoff = br.payoff_by_agent[a]
-            if cfg.timing:
-                _log(cfg.progress, f"iter={it} agent={a} smt_br_payoff={new_payoff} time_s={br_dt:.3f}")
-            else:
-                _log(cfg.progress, f"iter={it} agent={a} smt_br_payoff={new_payoff}")
-
-            if new_payoff > base_payoff[a]:
-                assert br.owner_by_round is not None and br.actions_by_round is not None
-                learned = policy_from_solution(br.owner_by_round, br.actions_by_round, a)
-                delta = int(new_payoff - base_payoff[a])
-                ratio = float(new_payoff) / float(base_payoff[a])
-                learned_states = len(learned)
-
-                is_better = (
-                    best_agent is None
-                    or ratio > best_ratio
-                    or (ratio == best_ratio and delta > best_delta)
-                    or (ratio == best_ratio and delta == best_delta and learned_states < best_learned_states)
-                )
-                if is_better:
-                    best_agent, best_ratio, best_delta, best_learned, best_learned_states = (
-                        a, ratio, delta, learned, learned_states
-                    )
-                _log(cfg.progress, f"iter={it} agent={a} improved delta={delta} ratio={ratio:.3f} learned_states={learned_states}")
-
-        if best_agent is None or best_learned is None:
-            if cfg.timing:
-                _log(cfg.progress, f"iter={it} converged_time_s={time.perf_counter() - iter_t0:.3f}")
-                _log(cfg.progress, f"done reason=ne iterations={it} total_time_s={time.perf_counter() - t0:.3f}")
-            return QibisResult(True, "ne", True, it, base_payoff, base, base.actions_by_round)
-
-        updated = dict(policies[best_agent])
-        updated.update(best_learned)
-        policies = [dict(p) for p in policies]
-        policies[best_agent] = updated
-
-        _log(cfg.progress, f"iter={it} picked_agent={best_agent} picked_delta={best_delta} picked_ratio={best_ratio:.3f} picked_learned_states={best_learned_states}")
-        if cfg.timing:
-            _log(cfg.progress, f"iter={it} policy_sizes={[len(p) for p in policies]} iter_time_s={time.perf_counter() - iter_t0:.3f}")
-        else:
-            _log(cfg.progress, f"iter={it} policy_sizes={[len(p) for p in policies]}")
-
-    final = _evaluate_profile(territory, num_agents, horizon, policies, cfg)
-    if cfg.timing:
-        _log(cfg.progress, f"done reason=max_iters iterations={cfg.max_iters} total_time_s={time.perf_counter() - t0:.3f}")
-
-    return QibisResult(final.is_sat, "max_iters", False, cfg.max_iters, final.payoff_by_agent, final, final.actions_by_round)
+    return run_qibis_loop(
+        initial_play=start,
+        initial_solution=start_sol,
+        refine=lambda play: learner.refine(play, cfg.online_episodes),
+        restricted_best_response=restricted_smt_best_response(base, cfg.timeout_ms),
+        best_response=smt_best_response(base, cfg.timeout_ms),
+        rewards_of=base.rewards_of,
+        max_iters=cfg.max_iters,
+        territory=territory,
+        log=_log if cfg.progress else None,
+    )
