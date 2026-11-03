@@ -44,12 +44,16 @@ values it used::
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .scenarios import GRIDS_DIR, Scenario
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10: tomli is a dependency there
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 @dataclass(frozen=True, slots=True)

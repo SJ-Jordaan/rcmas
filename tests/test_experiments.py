@@ -122,6 +122,40 @@ class TestConfig:
         with pytest.raises(ValueError, match="unknown"):
             load_protocol(cfg)
 
+    def test_reads_configs_without_tomllib(self) -> None:
+        """Python 3.10 has no tomllib; the config reader must use tomli there.
+
+        A fresh interpreter in which ``import tomllib`` fails, as on 3.10,
+        loads the thesis configuration through the ``tomli`` module (stood in
+        for by the real parser under that name).
+        """
+        import subprocess
+        import sys
+
+        code = (
+            "import sys\n"
+            "try:\n"
+            "    import tomllib as parser\n"
+            "except ModuleNotFoundError:\n"
+            "    import tomli as parser\n"
+            "sys.modules['tomli'] = parser\n"
+            "sys.modules['tomllib'] = None\n"
+            "from experiments.config import load_config, load_protocol\n"
+            "import experiments.config as c\n"
+            "assert c.tomllib is parser\n"
+            "cfg = 'experiments/thesis-eval.toml'\n"
+            "print(len(load_config(cfg)), load_protocol(cfg).time_limit_s)\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.split() == ["560", "900"]
+
 
 # ---------------------------------------------------------------------------
 # Provenance
