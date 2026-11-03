@@ -7,7 +7,10 @@
 once per run, as a list of Z3 expressions (Section 7.1), together with the
 bound ``reward_a <= R_max`` that ``F`` implies
 (:func:`~rcmas.smt_constraints.reward_bound_constraint`).  Every query of a
-run replays this list into a fresh solver and adds its own constraints:
+run replays this list into a fresh solver and adds its own constraints, with
+one exception: the feasibility filter and the probes of the S-IBIS binary
+search for one agent in one iteration share one solver, each bound inside a
+push/pop scope, so these checks run in Z3's incremental mode:
 
 - :func:`find_feasible_from_base`: ``smt(F)``, the initial play of IBIS,
   S-IBIS and Q-IBIS (line 1 of Algorithm 1), optionally with the

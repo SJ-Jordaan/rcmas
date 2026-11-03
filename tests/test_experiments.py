@@ -318,6 +318,11 @@ class TestRunner:
         )
         assert cg["orbit_blocks"] == cg["cegar_initial_blocks"]
         assert by["a_sibis"]["geo_group_order"] == 4  # the 3x2 rectangle has V4
+        assert by["a_sibis"]["symmetry_group_order"] == 4
+        # Two 2x2 squares: H_geo of T has order 4, the group of Theorem 5.3.2
+        # (D_4 on each square and their exchange) 8^2 * 2 = 128.
+        assert by["a_qibis"]["geo_group_order"] == 4
+        assert by["a_qibis"]["symmetry_group_order"] == 128
 
     def test_timeout_and_error(self, sweep: tuple[Path, list[dict]]) -> None:
         _, records = sweep

@@ -905,6 +905,48 @@ class TestGeometricSubgroup:
         )
 
 
+class TestGroupOrder:
+    """``ComponentInfo.group_order`` is the order of the group that the tool uses."""
+
+    @staticmethod
+    def _benchmark_grids() -> list[str]:
+        import glob
+        import os
+
+        root = os.path.join(os.path.dirname(__file__), "..", "grids")
+        return sorted(glob.glob(os.path.join(root, "*", "*.txt")))
+
+    def test_equals_order_of_generated_group(self):
+        """On every grid file (with a group small enough to enumerate)."""
+        checked = 0
+        for path in self._benchmark_grids():
+            with open(path, encoding="utf-8") as f:
+                t = Territory.from_ascii(f)
+            ci = component_info(t)
+            if ci.group_order > 5000:
+                continue
+            assert ci.group_order == len(tool_group(t)), path
+            checked += 1
+        assert checked >= 27
+
+    @pytest.mark.parametrize(
+        "rows,order",
+        [
+            (["..", ".."], 8),  # H_geo = D_4
+            (["..#.", "###."], 4),  # two dominoes, one turned: copies not exchanged
+            (["..#..", "..#.."], 128),  # two 2x2 squares: 8^2 * 2!
+            ([".#.#."], 6),  # three single sectors: 3!
+        ],
+    )
+    def test_small_cases(self, rows: list[str], order: int):
+        t = Territory.from_ascii(rows)
+        assert component_info(t).group_order == order == len(tool_group(t))
+
+    def test_is_subgroup_order_of_aut(self):
+        t = Territory.from_ascii(["..#.", "###."])
+        assert len(_brute_force_aut(t)) == 8 > component_info(t).group_order
+
+
 class TestThesisExamplesInToolNumbering:
     """Examples of Section 5.1 in the enumeration of Remark 3.1.1 (bottom row first)."""
 

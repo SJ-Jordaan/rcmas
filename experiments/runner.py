@@ -204,17 +204,22 @@ def _run_algorithm(
 
 
 def _static_info(territory: Any) -> dict[str, Any]:
-    """Size of the geometric subgroup and of the orbit partition (Section 7.1).
+    """Sizes of the symmetry groups and of the orbit partition (Section 7.1).
 
+    ``geo_group_order`` is ``|H_geo|`` of the whole territory.
+    ``symmetry_group_order`` is the order of the group that the symmetry
+    constraints and the orbit partition use: ``H_geo`` on a connected
+    territory, the group ``H`` of Theorem 5.3.2 on a disconnected one (for
+    example 128 on ``2x2-2x2``, whose ``H_geo`` has order 4).
     ``orbit_blocks`` is the number of blocks of the initial partition of
-    CEGAR-NE, :func:`rcmas.abstraction.orbit_partition`, whose group also
-    exchanges isomorphic components on a disconnected territory.
+    CEGAR-NE, :func:`rcmas.abstraction.orbit_partition`.
     """
     from rcmas.abstraction import orbit_partition
-    from rcmas.symmetry import territory_automorphisms
+    from rcmas.symmetry import component_info, territory_automorphisms
 
     return {
         "geo_group_order": len(territory_automorphisms(territory)),
+        "symmetry_group_order": component_info(territory).group_order,
         "orbit_blocks": len(orbit_partition(territory).blocks),
     }
 
@@ -417,6 +422,7 @@ _RESULT_DEFAULTS: dict[str, Any] = {
     "cegar_refinements": None,
     "cegar_trace": None,
     "geo_group_order": None,
+    "symmetry_group_order": None,
     "orbit_blocks": None,
     "certificate": None,
     "error": None,
