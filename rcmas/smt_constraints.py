@@ -33,12 +33,19 @@ unoccupied sector (see :mod:`rcmas.smt_variables`).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from .model import Coord, Territory
 from .smt_variables import SmtVariables
 from .strategy import ActionCandidates, Play, Policy
-from .symmetry import ComponentInfo, LocalSymmetryInfo, SymmetryInfo
+from .symmetry import (
+    ComponentInfo,
+    LocalConstraint,
+    LocalSymmetryInfo,
+    SymmetryBreaking,
+    SymmetryInfo,
+    agent_classes,
+)
 
 # ---------------------------------------------------------------------------
 # Definition 4.2.1: initial state constraint [Init]
@@ -531,8 +538,89 @@ def action_candidates_constraint(
 
 
 # ---------------------------------------------------------------------------
-# Symmetry-breaking constraints
+# Symmetry-breaking constraints (Chapter 5, Section 5.4)
+#
+# None of these is part of the cached formula F.  They are added only to the
+# queries for satisfying and collectively optimal strategies and to the query
+# that produces the initial play of IBIS, S-IBIS and Q-IBIS (Section 5.4.5),
+# through :func:`rcmas.smt_solve.symmetry_constraints`.  Each function is the
+# SMT form of a predicate of :class:`rcmas.symmetry.SymmetryBreaking`.
 # ---------------------------------------------------------------------------
+
+
+def _lex_leader(opt: Any, v: SmtVariables, classes: Sequence[Sequence[int]]) -> None:
+    """Section 5.4.1: ``act^{a_j}_0 <= act^{a_{j+1}}_0`` within each demand class."""
+    for cls in classes:
+        for a, b in zip(cls, cls[1:]):
+            opt.add(v.action[a][0] <= v.action[b][0])
+
+
+def _spatial(opt: Any, v: SmtVariables, representatives: Iterable[int]) -> None:
+    """Section 5.4.2: ``act^1_0`` is one of the orbit representatives."""
+    from z3 import BoolVal, Or
+
+    reps = sorted(set(representatives))
+    if len(reps) == v.S:
+        return  # trivial group: every sector is a representative
+    opt.add(Or([v.action[0][0] == r for r in reps]) if reps else BoolVal(False))
+
+
+def _local(opt: Any, v: SmtVariables, lc: LocalConstraint) -> None:
+    """Section 5.4.3: the constraint ``L_l`` of Corollary 5.2.3."""
+    from z3 import And, Implies, Not
+
+    forbidden = sorted(lc.subregion - lc.representatives)
+    if not forbidden:
+        return
+    m = v.T
+    compatible = [
+        Not(And(v.owner[i][m] == v.owner[j][m], v.owner[i][m] != -1))
+        for i, j in sorted(lc.boundary_pairs)
+    ]
+    consequent = And([v.action[0][0] != s for s in forbidden])
+    opt.add(Implies(And(compatible), consequent) if compatible else consequent)
+
+
+def _copy_order(
+    opt: Any,
+    v: SmtVariables,
+    c1: Sequence[int],
+    earlier: Sequence[int],
+    later: Sequence[int],
+) -> None:
+    """Section 5.4.4: constraint (3) of Theorem 5.3.2 for consecutive copies.
+
+    For every agent ``a`` of agent 0's class ``C_1`` and every sector ``y`` of
+    the later copy: if ``a`` claims ``y`` in round 0, then some agent of
+    ``C_1`` claims, in round 0, a sector of the earlier copy whose label is at
+    most that of ``y`` (position ``r`` of each copy has label ``r``).
+    """
+    from z3 import Implies, Or
+
+    for a in c1:
+        for r, y in enumerate(later):
+            some_earlier = Or(
+                [v.action[b][0] == x for b in c1 for x in earlier[: r + 1]]
+            )
+            opt.add(Implies(v.action[a][0] == y, some_earlier))
+
+
+def symmetry_plan_constraint(opt: Any, v: SmtVariables, plan: SymmetryBreaking) -> None:
+    """Add every constraint of *plan* (Sections 5.4.1-5.4.4).
+
+    The SMT form of :meth:`rcmas.symmetry.SymmetryBreaking.admits`, over the
+    variables ``act^a_0`` and ``sec^i_m``.  With ``m = 0`` there are no
+    first-round actions and nothing is added.
+    """
+    if v.T == 0 or v.A == 0:
+        return
+    _lex_leader(opt, v, plan.classes)
+    _spatial(opt, v, plan.representatives)
+    for lc in plan.local:
+        _local(opt, v, lc)
+    if plan.classes:
+        for earlier, later in plan.copy_pairs:
+            _copy_order(opt, v, plan.classes[0], earlier, later)
 
 
 def symmetry_breaking_constraint(
@@ -541,40 +629,17 @@ def symmetry_breaking_constraint(
     sym_info: SymmetryInfo,
     demands: tuple[int, ...] | None = None,
 ) -> None:
-    """Add symmetry-breaking constraints to prune equivalent solutions.
+    """Add the constraints of Theorem 5.1.3 and Corollary 5.1.4.
 
-    Two types of constraint are added:
-
-    1. **Agent lex-leader**: within each demand class, first-round actions
-       are ordered by agent index.  When *demands* is ``None``, all agents
-       are assumed to share a common demand (global ordering, factor A!).
-       With heterogeneous demands, only agents in the same demand class
-       are interchangeable (factor ∏|C|!).
-
-    2. **Spatial canonicalization**: the first agent's first action is
-       restricted to one canonical representative per territory-automorphism
-       orbit.  This eliminates spatial symmetry (factor |Aut(T)|).
+    The lex-leader constraint (Definition 5.1.6) within the demand classes of
+    *demands* (one class of all agents if ``None``), and the spatial
+    canonicalisation constraint (Definition 5.1.7) with the representatives
+    of *sym_info*, whose group the tool takes to be ``H_geo``.
     """
-    from z3 import Or
-
-    A = v.A
-
-    # Agent lex-leader on round-0 actions (within demand classes)
-    if demands is None:
-        # Uniform demands assumed — global S_n ordering
-        for a in range(A - 1):
-            opt.add(v.action[a][0] <= v.action[a + 1][0])
-    else:
-        from .symmetry import demand_classes
-
-        for cls in demand_classes(demands):
-            for i in range(len(cls) - 1):
-                opt.add(v.action[cls[i]][0] <= v.action[cls[i + 1]][0])
-
-    # Spatial canonicalization: first agent picks from orbit representatives
-    reps = sym_info.representatives
-    if reps:
-        opt.add(Or([v.action[0][0] == r for r in reps]))
+    if v.T == 0 or v.A == 0:
+        return
+    _lex_leader(opt, v, agent_classes(v.A, demands))
+    _spatial(opt, v, sym_info.representatives)
 
 
 def local_symmetry_breaking_constraint(
@@ -582,66 +647,20 @@ def local_symmetry_breaking_constraint(
     v: SmtVariables,
     local_sym: LocalSymmetryInfo,
 ) -> None:
-    """Add conditional local symmetry-breaking constraints (Ch5 §3).
+    """Add the constraint ``L_l`` of Corollary 5.2.3 for one subregion ``R``:
 
-    For each non-identity local automorphism σ_R with problematic boundary
-    pairs BP(σ_R), adds:
+        (and over (i, j) in BP(H_R) of not (sec^i_m = sec^j_m and sec^i_m != 0))
+            implies (act^1_0 in R implies act^1_0 in Reps_R)
 
-        (∧_{(i,j)∈BP} ¬(sec^i_m = sec^j_m ∧ sec^i_m ≠ -1))
-            ⟹ (∀a: act^a_0 ∈ R ⟹ act^a_0 ∈ Reps_R)
-
-    The antecedent checks reward compatibility at the terminal state.
-    The consequent restricts first actions within R to orbit representatives.
+    The consequent restricts agent 0 (thesis agent 1) only, and the
+    antecedent ranges over ``BP(H_R)``, the problematic boundary pairs of
+    every element of the geometric subgroup of ``R``.  With ``BP(H_R)``
+    empty the antecedent is true.  Valid for satisfying and collectively
+    optimal synthesis, not for equilibria (Remark 5.2.2).
     """
-    from z3 import And, Implies, Not, Or
-
-    A, S = v.A, v.S
-    final_t = v.T
-    reps = set(local_sym.representatives)
-    subregion = local_sym.subregion
-
-    if not reps or not local_sym.boundary_pairs:
+    if v.T == 0 or v.A == 0:
         return
-
-    # Collect all unique boundary pairs across all automorphisms
-    all_bp: set[tuple[int, int]] = set()
-    for bp_set in local_sym.boundary_pairs.values():
-        all_bp.update(bp_set)
-
-    if not all_bp:
-        return
-
-    # Antecedent: no agent spans a problematic boundary pair at terminal state
-    compat_clauses = []
-    for i, j in sorted(all_bp):
-        # ¬(sec^i_m = sec^j_m ∧ sec^i_m ≠ -1)
-        compat_clauses.append(
-            Not(
-                And(
-                    v.owner[i][final_t] == v.owner[j][final_t],
-                    v.owner[i][final_t] != -1,
-                )
-            )
-        )
-    antecedent = And(compat_clauses) if len(compat_clauses) > 1 else compat_clauses[0]
-
-    # Consequent: for each agent, if first action is in R, it must be an orbit rep
-    consequent_clauses = []
-    non_rep_in_r = sorted(subregion - reps)
-    for a in range(A):
-        for s in non_rep_in_r:
-            # act^a_0 ≠ s (forbid non-representative sectors in R)
-            consequent_clauses.append(v.action[a][0] != s)
-
-    if not consequent_clauses:
-        return
-
-    consequent = (
-        And(consequent_clauses)
-        if len(consequent_clauses) > 1
-        else consequent_clauses[0]
-    )
-    opt.add(Implies(antecedent, consequent))
+    _local(opt, v, LocalConstraint.of(local_sym))
 
 
 def disconnected_symmetry_constraint(
@@ -650,83 +669,19 @@ def disconnected_symmetry_constraint(
     comp_info: ComponentInfo,
     demands: tuple[int, ...] | None = None,
 ) -> None:
-    """Add symmetry-breaking constraints for disconnected territories (Ch5 §4).
+    """Add the constraints (1)-(3) of Theorem 5.3.2.
 
-    Three types of constraints:
-    1. Agent lex-leader within demand classes (reuses symmetry_breaking_constraint logic)
-    2. Intra-component spatial canonicalization (orbit reps within each component)
-    3. Inter-component ordering for isomorphic components
+    (1) the lex-leader constraint within the demand classes; (2) spatial
+    canonicalisation of agent 0's first-round action under the group ``H`` of
+    the theorem (``comp_info.representatives``); (3) for consecutive copies
+    of each class of ``comp_info.copy_classes``, the min-based ordering of the
+    first-round actions of agent 0's demand class (Section 5.4.4).
     """
-    from z3 import And, If, Implies, Or
-
-    A = v.A
-
-    # 1. Agent lex-leader (within demand classes)
-    if demands is None:
-        for a in range(A - 1):
-            opt.add(v.action[a][0] <= v.action[a + 1][0])
-    else:
-        from .symmetry import demand_classes
-
-        for cls in demand_classes(demands):
-            for i in range(len(cls) - 1):
-                opt.add(v.action[cls[i]][0] <= v.action[cls[i + 1]][0])
-
-    # 2. Intra-component spatial canonicalization
-    # For each component, restrict first agent's first action in that component
-    # to orbit representatives within that component
-    for comp_idx, comp in enumerate(comp_info.components):
-        reps = set(comp_info.component_representatives[comp_idx])
-        non_rep = sorted(comp - reps)
-        if not non_rep:
-            continue
-        # First agent (agent 0): if action is in this component, must be a rep
-        for s in non_rep:
-            opt.add(v.action[0][0] != s)
-
-    # 3. Inter-component ordering for isomorphic components
-    # For each iso class with ≥2 components, encode:
-    #   agent 0's first action in the lowest-indexed component is preferred.
-    # Sound constraint: for each iso class, the minimum first-round action
-    # (over all agents) in component K_l must be ≤ the minimum in K_l'
-    # when l < l' (under canonical labeling within the component).
-    #
-    # Encoding: for each pair of isomorphic components (K_l, K_l'),
-    # for all agents a, b: (act^a_0 ∈ K_l' ∧ act^b_0 ∈ K_l)
-    #   ⟹ rank_within_component(act^b_0 in K_l) ≤ rank(act^a_0 in K_l')
-    #
-    # Simplified: use the isomorphism witness to map K_l' sector indices
-    # to K_l indices, then compare within the same index space.
-    for iso_class in comp_info.iso_classes:
-        if len(iso_class) < 2:
-            continue
-
-        for idx in range(len(iso_class) - 1):
-            ci_first = iso_class[idx]
-            ci_second = iso_class[idx + 1]
-            comp_first = comp_info.components[ci_first]
-            comp_second = comp_info.components[ci_second]
-
-            # Build rank within each component (position in sorted order)
-            first_sorted = sorted(comp_first)
-            second_sorted = sorted(comp_second)
-            rank_first = {s: r for r, s in enumerate(first_sorted)}
-            rank_second = {s: r for r, s in enumerate(second_sorted)}
-
-            # For all agents a, b:
-            #   (act^a_0 ∈ K_first ∧ act^b_0 ∈ K_second)
-            #   ⟹ rank(act^a_0) ≤ rank(act^b_0)
-            for a in range(A):
-                for b in range(A):
-                    for sf in first_sorted:
-                        rf = rank_first[sf]
-                        for ss in second_sorted:
-                            rs = rank_second[ss]
-                            if rf > rs:
-                                # This pairing violates component ordering
-                                opt.add(
-                                    Implies(
-                                        And(v.action[a][0] == sf, v.action[b][0] == ss),
-                                        False,
-                                    )
-                                )
+    if v.T == 0 or v.A == 0:
+        return
+    classes = agent_classes(v.A, demands)
+    _lex_leader(opt, v, classes)
+    _spatial(opt, v, comp_info.representatives)
+    if classes:
+        for earlier, later in comp_info.consecutive_copies():
+            _copy_order(opt, v, classes[0], earlier, later)
