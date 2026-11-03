@@ -244,17 +244,17 @@ def inst_prose(r: Run) -> str:
 
 
 def _orbit_blocks_from_grid(grid_path: str) -> int | None:
-    """Number of orbits of ``H_geo`` (logs of the examined runner do not record it)."""
+    """Blocks of the orbit partition (logs of the examined runner do not record it)."""
     try:
+        from rcmas.abstraction import orbit_partition
         from rcmas.model import Territory
-        from rcmas.symmetry import sector_orbits, territory_automorphisms
 
         from .provenance import TOOL_ROOT
 
         path = TOOL_ROOT / grid_path
         with open(path, encoding="utf-8") as f:
             t = Territory.from_ascii(f)
-        return len(sector_orbits(t, territory_automorphisms(t)))
+        return len(orbit_partition(t).blocks)
     except Exception:  # noqa: BLE001 - the report states what it could not compute
         return None
 
@@ -369,7 +369,7 @@ class Analysis:
 
     # -- CEGAR ----------------------------------------------------------
     def orbit_blocks(self, inst: tuple[str, int]) -> int | None:
-        """``|T/H_geo|`` of the instance's territory, from the log or from the grid file."""
+        """``|T/H|`` of the instance's territory, from the log or from the grid file."""
         blocks = {
             r.orbit_blocks
             for r in self.d.runs

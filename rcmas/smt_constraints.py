@@ -433,7 +433,7 @@ def fixed_policy_constraint(
     the states of a run are pairwise distinct (Lemma 4.4.1(3)), so the
     same-state-same-action condition it asked for always holds.
     """
-    from z3 import And, Implies, Not, Or
+    from z3 import Implies, Not, Or
 
     S, A, T = v.S, v.A, v.T
 

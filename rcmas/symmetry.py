@@ -396,9 +396,9 @@ def find_maximal_rectangular_subregions(territory: Territory) -> list[frozenset[
                             found.append(region)
     found.sort(key=lambda r: (-len(r), sorted(r)))
     maximal: list[frozenset[int]] = []
-    for rect in found:
-        if not any(rect < big for big in maximal):
-            maximal.append(rect)
+    for cand in found:
+        if not any(cand < big for big in maximal):
+            maximal.append(cand)
     return maximal
 
 

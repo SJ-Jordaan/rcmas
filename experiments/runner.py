@@ -181,13 +181,18 @@ def _run_algorithm(
 
 
 def _static_info(territory: Any) -> dict[str, Any]:
-    """Size of the geometric subgroup and of the orbit partition (Section 7.1)."""
-    from rcmas.symmetry import sector_orbits, territory_automorphisms
+    """Size of the geometric subgroup and of the orbit partition (Section 7.1).
 
-    autos = territory_automorphisms(territory)
+    ``orbit_blocks`` is the number of blocks of the initial partition of
+    CEGAR-NE, :func:`rcmas.abstraction.orbit_partition`, whose group also
+    exchanges isomorphic components on a disconnected territory.
+    """
+    from rcmas.abstraction import orbit_partition
+    from rcmas.symmetry import territory_automorphisms
+
     return {
-        "geo_group_order": len(autos),
-        "orbit_blocks": len(sector_orbits(territory, autos)),
+        "geo_group_order": len(territory_automorphisms(territory)),
+        "orbit_blocks": len(orbit_partition(territory).blocks),
     }
 
 

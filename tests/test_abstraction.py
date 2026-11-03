@@ -124,6 +124,35 @@ class TestPartition:
         t = _t(["..", ".", "..."])
         assert orbit_partition(t).is_discrete
 
+    @pytest.mark.parametrize(
+        "rows, blocks",
+        [
+            # two 2x2 squares: the exchange of the copies joins H_geo's two orbits
+            (["..#..", "..#.."], 1),
+            # two 3x3 squares: corners, edges and centres of both copies
+            (["...#...", "...#...", "...#..."], 3),
+            # a connected grid: H = H_geo
+            (GRID_4x2, 2),
+        ],
+    )
+    def test_orbit_partition_uses_the_symmetry_breaking_group(
+        self, rows: list[str], blocks: int
+    ) -> None:
+        """Section 7.1: both reductions use one computation of the symmetries.
+
+        The blocks are the orbits of the group whose representatives the
+        Chapter 5 constraints use (Theorem 5.3.2 on a disconnected
+        territory), so the smallest sector of each block is exactly the set
+        ``Reps`` of the spatial canonicalisation constraint.
+        """
+        from rcmas.symmetry import symmetry_breaking_plan
+
+        t = _t(rows)
+        P = orbit_partition(t)
+        assert len(P) == blocks
+        plan = symmetry_breaking_plan(t, 2)
+        assert tuple(min(b) for b in P.blocks) == tuple(plan.representatives)
+
     def test_largest_block_ties_by_index(self) -> None:
         P = Partition.from_blocks([{0, 1}, {2, 3}, {4}], 5)
         assert P.largest_block() == 0

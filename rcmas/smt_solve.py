@@ -47,20 +47,17 @@ from typing import Any, Callable, cast
 from .model import Coord, State, Territory, rewards_from_owner
 from .smt_constraints import (
     action_candidates_constraint,
-    disconnected_symmetry_constraint,
     domain_constraint,
     evolution_constraint,
     fixed_actions_constraint,
     fixed_policy_constraint,
     init_constraint,
-    local_symmetry_breaking_constraint,
     max_reward,
     opponent_constraint,
     protocol_constraint,
     qualitative_constraint,
     reward_bound_constraint,
     reward_constraint,
-    symmetry_breaking_constraint,
     weight_balance_constraint,
     witness_constraint,
 )
@@ -288,28 +285,14 @@ def symmetry_constraints(
     The constraints are computed from the grid geometry of *territory*, so
     they do not apply to the synthetic territory of an abstract RCMAS.
     """
-    from .symmetry import component_info as _component_info
-    from .symmetry import (
-        find_maximal_rectangular_subregions,
-        local_symmetry_info,
-        symmetry_info,
-        territory_connected_components,
-    )
+    from .smt_constraints import symmetry_plan_constraint
+    from .symmetry import symmetry_breaking_plan
 
     if v.T == 0:
         return
-    comps = territory_connected_components(territory)
-    if len(comps) > 1:
-        ci = _component_info(territory)
-        disconnected_symmetry_constraint(opt, v, ci, demands=demands)
-        return
-    sym = symmetry_info(territory)
-    symmetry_breaking_constraint(opt, v, sym, demands=demands)
-    if len(sym.automorphisms) <= 1:
-        for sub in find_maximal_rectangular_subregions(territory):
-            lsi = local_symmetry_info(territory, sub)
-            if lsi.boundary_pairs:
-                local_symmetry_breaking_constraint(opt, v, lsi)
+    # One source for which constraints apply: the plan of rcmas.symmetry,
+    # whose ``admits`` the oracle tests check against enumeration.
+    symmetry_plan_constraint(opt, v, symmetry_breaking_plan(territory, v.A, demands))
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +400,7 @@ def solve_from_base(
     ``a`` maximises ``reward_a``.  With *opponent_play* and an agent index,
     the query is the best-response query ``smt(G_a(pi), reward_a)`` of
     Definition 4.7.1, and *action_candidates_by_agent* restricts it as in
-    Q-IBIS (Algorithm 3, line 13).
+    Q-IBIS (the restricted query of Algorithm 3, line 14).
     """
     v = base.variables
     if objective != "sum" and not isinstance(objective, int):
