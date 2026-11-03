@@ -1,4 +1,4 @@
-"""Tests for model.py (Def 1-8)."""
+"""Tests for model.py (thesis Chapter 3)."""
 
 from __future__ import annotations
 
@@ -15,15 +15,17 @@ from rcmas.model import (
     adjacent_owned,
     connected_components,
     evolve,
+    largest_component_weight,
     largest_region_size,
     neighbors4,
+    rewards_from_owner,
     scores,
 )
-
 
 # ===================================================================
 # Def 1: Coord
 # ===================================================================
+
 
 class TestCoord:
     def test_frozen(self):
@@ -51,6 +53,7 @@ class TestCoord:
 # Def 2: 4-connected neighbourhood
 # ===================================================================
 
+
 class TestNeighbors4:
     def test_yields_four_cardinal(self):
         nbs = list(neighbors4(Coord(1, 1)))
@@ -71,6 +74,7 @@ class TestNeighbors4:
 # ===================================================================
 # Def 3: Territory
 # ===================================================================
+
 
 class TestTerritory:
     def test_from_ascii_2x2(self, territory_2x2):
@@ -97,10 +101,40 @@ class TestTerritory:
     def test_index_of_outside_territory(self, territory_2x2):
         assert territory_2x2.index_of(Coord(99, 99)) is None
 
-    def test_ordered_sectors_row_major(self, territory_2x2):
-        """Sectors are ordered by (y, x) — row-major."""
+    def test_ordered_sectors_bottom_row_first(self, territory_2x2):
+        """Remark 3.1.1: row by row from the bottom row, left to right."""
         sectors = territory_2x2.ordered_sectors()
-        assert sectors == (Coord(0, 0), Coord(1, 0), Coord(0, 1), Coord(1, 1))
+        assert sectors == (Coord(0, 1), Coord(1, 1), Coord(0, 0), Coord(1, 0))
+
+    def test_running_example_enumeration_matches_figure_3_1(self):
+        """Sectors 1..12 of Figure 3.1, in thesis coordinates (x, y), y upward."""
+        t = Territory.from_ascii(["..#.", "#...", ".#.#", "...#", "#.##"])
+        h = 5
+        thesis = [(c.x + 1, h - c.y) for c in t.ordered_sectors()]
+        assert thesis == [
+            (2, 1),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (1, 3),
+            (3, 3),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (1, 5),
+            (2, 5),
+            (4, 5),
+        ]
+
+    def test_neighbor_map_is_four_connected(self, territory_2x2):
+        nb = territory_2x2.neighbor_map()
+        # indices: 0=(0,1) 1=(1,1) 2=(0,0) 3=(1,0)
+        assert nb == {0: {1, 2}, 1: {0, 3}, 2: {0, 3}, 3: {1, 2}}
+
+    def test_neighbor_map_running_example_sector_7(self):
+        """Example 3.2.1: sector 7 at (2,4) has neighbours (3,4) and (2,5) = sectors 8, 11."""
+        t = Territory.from_ascii(["..#.", "#...", ".#.#", "...#", "#.##"])
+        assert t.neighbor_map()[6] == frozenset({7, 10})
 
     def test_ordered_sectors_are_all_sector_coords(self, territory_3x3):
         sectors = territory_3x3.ordered_sectors()
@@ -132,6 +166,7 @@ class TestTerritory:
 # ===================================================================
 # Def 4-5: State + ownership
 # ===================================================================
+
 
 class TestState:
     def test_initial_all_unowned(self, state_2x2):
@@ -188,6 +223,7 @@ class TestState:
 # ===================================================================
 # Def 6: evolve
 # ===================================================================
+
 
 class TestEvolve:
     def test_claims_sector(self, state_2x2):
@@ -259,6 +295,7 @@ class TestEvolve:
 # Def 7: Adjacency + connected components
 # ===================================================================
 
+
 class TestAdjacency:
     def test_adjacent_owned_empty_at_start(self, state_2x2):
         assert adjacent_owned(state_2x2, 0) == set()
@@ -267,9 +304,9 @@ class TestAdjacency:
         s = evolve(state_2x2, {0: Coord(0, 0)})
         s = evolve(s, {0: Coord(1, 0)})
         pairs = adjacent_owned(s, 0)
-        # (0,0) idx=0 and (1,0) idx=1 are adjacent
+        # (0,0) and (1,0) are the top row, indices 2 and 3
         assert len(pairs) == 1
-        assert (0, 1) in pairs
+        assert (2, 3) in pairs
 
     def test_adjacent_owned_excludes_other_agent(self, state_2x2):
         s = evolve(state_2x2, {0: Coord(0, 0), 1: Coord(1, 0)})
@@ -338,6 +375,7 @@ class TestConnectedComponents:
 # Def 8: Largest region size / scores
 # ===================================================================
 
+
 class TestLargestRegionAndScores:
     def test_zero_when_nothing_owned(self, state_2x2):
         assert largest_region_size(state_2x2, 0) == 0
@@ -400,3 +438,32 @@ class TestLargestRegionAndScores:
         s = evolve(s, {0: Coord(0, 2), 1: Coord(1, 2), 2: Coord(2, 2)})
         assert s.is_terminal()
         assert scores(s) == (3, 3, 3)
+
+
+class TestWeightedRewards:
+    """``largest_component_weight`` and ``rewards_from_owner`` (Definitions 3.9.2, 6.1.2)."""
+
+    def test_matches_scores_on_concrete_states(self, territory_3x3):
+        s = State.initial(territory_3x3, num_agents=2)
+        s = evolve(s, {0: Coord(0, 0), 1: Coord(2, 0)})
+        s = evolve(s, {0: Coord(2, 2), 1: Coord(1, 0)})
+        nb = territory_3x3.neighbor_map()
+        assert rewards_from_owner(s.owner_by_index, 2, nb) == scores(s)
+
+    def test_l_tromino_counts_three(self):
+        """The interval recurrence of the old encoding scored this L-tromino 2."""
+        t = Territory.from_ascii(["..", ".."])
+        nb = t.neighbor_map()
+        # indices 0=(0,1) 1=(1,1) 2=(0,0) 3=(1,0); agent 0 holds 0, 2, 3
+        assert largest_component_weight((0, -1, 0, 0), 0, nb) == 3
+
+    def test_block_weights_and_adjacency(self):
+        """Path B0 - B1 - B2 with weights 2, 3, 4; agent 0 holds B0 and B2."""
+        nb = {0: [1], 1: [0, 2], 2: [1]}
+        w = (2, 3, 4)
+        assert largest_component_weight((0, 1, 0), 0, nb, w) == 4
+        assert largest_component_weight((0, 0, 1), 0, nb, w) == 5
+        assert rewards_from_owner((0, 0, 1), 2, nb, w) == (5, 4)
+
+    def test_zero_for_agent_without_sectors(self):
+        assert rewards_from_owner((-1, -1), 2, {0: [1], 1: [0]}) == (0, 0)

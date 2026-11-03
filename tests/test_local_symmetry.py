@@ -119,23 +119,23 @@ class TestLocalSymmetryInfo:
 
     def test_l_shape_4x3_subregion(self, territory_L_shape_large: Territory):
         """The 4×3 bottom strip has V_4 local automorphisms."""
-        # Sectors 2-13 form the 4×3 rectangle
-        sub = frozenset(range(2, 14))
+        # Sectors 0-11 form the 4×3 rectangle (bottom row first, Remark 3.1.1)
+        sub = frozenset(range(0, 12))
         lsi = local_symmetry_info(territory_L_shape_large, sub)
         assert len(lsi.automorphisms) == 4  # V_4
         assert len(lsi.orbits) == 4
-        assert lsi.boundary == frozenset({2, 3})
+        assert lsi.boundary == frozenset({8, 9})
         assert len(lsi.boundary_pairs) > 0
         # Representatives should be 4 (one per orbit)
         assert len(lsi.representatives) == 4
 
     def test_subregion_boundary_computed(self, territory_L_shape_large: Territory):
-        sub = frozenset(range(2, 14))
+        sub = frozenset(range(0, 12))
         lsi = local_symmetry_info(territory_L_shape_large, sub)
         # Boundary sectors are those in R adjacent to T\R
-        # Sectors 2 and 3 are adjacent to sectors 0 and 1
-        assert 2 in lsi.boundary
-        assert 3 in lsi.boundary
+        # Sectors 8 and 9 are adjacent to sectors 12 and 13
+        assert 8 in lsi.boundary
+        assert 9 in lsi.boundary
 
     def test_empty_subregion_raises(self, territory_2x2: Territory):
         with pytest.raises(ValueError, match="non-empty"):

@@ -1,198 +1,378 @@
-"""Tests for ibis.py (Algorithm 1: IBIS) and S-IBIS."""
+"""Tests for ibis.py (thesis Algorithms 1 and 2).
+
+- Example 4.7.1 and Remark 4.7.1 are reproduced exactly by the loop of
+  Algorithm 1 with a brute-force best response that returns the
+  lexicographically smallest optimal claim sequence, as the example states.
+- Every equilibrium that IBIS or S-IBIS returns on a tiny instance is checked
+  by exhaustive enumeration of the deviations against its canonical
+  completion (Theorem 4.7.3, Corollary 4.8.2).
+"""
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 
-from rcmas.model import Territory
-from rcmas.ibis import solve_ibis, solve_sibis
+import rcmas.smt_solve as smt_solve
+from rcmas.ibis import BestResponse, IbisResult, run_ibis_loop, solve_ibis, solve_sibis
+from rcmas.model import Territory, rewards_from_owner
+from rcmas.strategy import CanonicalCompletion, Play
+
+from .brute_force import best_deviation, is_equilibrium
 
 z3 = pytest.importorskip("z3")
 
+RUNNING = ["..#.", "#...", ".#.#", "...#", "#.##"]
+FIG_3_1 = {
+    0: [11, 10, 5, 1],
+    1: [8, 7, 12, 9],
+    2: [3, 2, 6, 4],
+}  # thesis sector numbers
 
-# ===================================================================
-# Smoke tests
-# ===================================================================
 
-class TestIbisSmokeTests:
-    def test_2x2_h2(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_ibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=5)
-        assert res.is_sat
-        assert res.strategy is not None
-        assert res.payoff_by_agent is not None
-        assert len(res.payoff_by_agent) == 2
-        assert res.final_solution is not None
-        assert res.final_solution.final_state is not None
-        assert all(o != -1 for o in res.final_solution.final_state.owner_by_index)
+def _fig_3_1_play() -> Play:
+    return Play.from_actions(
+        12, 3, [[FIG_3_1[a][r] - 1 for a in range(3)] for r in range(4)]
+    )
 
-    def test_1x2_h1_trivial(self):
-        """2 agents on 1x2, 1 round: trivially fills the board. NE exists."""
-        territory = Territory.from_ascii([".."])
-        res = solve_ibis(territory=territory, num_agents=2, horizon=1, seed=0, max_iters=5)
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert res.payoff_by_agent == (1, 1)
 
-    def test_1x4_h2_two_agents(self):
-        """2 agents on 1x4, 2 rounds: each claims 2 sectors."""
-        territory = Territory.from_ascii(["...."])
-        res = solve_ibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=10)
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert sum(res.payoff_by_agent) >= 2
+def _thesis_claims(play: Play) -> dict[int, list[int]]:
+    return {a: [i + 1 for i in play.claims_of(a)] for a in range(play.num_agents)}
+
+
+def _lex_best_response(territory: Territory, demands):
+    nb = territory.neighbor_map()
+
+    def br(play: Play, agent: int, current: tuple[int, ...]) -> BestResponse:
+        value, _, run = best_deviation(CanonicalCompletion(play), agent, nb, demands)
+        return BestResponse("ok", value, run, None, 0)
+
+    return br
 
 
 # ===================================================================
-# Convergence / termination
+# Example 4.7.1 and Remark 4.7.1
 # ===================================================================
 
-class TestIbisConvergence:
-    def test_terminates_within_max_iters(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_ibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=3)
-        assert res.iterations <= 3
 
-    def test_finds_ne_on_symmetric_2x2(self):
-        """On 2x2 with 2 agents, the symmetric allocation is a NE."""
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_ibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=10)
-        assert res.is_sat
-        # Should converge (NE or cycle)
-        assert res.reason in ("ne", "cycle", "max_iters")
+class TestExample471:
+    def _run(self, demands, max_iters=30) -> IbisResult:
+        t = Territory.from_ascii(RUNNING)
+        nb = t.neighbor_map()
+        return run_ibis_loop(
+            initial_play=_fig_3_1_play(),
+            initial_solution=None,
+            best_response=_lex_best_response(t, demands),
+            rewards_of=lambda s: rewards_from_owner(s, 3, nb),
+            max_iters=max_iters,
+            territory=t,
+        )
+
+    def test_walkthrough_table(self):
+        res = self._run((2, 2, 2))
+        table = [(it.index, it.rewards, it.improvement, it.chosen) for it in res.trace]
+        assert table == [
+            (0, (2, 4, 4), (1, 0, 0), 0),
+            (1, (3, 2, 3), (0, 1, 0), 1),
+            (2, (2, 3, 3), (1, 0, 0), 0),
+            (3, (3, 2, 3), (0, 2, 0), 1),
+            (4, (2, 4, 2), (1, 0, 1), 0),
+            (5, (3, 3, 2), (0, 0, 1), 2),
+            (6, (3, 3, 3), (0, 0, 0), None),
+        ]
+        assert res.outcome == "ne" and res.found_ne and res.iterations == 6
+        assert res.rewards == (3, 3, 3)
+        assert _thesis_claims(res.play) == {
+            0: [7, 10, 11, 5],
+            1: [8, 6, 2, 9],
+            2: [3, 4, 1, 12],
+        }
+
+    def test_iteration_0_update(self):
+        """In iteration 0, a claims 7, 10, 11, 1; b claims 8, 2, 5, 9; c claims 3, 4, 6, 12."""
+        res = self._run((2, 2, 2), max_iters=0)
+        assert res.reason == "max_iters" and res.iterations == 0
+        assert _thesis_claims(res.play) == {
+            0: [7, 10, 11, 1],
+            1: [8, 2, 5, 9],
+            2: [3, 4, 6, 12],
+        }
+
+    def test_remark_4_7_1_demand_zero_recurs(self):
+        """With demands 0 the run returns in iteration 6 to the play of iteration 2."""
+        res = self._run((0, 0, 0))
+        assert res.outcome == "n/c" and res.reason == "cycle"
+        assert res.iterations == 6
+        assert res.trace[6].rewards == res.trace[2].rewards
+        assert [it.chosen for it in res.trace[:6]] == [0, 1, 0, 1, 0, 1]
+
+    def test_smt_ibis_iteration_0(self):
+        """IBIS on Z3 from the play of Figure 3.1: IP^0 = (1, 0, 0), a updates."""
+        t = Territory.from_ascii(RUNNING)
+        res = solve_ibis(
+            territory=t,
+            num_agents=3,
+            demands=(2, 2, 2),
+            initial_play=_fig_3_1_play(),
+            max_iters=0,
+        )
+        assert res.trace[0].rewards == (2, 4, 4)
+        assert res.trace[0].improvement == (1, 0, 0)
+        assert res.trace[0].chosen == 0
+        assert res.rewards is not None and res.rewards[0] == 3
+
+    def test_smt_sibis_iteration_0_four_checks(self):
+        """Example 4.8.1: four satisfiability checks in iteration 0."""
+        t = Territory.from_ascii(RUNNING)
+        res = solve_sibis(
+            territory=t,
+            num_agents=3,
+            demands=(2, 2, 2),
+            initial_play=_fig_3_1_play(),
+            max_iters=0,
+        )
+        assert res.trace[0].improvement == (1, 0, 0)
+        assert res.trace[0].checks == 4
+
+
+# ===================================================================
+# The loop: selection, recurrence, bound
+# ===================================================================
+
+
+def _line_plays(count: int) -> list[Play]:
+    """Distinct plays of a 1x6 line with 3 agents (m = 2)."""
+    plays = []
+    for perm in itertools.permutations(range(6)):
+        plays.append(Play.from_actions(6, 3, [perm[:3], perm[3:]]))
+        if len(plays) == count:
+            break
+    return plays
+
+
+class TestLoop:
+    def test_selects_largest_absolute_improvement(self):
+        """Rewards (1, 4, 4) and gains (1, 2, 2): agent 1 (largest gain, smallest index)."""
+        plays = _line_plays(4)
+        rewards = {plays[0]: (1, 4, 4)}
+        gain = {plays[0]: (1, 2, 2)}
+
+        def br(play, a, cur):
+            g = gain.get(play, (0, 0, 0))[a]
+            return BestResponse("ok", cur[a] + g, plays[1 + a] if g else None, None, 1)
+
+        res = run_ibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: rewards.get(
+                next(p for p in plays if p.final_state == s), (0, 0, 0)
+            ),
+            max_iters=5,
+        )
+        assert res.trace[0].chosen == 1
+        assert res.play == plays[2]
+        assert res.outcome == "ne" and res.iterations == 1
+
+    def test_recurrence_detected(self):
+        plays = _line_plays(2)
+
+        def br(play, a, cur):
+            other = plays[1] if play == plays[0] else plays[0]
+            return BestResponse("ok", cur[a] + (1 if a == 0 else 0), other, None, 1)
+
+        res = run_ibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: (0, 0, 0),
+            max_iters=10,
+        )
+        assert res.outcome == "n/c" and res.reason == "cycle" and res.iterations == 2
+
+    def test_iteration_bound(self):
+        """The loop runs for i = 0, ..., N and then reports n/c."""
+        plays = _line_plays(10)
+        nxt = {plays[k]: plays[k + 1] for k in range(9)}
+
+        def br(play, a, cur):
+            return BestResponse(
+                "ok", cur[a] + (a == 0), nxt[play] if a == 0 else None, None, 1
+            )
+
+        res = run_ibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: (0, 0, 0),
+            max_iters=3,
+        )
+        assert res.outcome == "n/c" and res.reason == "max_iters"
+        assert res.iterations == 3 and len(res.trace) == 4
+        assert res.play == plays[4]
+
+    def test_unknown_stops_run(self):
+        plays = _line_plays(1)
+
+        def br(play, a, cur):
+            return BestResponse("unknown" if a == 1 else "ok", cur[a], None, None, 1)
+
+        res = run_ibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: (0, 0, 0),
+            max_iters=3,
+        )
+        assert res.outcome == "unk" and res.reason == "unknown" and not res.found_ne
+        assert res.play == plays[0]
+
+    def test_negative_potential_is_an_error(self):
+        plays = _line_plays(1)
+        with pytest.raises(RuntimeError, match="negative"):
+            run_ibis_loop(
+                initial_play=plays[0],
+                initial_solution=None,
+                best_response=lambda p, a, cur: BestResponse(
+                    "ok", cur[a] - 1, None, None, 1
+                ),
+                rewards_of=lambda s: (1, 1, 1),
+                max_iters=1,
+            )
+
+
+# ===================================================================
+# IBIS and S-IBIS on Z3: soundness against enumeration
+# ===================================================================
+
+SOUNDNESS_CASES = [
+    (["..", ".."], 2, None),
+    (["...", "..."], 3, None),
+    (["...", "...", "..."], 2, None),  # n does not divide |T|
+    ([".....", "....."], 3, None),  # n does not divide |T|
+    (["...", "...", "..."], 3, (2, 2, 2)),
+    (["..#", "...", ".#."], 2, (1, 1)),
+]
+
+
+class TestSoundness:
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    @pytest.mark.parametrize("grid,n,demands", SOUNDNESS_CASES)
+    def test_returned_equilibria_are_equilibria(self, solver, grid, n, demands):
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        res = solver(territory=t, num_agents=n, demands=demands)
+        assert res.outcome in ("ne", "n/c")
+        assert res.play is not None
+        assert res.rewards == rewards_from_owner(res.play.final_state, n, nb)
+        assert res.strategy == res.play.to_coords(t)
+        assert res.final_solution is not None and res.final_solution.play == res.play
+        d = demands or (0,) * n
+        assert all(r >= x for r, x in zip(res.rewards, d))
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, demands)
+            assert res.trace[-1].improvement == (0,) * n
+            comp = res.completion()
+            assert comp is not None and comp.play == res.play
+
+    def test_symmetry_and_plain_both_sound(self):
+        t = Territory.from_ascii(["...", "...", "..."])
+        for sym in (False, True):
+            res = solve_sibis(territory=t, num_agents=3, symmetry=sym)
+            assert res.outcome == "ne"
+            assert is_equilibrium(res.play, t.neighbor_map())
+
+    def test_weighted_abstract_game(self):
+        """The loop runs on a weighted game with block adjacency (Section 6.1)."""
+        abstract = Territory.from_ascii([".....", ""])
+        w = (2, 1, 3, 1, 2)
+        nb = {0: [1, 2], 1: [0, 3], 2: [0, 4], 3: [1], 4: [2]}
+        res = solve_sibis(
+            territory=abstract, num_agents=2, weights=w, custom_neighbors=nb
+        )
+        assert res.play is not None
+        assert res.rewards == rewards_from_owner(res.play.final_state, 2, nb, w)
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, None, w)
+
+
+class TestOutcomes:
+    def test_no_satisfying_strategy(self):
+        t = Territory.from_ascii(["...", "...", "..."])
+        res = solve_ibis(territory=t, num_agents=3, demands=(4, 0, 0))
+        assert res.outcome == "uns" and res.reason == "unsat" and not res.is_sat
+        assert res.play is None
+
+    def test_unknown_in_initial_query(self, monkeypatch):
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        t = Territory.from_ascii(["..", ".."])
+        res = solve_sibis(territory=t, num_agents=2)
+        assert res.outcome == "unk" and res.reason == "unknown"
+
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    def test_unknown_in_best_response_stops(self, monkeypatch, solver):
+        real = smt_solve._check
+        calls = {"n": 0}
+
+        def third_unknown(s, *a):
+            calls["n"] += 1
+            return z3.unknown if calls["n"] == 3 else real(s, *a)
+
+        monkeypatch.setattr(smt_solve, "_check", third_unknown)
+        t = Territory.from_ascii(["...", "...", "..."])
+        res = solver(territory=t, num_agents=2)
+        assert res.outcome == "unk" and not res.found_ne
+        assert res.play is not None
+
+    def test_symmetry_only_in_initial_query(self, monkeypatch):
+        calls = {"n": 0}
+        real = smt_solve.symmetry_constraints
+
+        def spy(*args, **kwargs):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(smt_solve, "symmetry_constraints", spy)
+        t = Territory.from_ascii(["...", "...", "..."])
+        res = solve_sibis(territory=t, num_agents=2, symmetry=True)
+        assert res.iterations >= 0 and calls["n"] == 1
+        solve_ibis(territory=t, num_agents=2, symmetry=False)
+        assert calls["n"] == 1
 
 
 # ===================================================================
 # Input validation
 # ===================================================================
 
-class TestIbisValidation:
-    def test_zero_agents_raises(self):
-        territory = Territory.from_ascii([".."])
+
+class TestValidation:
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    def test_zero_agents_raises(self, solver):
         with pytest.raises(ValueError, match="num_agents"):
-            solve_ibis(territory=territory, num_agents=0, horizon=1)
+            solver(territory=Territory.from_ascii([".."]), num_agents=0, horizon=1)
 
-    def test_zero_horizon_raises(self):
-        territory = Territory.from_ascii([".."])
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    def test_horizon_must_be_m(self, solver):
         with pytest.raises(ValueError, match="horizon"):
-            solve_ibis(territory=territory, num_agents=1, horizon=0)
+            solver(territory=Territory.from_ascii([".."]), num_agents=1, horizon=1)
 
-    def test_zero_max_iters_raises(self):
-        territory = Territory.from_ascii([".."])
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    def test_negative_max_iters_raises(self, solver):
         with pytest.raises(ValueError, match="max_iters"):
-            solve_ibis(territory=territory, num_agents=1, horizon=1, max_iters=0)
+            solver(territory=Territory.from_ascii([".."]), num_agents=1, max_iters=-1)
 
+    def test_horizon_defaults_to_m(self):
+        res = solve_sibis(territory=Territory.from_ascii(["...", "..."]), num_agents=2)
+        assert res.play is not None and res.play.horizon == 3
 
-# ===================================================================
-# S-IBIS Smoke tests
-# ===================================================================
+    def test_trivial_one_round(self):
+        res = solve_ibis(
+            territory=Territory.from_ascii([".."]), num_agents=2, horizon=1
+        )
+        assert res.outcome == "ne" and res.rewards == (1, 1)
 
-class TestSIbisSmokeTests:
-    def test_2x2_h2(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_sibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=5)
-        assert res.is_sat
-        assert res.strategy is not None
-        assert res.payoff_by_agent is not None
-        assert len(res.payoff_by_agent) == 2
-        assert res.final_solution is not None
-        assert res.final_solution.final_state is not None
-        assert all(o != -1 for o in res.final_solution.final_state.owner_by_index)
-
-    def test_1x2_h1_trivial(self):
-        """2 agents on 1x2, 1 round: trivially fills the board."""
-        territory = Territory.from_ascii([".."])
-        res = solve_sibis(territory=territory, num_agents=2, horizon=1, seed=0, max_iters=5)
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert res.payoff_by_agent == (1, 1)
-
-    def test_1x4_h2_two_agents(self):
-        """2 agents on 1x4, 2 rounds: each claims 2 sectors."""
-        territory = Territory.from_ascii(["...."])
-        res = solve_sibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=10)
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert sum(res.payoff_by_agent) >= 2
-
-    def test_3x3_h3_three_agents(self):
-        """3 agents on 3x3, 3 rounds: larger instance to exercise binary search."""
-        territory = Territory.from_ascii(["...", "...", "..."])
-        res = solve_sibis(territory=territory, num_agents=3, horizon=3, seed=0, max_iters=10)
-        assert res.is_sat
-        assert res.payoff_by_agent is not None
-        assert len(res.payoff_by_agent) == 3
-
-
-# ===================================================================
-# S-IBIS Convergence / termination
-# ===================================================================
-
-class TestSIbisConvergence:
-    def test_terminates_within_max_iters(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_sibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=3)
-        assert res.iterations <= 3
-
-    def test_finds_ne_on_symmetric_2x2(self):
-        territory = Territory.from_ascii(["..", ".."])
-        res = solve_sibis(territory=territory, num_agents=2, horizon=2, seed=0, max_iters=10)
-        assert res.is_sat
-        assert res.reason in ("ne", "cycle", "max_iters")
-
-
-# ===================================================================
-# S-IBIS Input validation
-# ===================================================================
-
-class TestSIbisValidation:
-    def test_zero_agents_raises(self):
-        territory = Territory.from_ascii([".."])
-        with pytest.raises(ValueError, match="num_agents"):
-            solve_sibis(territory=territory, num_agents=0, horizon=1)
-
-    def test_zero_horizon_raises(self):
-        territory = Territory.from_ascii([".."])
-        with pytest.raises(ValueError, match="horizon"):
-            solve_sibis(territory=territory, num_agents=1, horizon=0)
-
-    def test_zero_max_iters_raises(self):
-        territory = Territory.from_ascii([".."])
-        with pytest.raises(ValueError, match="max_iters"):
-            solve_sibis(territory=territory, num_agents=1, horizon=1, max_iters=0)
-
-
-# ===================================================================
-# S-IBIS agrees with IBIS
-# ===================================================================
-
-class TestSIbisAgreesWithIbis:
-    """Both algorithms should find valid NE on small grids.
-
-    They may find DIFFERENT NE (multiple exist for most games) because
-    the feasible initial strategy is non-deterministic and the binary-search
-    BR may pick a different witness strategy at the same optimal payoff.
-    """
-
-    def test_both_sat_on_2x2(self):
-        territory = Territory.from_ascii(["..", ".."])
-        ibis_res = solve_ibis(territory=territory, num_agents=2, horizon=2, max_iters=10)
-        sibis_res = solve_sibis(territory=territory, num_agents=2, horizon=2, max_iters=10)
-        assert ibis_res.is_sat
-        assert sibis_res.is_sat
-        assert ibis_res.payoff_by_agent is not None
-        assert sibis_res.payoff_by_agent is not None
-
-    def test_both_sat_on_1x4(self):
-        territory = Territory.from_ascii(["...."])
-        ibis_res = solve_ibis(territory=territory, num_agents=2, horizon=2, max_iters=10)
-        sibis_res = solve_sibis(territory=territory, num_agents=2, horizon=2, max_iters=10)
-        assert ibis_res.is_sat
-        assert sibis_res.is_sat
-
-    def test_both_sat_on_3x3(self):
-        territory = Territory.from_ascii(["...", "...", "..."])
-        ibis_res = solve_ibis(territory=territory, num_agents=3, horizon=3, max_iters=15)
-        sibis_res = solve_sibis(territory=territory, num_agents=3, horizon=3, max_iters=15)
-        assert ibis_res.is_sat
-        assert sibis_res.is_sat
+    def test_horizon_zero_game(self):
+        """|T| < |Agt|: the empty play is an equilibrium (no agent acts)."""
+        res = solve_sibis(territory=Territory.from_ascii(["."]), num_agents=2)
+        assert res.outcome == "ne" and res.rewards == (0, 0)

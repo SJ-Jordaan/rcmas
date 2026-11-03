@@ -1,575 +1,419 @@
-"""Tests for smt_constraints.py (Def 16-23).
+"""Tests for smt_constraints.py (thesis Sections 4.2, 4.3 and 4.7).
 
-Each constraint is tested in isolation on tiny grids to verify its
-individual semantic contribution.  Tests compose only the minimal set
-of constraints needed for the property under test.
+The oracle tests compare the encoding with brute-force enumeration:
+
+- the models of [Init] and [Evol] and [Prot] and [Dom] are exactly the plays
+  (Lemma 4.2.1);
+- on every final state of 2x2, 2x3 and 3x3 with 2 and 3 agents, the witness
+  encoding admits ``reward_a >= c`` exactly when ``c <= r_a`` (Definition
+  3.9.2), so its maximum is the reward and no model exceeds it
+  (Lemmas 4.3.1, 4.3.2, Corollary 4.3.3), also with block weights;
+- the models of the dynamics with [Fix^a_pi] are exactly the deviations of
+  ``a`` against the canonical completion of ``pi`` (Lemma 4.7.1).
 """
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
-from rcmas.model import Coord, Territory
-from rcmas.smt_variables import SmtVariables, create_variables
+from rcmas.model import Territory, rewards_from_owner
 from rcmas.smt_constraints import (
     action_candidates_constraint,
-    adjacency_constraint,
-    cohesive_region_constraint,
-    collision_constraint,
+    domain_constraint,
     evolution_constraint,
     fixed_policy_constraint,
     init_constraint,
+    opponent_constraint,
     protocol_constraint,
+    qualitative_constraint,
     reward_constraint,
-    size_constraint,
-    victory_constraint,
+    witness_constraint,
 )
+from rcmas.smt_variables import create_variables
+from rcmas.strategy import CanonicalCompletion, Play
+
+from .brute_force import deviations, final_states, random_play
 
 z3 = pytest.importorskip("z3")
 
 
-def _opt() -> "z3.Optimize":
-    return z3.Optimize()
+def _dynamics(solver, v) -> None:
+    init_constraint(solver, v)
+    evolution_constraint(solver, v)
+    protocol_constraint(solver, v)
+    domain_constraint(solver, v)
 
 
-def _model_val(m, expr) -> int:
-    return m.eval(expr, model_completion=True).as_long()
+def _action_models(solver, v) -> set[tuple[tuple[int, ...], ...]]:
+    """All values of the action variables over the models of *solver*."""
+    out = set()
+    while solver.check() == z3.sat:
+        mdl = solver.model()
+        acts = tuple(
+            tuple(
+                mdl.eval(v.action[a][t], model_completion=True).as_long()
+                for a in range(v.A)
+            )
+            for t in range(v.T)
+        )
+        out.add(acts)
+        solver.add(
+            z3.Or(
+                [v.action[a][t] != acts[t][a] for t in range(v.T) for a in range(v.A)]
+            )
+        )
+    return out
 
 
-def _model_bool(m, expr) -> bool:
-    if isinstance(expr, bool):
-        return expr
-    return z3.is_true(m.eval(expr, model_completion=True))
+def _all_plays(S: int, n: int, m: int) -> set[tuple[tuple[int, ...], ...]]:
+    out = set()
 
+    def rec(t, free, acts):
+        if t == m:
+            out.add(tuple(acts))
+            return
+        import itertools
 
-# ===================================================================
-# Def 16: Init constraint  [Init]
-# ===================================================================
+        for prof in itertools.permutations(sorted(free), n):
+            rec(t + 1, free - set(prof), acts + [prof])
 
-class TestInitConstraint:
-    def test_all_unowned_at_t0(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        for s in range(v.S):
-            assert _model_val(m, v.owner[s][0]) == -1
-
-    def test_multi_sector(self):
-        v = create_variables(Territory.from_ascii(["..", ".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        for s in range(v.S):
-            assert _model_val(m, v.owner[s][0]) == -1
-
-    def test_prevents_owned_at_t0(self):
-        v = create_variables(Territory.from_ascii(["."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        opt.add(v.owner[0][0] == 0)
-        assert opt.check() == z3.unsat
-
-
-# ===================================================================
-# Def 17: Evolution constraint  [Evol]
-# ===================================================================
-
-class TestEvolutionConstraint:
-    def test_unclaimed_sector_persists(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        evolution_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.owner[0][1]) == 0
-        assert _model_val(m, v.owner[1][1]) == -1
-
-    def test_claimed_sector_stays_owned(self):
-        """Once claimed at t, still owned at t+1 with no further claims."""
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        evolution_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.owner[0][1]) == 0
-        assert _model_val(m, v.owner[0][2]) == 0  # still owned
-        assert _model_val(m, v.owner[1][2]) == 0  # just claimed
-
-    def test_two_agents_claim_different(self):
-        v = create_variables(Territory.from_ascii([".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        evolution_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.owner[0][1]) == 0
-        assert _model_val(m, v.owner[1][1]) == 1
+    rec(0, set(range(S)), [])
+    return out
 
 
 # ===================================================================
-# Def 18: Protocol constraint  [Prot]
+# Dynamics: [Init], [Evol], [Prot], [Dom] (Definitions 4.2.1-4.2.4)
 # ===================================================================
 
-class TestProtocolConstraint:
-    def test_action_domain_is_sector_indices(self):
-        """Actions must be in [0, S-1]."""
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        protocol_constraint(opt, v)
-        opt.add(v.action[0][0] == -1)  # invalid: no no-op
-        assert opt.check() == z3.unsat
 
-    def test_action_out_of_range_rejected(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        protocol_constraint(opt, v)
-        opt.add(v.action[0][0] == 5)  # only 2 sectors
-        assert opt.check() == z3.unsat
-
-    def test_prevents_reclaiming_owned(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 0)  # sector 0 already owned
-        assert opt.check() == z3.unsat
-
-    def test_owner_domain_bounded(self):
-        """Owner values must be in [-1, A-1]."""
-        v = create_variables(Territory.from_ascii(["."]), 2, 1)
-        opt = _opt()
-        protocol_constraint(opt, v)
-        opt.add(v.owner[0][0] == 5)  # invalid
-        assert opt.check() == z3.unsat
-
-
-# ===================================================================
-# Def 19: Collision constraint
-# ===================================================================
-
-class TestCollisionConstraint:
-    def test_same_sector_is_unsat(self):
-        v = create_variables(Territory.from_ascii([".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 0)
-        assert opt.check() == z3.unsat
-
-    def test_different_sectors_allowed(self):
-        v = create_variables(Territory.from_ascii([".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        assert opt.check() == z3.sat
-
-    def test_three_agent_pairwise(self):
-        """Three agents: all pairs must be collision-free."""
-        v = create_variables(Territory.from_ascii(["..."]), 3, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        opt.add(v.action[2][0] == 0)  # collides with agent 0
-        assert opt.check() == z3.unsat
-
-    def test_collision_only_within_same_round(self):
-        """Agents claiming the same sector in different rounds is fine (protocol prevents re-claim, but no collision)."""
-        v = create_variables(Territory.from_ascii(["..."]), 2, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        # Round 0: agent 0 claims 0, agent 1 claims 1
-        # Round 1: agent 0 claims 2, agent 1 claims... sector 2?
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        opt.add(v.action[0][1] == 2)
-        opt.add(v.action[1][1] == 2)  # collision at round 1
-        assert opt.check() == z3.unsat
-
-
-# ===================================================================
-# Def 20: Adjacency constraint
-# ===================================================================
-
-class TestAdjacencyConstraint:
-    def test_one_owned_sector_no_adj(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert not _model_bool(m, v.get_adj(0, 1, 0))
-
-    def test_both_owned_neighbours_true(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_bool(m, v.get_adj(0, 1, 0))
-
-    def test_non_adjacent_sectors_false(self):
-        """On a 1x3 territory, sectors 0 and 2 are not physically adjacent."""
-        v = create_variables(Territory.from_ascii(["..."]), 1, 3)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 2)
-        opt.add(v.action[0][2] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        # After round 1: own 0 and 2 — they are not adjacent
-        # (adj is evaluated at final_t = 3, where all are owned, so 0-2 adj depends on physical adjacency)
-        assert not _model_bool(m, v.get_adj(0, 2, 0))
-        assert _model_bool(m, v.get_adj(0, 1, 0))
-        assert _model_bool(m, v.get_adj(1, 2, 0))
-
-    def test_different_owners_false(self):
-        v = create_variables(Territory.from_ascii([".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert not _model_bool(m, v.get_adj(0, 1, 0))
-        assert not _model_bool(m, v.get_adj(0, 1, 1))
-
-
-# ===================================================================
-# Def 21: Cohesive-region constraint
-# ===================================================================
-
-class TestCohesiveRegionConstraint:
-    def test_direct_neighbours_connected(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_bool(m, v.get_cr(0, 1, 0))
-
-    def test_transitive_reachability(self):
-        """On 1x3, sectors 0 and 2 are connected through sector 1."""
-        v = create_variables(Territory.from_ascii(["..."]), 1, 3)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        opt.add(v.action[0][2] == 2)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_bool(m, v.get_cr(0, 2, 0))
-
-
-# ===================================================================
-# Def 22: Size constraint
-# ===================================================================
-
-class TestSizeConstraint:
-    def test_single_owned_size_one(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.size[0][0]) == 1
-        assert _model_val(m, v.size[1][0]) == 0
-
-    def test_two_connected_size(self):
-        """size[i][a] = 1 + count of connected sectors with index > i.
-        So size[0][0] = 2 (sector 0 + sector 1), size[1][0] = 1 (only itself)."""
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.size[0][0]) == 2  # seed 0 sees sector 1 via cr
-        assert _model_val(m, v.size[1][0]) == 1  # seed 1 has no higher-index neighbours
-
-    def test_unowned_sector_size_zero(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.size[1][0]) == 0
-
-
-# ===================================================================
-# Def 23: Reward constraint
-# ===================================================================
-
-class TestRewardConstraint:
-    def test_payoff_equals_max_size(self):
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        reward_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[0][1] == 1)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.payoff[0]) == 2
-
-    def test_payoff_zero_when_nothing_owned(self):
-        """Single-agent claims nothing -> payoff must be 0.
-        Since action >= 0 forces a claim, use a 2-agent setup where
-        agent 1's payoff is 0 because agent 0 owns the only sector."""
-        v = create_variables(Territory.from_ascii(["."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        reward_constraint(opt, v)
-        opt.add(v.action[0][0] == 0)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.payoff[0]) == 1
-
-    def test_two_agents_distinct_payoffs(self):
-        """On 1x4, 2 agents, 2 rounds: one agent gets connected pair (payoff 2),
-        other gets disconnected pair (payoff 1)."""
-        v = create_variables(Territory.from_ascii(["...."]), 2, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        reward_constraint(opt, v)
-        # Agent 0 claims 0 then 3 (endpoints, not adjacent on 1x4) -> payoff 1
-        # Agent 1 claims 1 then 2 (adjacent) -> payoff 2
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        opt.add(v.action[0][1] == 3)
-        opt.add(v.action[1][1] == 2)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.payoff[0]) == 1
-        assert _model_val(m, v.payoff[1]) == 2
-
-    def test_payoff_reflects_largest_component(self):
-        """On 2x2, agent owns (0,0) and (1,1) — diagonal, not connected. Payoff = 1."""
-        v = create_variables(Territory.from_ascii(["..", ".."]), 2, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        adjacency_constraint(opt, v)
-        cohesive_region_constraint(opt, v)
-        size_constraint(opt, v)
-        reward_constraint(opt, v)
-        # Sectors: (0,0)=0, (1,0)=1, (0,1)=2, (1,1)=3
-        opt.add(v.action[0][0] == 0)
-        opt.add(v.action[1][0] == 1)
-        opt.add(v.action[0][1] == 3)  # diagonal
-        opt.add(v.action[1][1] == 2)
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.payoff[0]) == 1  # (0,0) and (1,1) not connected
-        assert _model_val(m, v.payoff[1]) == 1  # (1,0) and (0,1) not connected
-
-
-# ===================================================================
-# Victory constraint
-# ===================================================================
-
-class TestVictoryConstraint:
-    def test_unsat_when_insufficient_rounds(self):
-        """1 agent, 2 sectors, 1 round -> can only claim 1 -> unsat."""
-        v = create_variables(Territory.from_ascii([".."]), 1, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        victory_constraint(opt, v)
-        assert opt.check() == z3.unsat
-
-    def test_sat_when_enough_rounds(self):
-        """1 agent, 2 sectors, 2 rounds -> can fill board."""
-        v = create_variables(Territory.from_ascii([".."]), 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        collision_constraint(opt, v)
-        victory_constraint(opt, v)
-        assert opt.check() == z3.sat
-
-    def test_two_agents_fill_board_in_one_round(self):
-        """2 agents on 2 sectors, 1 round: both claim distinct sectors."""
-        v = create_variables(Territory.from_ascii([".."]), 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        victory_constraint(opt, v)
-        assert opt.check() == z3.sat
-
-    def test_three_agents_four_sectors_two_rounds(self):
-        """3 agents on 4 sectors need 2 rounds: 3+1=4. But second round only
-        needs 1 claim; the other 2 agents must still pick valid (unowned) sectors,
-        which don't exist. So this is unsat."""
-        v = create_variables(Territory.from_ascii(["..", ".."]), 3, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-        victory_constraint(opt, v)
-        # Round 1: 3 agents claim 3 of 4 sectors. Round 2: all 3 must claim,
-        # but only 1 unowned sector remains -> 2 agents have no valid action.
-        assert opt.check() == z3.unsat
-
-
-# ===================================================================
-# Fixed-policy constraint
-# ===================================================================
-
-class TestFixedPolicyConstraint:
-    def test_forces_specified_action(self):
-        """On 2x1, fix agent 0 to claim sector 0 at the initial state."""
-        t = Territory.from_ascii(["..", ".."]) # 4 sectors, 2 agents, 2 rounds
-        v = create_variables(t, 2, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-        evolution_constraint(opt, v)
-
-        initial_state = (-1, -1, -1, -1)
-        policy_a0 = {initial_state: Coord(0, 0)}
-        fixed_policy_constraint(opt, v, t, (policy_a0, None))
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.action[0][0]) == 0
-
-    def test_wrong_state_key_length_raises(self):
+class TestDynamics:
+    def test_init_all_unoccupied(self):
         t = Territory.from_ascii(["..", ".."])
         v = create_variables(t, 2, 1)
-        opt = _opt()
-        bad_policy = {(-1, -1): Coord(0, 0)}  # length 2, should be 4
-        with pytest.raises(ValueError, match="wrong length"):
-            fixed_policy_constraint(opt, v, t, (bad_policy, None))
+        s = z3.Solver()
+        init_constraint(s, v)
+        s.add(v.owner[0][0] != -1)
+        assert s.check() == z3.unsat
 
-    def test_state_only_consistency(self):
-        """enforce_state_only_for_agents ensures same state => same action."""
-        t = Territory.from_ascii(["..", ".."]) # 4 sectors
+    @pytest.mark.parametrize(
+        "grid,n",
+        [(["..", ".."], 2), (["...", "..."], 2), (["...", "..."], 3), (["..."], 2)],
+    )
+    def test_models_are_exactly_the_plays(self, grid, n):
+        """Lemma 4.2.1: the action variables of the models are the plays of M."""
+        t = Territory.from_ascii(grid)
+        m = len(t) // n
+        v = create_variables(t, n, m)
+        s = z3.Solver()
+        _dynamics(s, v)
+        assert _action_models(s, v) == _all_plays(len(t), n, m)
+
+    def test_collision_excluded(self):
+        """Clause 4 of Definition 4.2.2."""
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 2, 2)
+        s = z3.Solver()
+        _dynamics(s, v)
+        s.add(v.action[0][0] == v.action[1][0])
+        assert s.check() == z3.unsat
+
+    def test_collision_excluded_three_agents(self):
+        t = Territory.from_ascii(["...", "..."])
+        v = create_variables(t, 3, 2)
+        s = z3.Solver()
+        _dynamics(s, v)
+        s.add(v.action[0][1] == v.action[2][1])
+        assert s.check() == z3.unsat
+
+    def test_domain_excludes_skipped_round(self):
+        """Without [Dom] an out-of-range action would act as a pass."""
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 2, 2)
+        s = z3.Solver()
+        init_constraint(s, v)
+        evolution_constraint(s, v)
+        protocol_constraint(s, v)
+        s.add(v.action[0][0] == len(t))
+        assert s.check() == z3.sat
+        domain_constraint(s, v)
+        assert s.check() == z3.unsat
+
+    def test_protocol_forbids_occupied_claim(self):
+        t = Territory.from_ascii(["..", ".."])
         v = create_variables(t, 1, 2)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        evolution_constraint(opt, v)
-        # Fix: same state => same action for agent 0 across horizon
-        fixed_policy_constraint(opt, v, t, (None,), enforce_state_only_for_agents=(0,))
-        # This just adds constraints; the model is still satisfiable
-        assert opt.check() == z3.sat
+        s = z3.Solver()
+        _dynamics(s, v)
+        s.add(v.action[0][0] == 1, v.action[0][1] == 1)
+        assert s.check() == z3.unsat
 
 
 # ===================================================================
-# Action-candidates constraint
+# Witness and reward encoding (Definitions 4.3.1, 4.3.2)
 # ===================================================================
+
+
+def _witness_solver(v):
+    s = z3.Solver()
+    witness_constraint(s, v)
+    reward_constraint(s, v)
+    return s
+
+
+def _check_witness_on_states(
+    t: Territory, n: int, m: int, states, weights=None, neighbors=None
+) -> int:
+    """Lower-bound exactness on every given final state; returns the number of states."""
+    v = create_variables(t, n, m, weights=weights, custom_neighbors=neighbors)
+    s = _witness_solver(v)
+    nb = v.neighbors
+    count = 0
+    for state in states:
+        r = rewards_from_owner(state, n, nb, weights)
+        s.push()
+        s.add(*[v.owner[i][m] == state[i] for i in range(v.S)])
+        for a in range(n):
+            assert s.check(v.reward[a] >= r[a]) == z3.sat, (state, a)
+            assert s.check(v.reward[a] >= r[a] + 1) == z3.unsat, (state, a)
+        assert s.check(*[v.reward[a] == r[a] for a in range(n)]) == z3.sat, state
+        s.pop()
+        count += 1
+    return count
+
+
+class TestWitnessOracle:
+    @pytest.mark.parametrize(
+        "grid,n",
+        [
+            (["..", ".."], 2),
+            (["..", ".."], 3),
+            (["...", "..."], 2),
+            (["...", "..."], 3),
+            (["...", "...", "..."], 2),
+            (["...", "...", "..."], 3),
+        ],
+    )
+    def test_all_final_states(self, grid, n):
+        """reward_a >= c is satisfiable iff c <= r_a, on every final state."""
+        t = Territory.from_ascii(grid)
+        m = len(t) // n
+        states = list(final_states(len(t), n, m))
+        assert _check_witness_on_states(t, n, m, states) == len(states)
+
+    def test_maximisation_equals_reward_sample(self):
+        """Optimize on reward_a returns r_a (sample of 3x3 final states, 2 agents)."""
+        t = Territory.from_ascii(["...", "...", "..."])
+        n, m = 2, 4
+        v = create_variables(t, n, m)
+        nb = t.neighbor_map()
+        for k, state in enumerate(final_states(9, n, m)):
+            if k % 45:
+                continue
+            r = rewards_from_owner(state, n, nb)
+            for a in range(n):
+                opt = z3.Optimize()
+                witness_constraint(opt, v)
+                reward_constraint(opt, v)
+                opt.add(*[v.owner[i][m] == state[i] for i in range(9)])
+                opt.maximize(v.reward[a])
+                assert opt.check() == z3.sat
+                assert opt.model().eval(v.reward[a]).as_long() == r[a]
+
+    def test_l_tromino_scores_three(self):
+        """The old interval recurrence scored this L-tromino 2."""
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 1, 3)
+        s = _witness_solver(v)
+        s.add(*[v.owner[i][3] == o for i, o in enumerate((0, -1, 0, 0))])
+        assert s.check(v.reward[0] >= 3) == z3.sat
+
+    def test_root_is_least_index_member(self):
+        t = Territory.from_ascii(["..."])
+        v = create_variables(t, 1, 3)
+        s = _witness_solver(v)
+        s.add(*[v.owner[i][3] == 0 for i in range(3)])
+        s.add(v.reward[0] == 3, v.root[0][1])
+        assert s.check() == z3.unsat
+
+    def test_horizon_zero_is_satisfiable(self):
+        """Level bound max(m-1, 0): with m = 0 the empty witness is a model."""
+        t = Territory.from_ascii(["."])
+        v = create_variables(t, 2, 0)
+        s = _witness_solver(v)
+        _dynamics(s, v)
+        qualitative_constraint(s, v, (0, 0))
+        assert s.check() == z3.sat
+
+    def test_weighted_abstract_games(self):
+        """Random partitions of 3x3: weighted witness exact for lower bounds (Section 6.1)."""
+        t = Territory.from_ascii(["...", "...", "..."])
+        nb3 = t.neighbor_map()
+        rng = random.Random(7)
+        checked = 0
+        for k in (4, 5, 6):
+            for _ in range(3):
+                labels = list(range(k)) + [rng.randrange(k) for _ in range(9 - k)]
+                rng.shuffle(labels)
+                blocks = [
+                    sorted(i for i in range(9) if labels[i] == p) for p in range(k)
+                ]
+                blocks.sort(key=lambda b: b[0])
+                member = {i: p for p, b in enumerate(blocks) for i in b}
+                weights = tuple(len(b) for b in blocks)
+                adj = {
+                    p: sorted({member[j] for i in blocks[p] for j in nb3[i]} - {p})
+                    for p in range(k)
+                }
+                abstract = Territory.from_ascii(["." * k])
+                n = 2
+                m = k // n
+                states = list(final_states(k, n, m))
+                checked += _check_witness_on_states(
+                    abstract, n, m, states, weights, adj
+                )
+        assert checked > 0
+
+
+class TestQualitativeConstraint:
+    def test_infeasible_demand_unsat(self):
+        t = Territory.from_ascii(["...", "...", "..."])
+        v = create_variables(t, 3, 3)
+        s = z3.Solver()
+        _dynamics(s, v)
+        witness_constraint(s, v)
+        reward_constraint(s, v)
+        qualitative_constraint(s, v, (2, 2, 4))
+        assert s.check() == z3.unsat
+
+    def test_feasible_demand_sat_and_met(self):
+        t = Territory.from_ascii(["...", "...", "..."])
+        v = create_variables(t, 3, 3)
+        s = z3.Solver()
+        _dynamics(s, v)
+        witness_constraint(s, v)
+        reward_constraint(s, v)
+        qualitative_constraint(s, v, (3, 3, 3))
+        assert s.check() == z3.sat
+        mdl = s.model()
+        final = tuple(mdl.eval(v.owner[i][3]).as_long() for i in range(9))
+        assert rewards_from_owner(final, 3, t.neighbor_map()) == (3, 3, 3)
+
+    def test_wrong_length_raises(self):
+        t = Territory.from_ascii([".."])
+        v = create_variables(t, 2, 1)
+        with pytest.raises(ValueError):
+            qualitative_constraint(z3.Solver(), v, (1,))
+
+
+# ===================================================================
+# Opponent constraint [Fix^a_pi] (Definition 4.7.1, Lemma 4.7.1)
+# ===================================================================
+
+
+class TestOpponentConstraint:
+    @pytest.mark.parametrize(
+        "grid,n,seed",
+        [(["...", "..."], 2, 0), (["...", "..."], 3, 1), (["...", "...", "..."], 2, 2)],
+    )
+    def test_models_are_the_deviations(self, grid, n, seed):
+        """Lemma 4.7.1: models of dynamics and [Fix] = runs against the completion."""
+        t = Territory.from_ascii(grid)
+        m = len(t) // n
+        play = random_play(len(t), n, m, random.Random(seed))
+        comp = CanonicalCompletion(play)
+        for a in range(n):
+            v = create_variables(t, n, m)
+            s = z3.Solver()
+            _dynamics(s, v)
+            opponent_constraint(s, v, play, a)
+            expected = {
+                run.actions for _, run in deviations(comp.action, a, len(t), n, m)
+            }
+            assert _action_models(s, v) == expected
+
+    def test_return_to_play_resumes_recorded_actions(self):
+        """A run that leaves the play and returns to it follows the record again."""
+        # 1x6 line, 2 agents; play: a claims 0, 1, 5 and b claims 2, 3, 4.
+        t = Territory.from_ascii(["......"])
+        n = 2
+        play = Play.from_actions(6, n, [[0, 2], [1, 3], [5, 4]])
+        v = create_variables(t, n, 3)
+        s = z3.Solver()
+        _dynamics(s, v)
+        opponent_constraint(s, v, play, 0)
+        # a claims 1 then 0: the run leaves the play at step 1 (b takes its
+        # default, the second unoccupied sector 3) and is back on s_2.
+        s.add(v.action[0][0] == 1, v.action[0][1] == 0)
+        assert s.check() == z3.sat
+        mdl = s.model()
+        assert mdl.eval(v.action[1][0]).as_long() == 2
+        assert mdl.eval(v.action[1][1]).as_long() == 3
+        # At s_2 b follows its record (4); its default would be 5.
+        assert mdl.eval(v.action[1][2]).as_long() == 4
+
+    def test_fixed_policy_with_completion_policy_is_equivalent(self):
+        t = Territory.from_ascii(["...", "..."])
+        n, m = 2, 3
+        play = random_play(6, n, m, random.Random(3))
+        comp = CanonicalCompletion(play)
+        v = create_variables(t, n, m)
+        s1 = z3.Solver()
+        _dynamics(s1, v)
+        opponent_constraint(s1, v, play, 0)
+        s2 = z3.Solver()
+        _dynamics(s2, v)
+        fixed_policy_constraint(s2, v, t, (None, comp.policy(t, 1)))
+        assert _action_models(s1, v) == _action_models(s2, v)
+
+    def test_mismatched_play_raises(self):
+        t = Territory.from_ascii(["...", "..."])
+        v = create_variables(t, 2, 3)
+        play = Play.from_actions(6, 2, [[0, 1]])
+        with pytest.raises(ValueError):
+            opponent_constraint(z3.Solver(), v, play, 0)
+
+
+# ===================================================================
+# Structural constraints
+# ===================================================================
+
+
+class TestFixedPolicyConstraint:
+    def test_wrong_state_key_length_raises(self):
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 2, 2)
+        with pytest.raises(ValueError):
+            fixed_policy_constraint(
+                z3.Solver(), v, t, ({(-1,): t.ordered_sectors()[0]}, None)
+            )
+
+    def test_unmapped_states_take_default(self):
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 2, 2)
+        s = z3.Solver()
+        _dynamics(s, v)
+        fixed_policy_constraint(s, v, t, ({}, None))
+        assert s.check() == z3.sat
+        mdl = s.model()
+        assert mdl.eval(v.action[0][0]).as_long() == 0
+
 
 class TestActionCandidatesConstraint:
     def test_restricts_to_candidates(self):
-        t = Territory.from_ascii(["..", ".."]) # 4 sectors
-        v = create_variables(t, 2, 1)
-        opt = _opt()
-        init_constraint(opt, v)
-        protocol_constraint(opt, v)
-        collision_constraint(opt, v)
-
-        # Agent 0 can only claim sector 0 at the initial state
-        candidates = {(-1, -1, -1, -1): (Coord(0, 0),)}
-        action_candidates_constraint(opt, v, t, (candidates, None))
-        assert opt.check() == z3.sat
-        m = opt.model()
-        assert _model_val(m, v.action[0][0]) == 0
+        t = Territory.from_ascii(["..", ".."])
+        v = create_variables(t, 2, 2)
+        sectors = t.ordered_sectors()
+        s = z3.Solver()
+        _dynamics(s, v)
+        action_candidates_constraint(s, v, t, ({(-1, -1, -1, -1): (sectors[3],)}, None))
+        assert s.check() == z3.sat
+        assert s.model().eval(v.action[0][0]).as_long() == 3
+        s.add(v.action[0][0] != 3)
+        assert s.check() == z3.unsat
 
     def test_wrong_length_raises(self):
         t = Territory.from_ascii(["..", ".."])
-        v = create_variables(t, 2, 1)
-        opt = _opt()
-        bad = {(-1, -1): (Coord(0, 0),)}
-        with pytest.raises(ValueError, match="wrong length"):
-            action_candidates_constraint(opt, v, t, (bad, None))
+        v = create_variables(t, 2, 2)
+        with pytest.raises(ValueError):
+            action_candidates_constraint(z3.Solver(), v, t, (None,))
