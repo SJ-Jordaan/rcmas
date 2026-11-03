@@ -40,7 +40,17 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from .results import ALG_LABEL, ALGS, FAMILIES, FAMILY_LABEL, Results, Run, load
+from .results import (
+    ALG_LABEL,
+    ALGS,
+    FAMILIES,
+    FAMILY_LABEL,
+    THESIS_MARKER,
+    Results,
+    Run,
+    is_thesis_checkout,
+    load,
+)
 
 CHAPTER = "chapters/experiment"
 APPENDIX = "appendices/experiment"
@@ -463,6 +473,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Count uncertified equilibria as solved (only for the examined logs)",
     )
     args = ap.parse_args(argv)
+    if args.thesis_dir and not is_thesis_checkout(args.thesis_dir):
+        # A wrong path would otherwise give an empty report or a new tree of
+        # assets that the thesis never inputs, with exit code 0.
+        ap.error(
+            f"--thesis-dir {args.thesis_dir} is not a thesis checkout "
+            f"(no {THESIS_MARKER} there)"
+        )
 
     if not (args.out_dir or args.thesis_dir or args.chapter_dir or args.appendix_dir):
         ap.error("give --out-dir, --thesis-dir or --chapter-dir/--appendix-dir")

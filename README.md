@@ -202,7 +202,12 @@ python -m experiments.thesis_numbers --results results/examined/thesis-eval-900.
     --no-certificate-required --thesis-dir ../../thesis
 ```
 
-reproduces the numbers of the examined thesis.
+reproduces the numbers of the examined thesis. `../../thesis` is the thesis
+when the tool is checked out inside the PhD repository; in a standalone
+clone, give the path of a thesis checkout. Both scripts, and
+`reproduce.sh`, stop with an error if `--thesis-dir` holds no
+`chapters/experiment/main.tex`. Relative `--thesis-dir` and `--results-dir`
+paths of `reproduce.sh` are taken relative to the current directory.
 
 ### Archiving on Zenodo
 

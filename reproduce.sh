@@ -31,7 +31,9 @@
 #                     scan DIR for \rerun markers (default scan: ../../thesis,
 #                     read-only)
 #   --only STAGES     run only these stages (comma-separated)
-#   --results-dir DIR where outputs go (default: results, or results/smoke)
+#   --results-dir DIR where outputs go (default: results, or results/smoke,
+#                     in the tool directory); a relative DIR of either option
+#                     is taken relative to the current directory
 #   --archive         after the stages, pack the committed tool and the
 #                     committed results into dist/ for upload to Zenodo
 #   --smoke           the smoke test: experiments/smoke.toml, 30 s limit,
@@ -39,6 +41,7 @@
 #
 set -euo pipefail
 
+CALLER_DIR="$PWD"
 TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$TOOL_DIR"
 
@@ -63,10 +66,25 @@ while [ $# -gt 0 ]; do
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --results-dir=*) RESULTS_DIR="${1#*=}"; shift ;;
         --archive) ARCHIVE=1; shift ;;
-        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see ./reproduce.sh --help)" >&2; exit 2 ;;
     esac
 done
+
+# Relative --thesis-dir and --results-dir values are relative to the directory
+# from which the script was called, not to the tool directory.
+from_caller() {
+    case "$1" in
+        ""|/*) printf '%s' "$1" ;;
+        *) printf '%s/%s' "$CALLER_DIR" "$1" ;;
+    esac
+}
+THESIS_DIR=$(from_caller "$THESIS_DIR")
+RESULTS_DIR=$(from_caller "$RESULTS_DIR")
+if [ -n "$THESIS_DIR" ] && [ ! -f "$THESIS_DIR/chapters/experiment/main.tex" ]; then
+    echo "error: --thesis-dir $THESIS_DIR is not a thesis checkout (no chapters/experiment/main.tex there)" >&2
+    exit 2
+fi
 
 if [ "$SMOKE" = "1" ]; then
     CONFIG="experiments/smoke.toml"

@@ -49,7 +49,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .results import ALGS, FAMILIES, FAMILY_LABEL, Results, Run, config_label, load
+from .results import (
+    ALGS,
+    FAMILIES,
+    FAMILY_LABEL,
+    THESIS_MARKER,
+    Results,
+    Run,
+    config_label,
+    is_thesis_checkout,
+    load,
+)
 
 # ---------------------------------------------------------------------------
 # Finding the markers
@@ -2017,6 +2027,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Count uncertified equilibria as solved (only for the examined logs)",
     )
     args = ap.parse_args(argv)
+    if args.thesis_dir and not is_thesis_checkout(args.thesis_dir):
+        # A wrong path would otherwise give an empty report or a new tree of
+        # assets that the thesis never inputs, with exit code 0.
+        ap.error(
+            f"--thesis-dir {args.thesis_dir} is not a thesis checkout "
+            f"(no {THESIS_MARKER} there)"
+        )
 
     req = not args.no_certificate_required
     d = load(args.results, certificates=args.certificates, require_certificate=req)

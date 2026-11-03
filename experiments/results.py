@@ -46,6 +46,14 @@ FAMILY_LABEL = {
 }
 OUTCOMES = ("ne", "t/o", "n/c", "unk", "fail", "uns", "error")
 
+THESIS_MARKER = "chapters/experiment/main.tex"
+"""The file whose presence marks a directory as a thesis checkout (Chapter 7)."""
+
+
+def is_thesis_checkout(path: str | Path) -> bool:
+    """True if *path* is a checkout of the thesis, which holds Chapter 7."""
+    return (Path(path) / THESIS_MARKER).is_file()
+
 
 @dataclass(frozen=True)
 class Run:

@@ -811,6 +811,69 @@ class TestExaminedNumbers:
         assert all(e["rule"] is not None for e in entries)
 
 
+class TestThesisDir:
+    """A --thesis-dir that is not a thesis checkout is an error, not a no-op."""
+
+    def test_scripts_reject_a_wrong_thesis_dir(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from experiments import thesis_assets, thesis_numbers
+
+        wrong = tmp_path / "no-such-thesis"
+        report = tmp_path / "numbers.md"
+        common = ["--results", str(EXAMINED_900), "--no-certificate-required"]
+        with pytest.raises(SystemExit) as e:
+            thesis_numbers.main(
+                common + ["--thesis-dir", str(wrong), "--output", str(report)]
+            )
+        assert e.value.code == 2
+        assert "not a thesis checkout" in capsys.readouterr().err
+        assert not report.exists()
+        with pytest.raises(SystemExit) as e:
+            thesis_assets.main(
+                common + ["--thesis-dir", str(wrong), "--out-dir", str(tmp_path / "a")]
+            )
+        assert e.value.code == 2
+        assert "not a thesis checkout" in capsys.readouterr().err
+        assert not wrong.exists() and not (tmp_path / "a").exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="bash script")
+    def test_reproduce_sh_paths_are_relative_to_the_caller(
+        self, tmp_path: Path
+    ) -> None:
+        import shutil
+        import subprocess
+
+        if not (ROOT / ".venv" / "bin" / "python").exists():
+            pytest.skip("reproduce.sh needs the .venv of setup.sh")
+        (tmp_path / "res").mkdir()
+        shutil.copy(EXAMINED_900, tmp_path / "res" / "thesis-eval-900.jsonl")
+        chapter = tmp_path / "thesis" / "chapters" / "experiment"
+        chapter.mkdir(parents=True)
+        (chapter / "main.tex").write_text("\\gls{sibis} solves \\rerun{57} of 70.\n")
+        script = str(ROOT / "reproduce.sh")
+
+        def run(*args: str) -> Any:
+            return subprocess.run(
+                ["bash", script, "--only", "numbers", *args],
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        stray = ROOT / "res"  # where the old script put a relative --results-dir
+        stray_before = stray.exists()
+        bad = run("--results-dir", "res", "--thesis-dir", "nothesis")
+        assert bad.returncode == 2 and "not a thesis checkout" in bad.stderr
+        assert not (tmp_path / "res" / "thesis-numbers.md").exists()
+        ok = run("--results-dir", "res", "--thesis-dir", "thesis")
+        assert ok.returncode == 0, ok.stderr
+        text = (tmp_path / "res" / "thesis-numbers.md").read_text()
+        assert "## Markers (1 occurrences)" in text
+        assert stray_before or not stray.exists()
+
+
 class TestAssets:
     def test_examined_summary_table(self) -> None:
         d = load(EXAMINED_900, require_certificate=False)
