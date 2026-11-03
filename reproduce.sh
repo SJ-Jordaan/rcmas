@@ -33,7 +33,7 @@
 #   --only STAGES     run only these stages (comma-separated)
 #   --results-dir DIR where outputs go (default: results, or results/smoke)
 #   --archive         after the stages, pack the committed tool and the
-#                     results into dist/ for upload to Zenodo
+#                     committed results into dist/ for upload to Zenodo
 #   --smoke           the smoke test: experiments/smoke.toml, 30 s limit,
 #                     repeat with 10 s, outputs in results/smoke/
 #
@@ -252,8 +252,16 @@ if [ "$ARCHIVE" = "1" ]; then
     mkdir -p "$STAGE_DIR/$NAME" dist
     git archive --format=tar HEAD | tar -x -C "$STAGE_DIR/$NAME"
     git rev-parse HEAD > "$STAGE_DIR/$NAME/.git-commit"
-    mkdir -p "$STAGE_DIR/$NAME/$RESULTS_DIR"
-    cp -R "$RESULTS_DIR/." "$STAGE_DIR/$NAME/$RESULTS_DIR/"
+    # Only committed files go into the archive: the results that README step 1
+    # commits are part of HEAD, and the smoke outputs and other untracked files
+    # under results/ stay out.
+    for f in "$LOG" "$CERTS" "$REPEAT_LOG" "$REPEAT_CERTS" "$ENCODING" "$NUMBERS"; do
+        [ -f "$f" ] || continue
+        if ! git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 \
+            || ! git diff --quiet HEAD -- "$f" 2>/dev/null; then
+            echo "WARNING: $f has uncommitted changes, and the archive holds only what HEAD has of it; commit it first (README, Archiving on Zenodo)." >&2
+        fi
+    done
     tar -czf "dist/$NAME.tar.gz" -C "$STAGE_DIR" "$NAME"
     rm -rf "$STAGE_DIR"
     echo "wrote dist/$NAME.tar.gz"

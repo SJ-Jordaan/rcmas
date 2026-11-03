@@ -688,6 +688,56 @@ class TestStopping:
 
 
 # ---------------------------------------------------------------------------
+# The Zenodo archive (reproduce.sh --archive)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "posix", reason="bash script")
+def test_archive_holds_only_committed_files(tmp_path: Path) -> None:
+    """The archive is HEAD: no smoke outputs or untracked files of results/."""
+    import shutil
+    import subprocess
+    import tarfile
+
+    if not (ROOT / ".git").exists() or shutil.which("git") is None:
+        pytest.skip("needs a git checkout of the tool")
+    if not (ROOT / ".venv" / "bin" / "python").exists():
+        pytest.skip("reproduce.sh needs the .venv of setup.sh")
+    clone = tmp_path / "rcmas"
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(clone)]
+    subprocess.run(["git", "clone", "-q", str(ROOT), str(clone)], check=True)
+    shutil.copy(ROOT / "reproduce.sh", clone / "reproduce.sh")  # the version under test
+    (clone / ".venv").symlink_to(ROOT / ".venv")
+    subprocess.run(git + ["commit", "-qam", "test", "--allow-empty"], check=True)
+    (clone / "results" / "smoke").mkdir(parents=True, exist_ok=True)
+    (clone / "results" / "smoke" / "smoke-30.jsonl").write_text("{}\n")
+    (clone / "results" / "notes.txt").write_text("untracked\n")
+    (clone / "results" / "thesis-eval-900.jsonl").write_text('{"kind": "run"}\n')
+    out = subprocess.run(
+        ["bash", "reproduce.sh", "--only", "none", "--archive"],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    assert "thesis-eval-900.jsonl has uncommitted changes" in out.stderr
+    (archive,) = (clone / "dist").glob("*.tar.gz")
+    with tarfile.open(archive) as tar:
+        names = [n.split("/", 1)[1] for n in tar.getnames() if "/" in n]
+    tracked = subprocess.run(
+        git + ["ls-files"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    files = {n for n in names if not n.endswith("/")} - {".git-commit"}
+    files = {n for n in files if not (clone / n).is_dir()}
+    assert ".git-commit" in names
+    assert files == set(tracked)
+    assert not any(n.startswith("results/smoke") for n in names)
+    assert "results/notes.txt" not in names
+    assert "results/thesis-eval-900.jsonl" not in names
+
+
+# ---------------------------------------------------------------------------
 # Thesis assets and numbers, checked against the examined thesis
 # ---------------------------------------------------------------------------
 

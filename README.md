@@ -230,9 +230,11 @@ After the sweep:
 
    Zenodo archives the release with the metadata of `.zenodo.json` and mints
    a DOI for this version. Or run `./reproduce.sh --only none --archive`,
-   which packs the committed tool and `results/` into
+   which packs the files of HEAD, with the results committed in step 1, into
    `dist/rcmas-<version>-<commit>.tar.gz`, and upload that file as a new
-   Zenodo record of type Software.
+   Zenodo record of type Software. Uncommitted and untracked files, such as
+   `results/smoke/`, are not in the archive; the script warns about a result
+   file that has uncommitted changes.
 3. Cite the version DOI, not the concept DOI: put the version and the DOI in
    the `note` field of `rcmas2026zenodo` in `thesis/thesis.bib` (the `plain`
    bibliography style does not print a `doi` field), and add the DOI to
