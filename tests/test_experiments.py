@@ -143,6 +143,26 @@ class TestProvenance:
         if tool["source"] == "git":
             assert len(tool["commit"]) == 40 and isinstance(tool["dirty"], bool)
 
+    def test_enclosing_repository_is_not_the_tool(self, tmp_path: Path) -> None:
+        import subprocess
+
+        outer = tmp_path / "outer"
+        tool = outer / "tool"
+        tool.mkdir(parents=True)
+        (outer / "f").write_text("x")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(outer)]
+        try:
+            subprocess.run(git + ["init", "-q"], check=True)
+            subprocess.run(git + ["add", "f"], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            pytest.skip("git not available")
+        assert provenance.git_info(tool)["commit"] is None
+        (tool / ".git-commit").write_text("a" * 40 + "\n")
+        info = provenance.git_info(tool)
+        assert info["commit"] == "a" * 40 and info["source"] == ".git-commit"
+        assert provenance.git_info(outer)["source"] == "git"
+
     def test_workers_and_paths(self) -> None:
         assert provenance.physical_cores() >= 1
         assert provenance.default_workers() == max(1, provenance.physical_cores() - 1)

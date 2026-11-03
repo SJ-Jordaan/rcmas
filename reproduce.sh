@@ -131,9 +131,16 @@ if [ -z "$SCAN_DIR" ] && [ -f "$TOOL_DIR/../../thesis/chapters/experiment/main.t
     SCAN_DIR="$(cd "$TOOL_DIR/../../thesis" && pwd)"
 fi
 
-COMMIT=$(git -C "$TOOL_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-if [ -n "$(git -C "$TOOL_DIR" status --porcelain --untracked-files=no 2>/dev/null || true)" ]; then
-    echo "WARNING: the tool has uncommitted changes; the logs will record tool_dirty=true." >&2
+# Only a git checkout of the tool itself counts (not an enclosing repository).
+COMMIT="unknown"
+TOP=$(git -C "$TOOL_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+if [ -n "$TOP" ] && [ "$(cd "$TOP" && pwd -P)" = "$(cd "$TOOL_DIR" && pwd -P)" ]; then
+    COMMIT=$(git -C "$TOOL_DIR" rev-parse --short HEAD)
+    if [ -n "$(git -C "$TOOL_DIR" status --porcelain --untracked-files=no)" ]; then
+        echo "WARNING: the tool has uncommitted changes; the logs will record tool_dirty=true." >&2
+    fi
+elif [ -f "$TOOL_DIR/.git-commit" ]; then
+    COMMIT=$(cut -c1-7 "$TOOL_DIR/.git-commit")
 fi
 say "rcmas at $COMMIT, $("$PY" -V), z3-solver $Z3_FOUND, $WORKERS workers, config $CONFIG"
 

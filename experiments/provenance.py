@@ -63,7 +63,9 @@ def git_info(root: Path = TOOL_ROOT) -> dict[str, Any]:
     files (such as result logs) do not count.  Outside a git checkout the
     commit is read from ``.git-commit`` if present, and ``dirty`` is ``None``.
     """
-    commit = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    top = _run(["git", "rev-parse", "--show-toplevel"], cwd=root)
+    inside = top is not None and Path(top).resolve() == Path(root).resolve()
+    commit = _run(["git", "rev-parse", "HEAD"], cwd=root) if inside else None
     if commit:
         status = _run(
             ["git", "status", "--porcelain", "--untracked-files=no"], cwd=root
