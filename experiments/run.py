@@ -27,7 +27,7 @@ from dataclasses import replace
 
 from .config import Protocol, load_config, load_protocol
 from .provenance import default_workers
-from .runner import MixedLogError, run_batch
+from .runner import MixedLogError, SessionTerminated, run_batch
 
 
 def _summary(records: list[dict]) -> None:
@@ -232,12 +232,14 @@ def main(argv: list[str] | None = None) -> int:
     except (MixedLogError, FileExistsError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
+        how = e.signame if isinstance(e, SessionTerminated) else "Ctrl-C"
         print(
-            "\nInterrupted; finished runs are in the log. Rerun with --resume to continue.",
+            f"\nStopped by {how}; the running runs were killed and the finished ones "
+            "are in the log. Rerun with --resume to continue.",
             file=sys.stderr,
         )
-        return 130
+        return 128 + e.signum if isinstance(e, SessionTerminated) else 130
 
     if not args.no_progress:
         _summary(records)

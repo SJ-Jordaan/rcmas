@@ -151,8 +151,13 @@ a limit of 30 s (outputs in `results/smoke/`); it takes about two minutes
 and checks that everything works before the long run.
 
 **Resuming.** The sweeps append to their logs and skip the runs already
-there, so after an interruption (Ctrl-C, a reboot) run the same command
-again. A run that was in progress is started again from the beginning. The
+there, so after an interruption (Ctrl-C, `kill`, a closed terminal, a
+reboot) run the same command again. Ctrl-C, SIGTERM and SIGHUP, sent to
+`reproduce.sh` or to the runner, kill the runs in progress and end the
+session in the log; if the runner itself is killed with SIGKILL or crashes,
+its runs notice within a second and exit, so no run of an earlier session
+shares the cores with the next one. A run that was in progress is started
+again from the beginning. The
 runner refuses to resume a log that was written by another commit of the
 tool, another Z3 version, another configuration file or another protocol,
 so one log never mixes two setups; use a new `--results-dir` instead.

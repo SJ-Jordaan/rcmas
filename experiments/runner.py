@@ -29,6 +29,11 @@ iterations, the CEGAR-NE partition statistics, the time and the
 certificate, plus the session id, the tool commit and the Z3 version.  Grid
 paths are relative to the tool root.
 
+A session stopped by Ctrl-C, SIGTERM or SIGHUP kills its running children
+and writes its ``session_end`` record (with ``interrupted`` and ``signal``).
+A child also ends itself as soon as its parent process is gone, for
+example after SIGKILL, so no run outlives its session.
+
 With ``resume=True`` the runs already in the log are skipped and new records
 are appended.  A resumed session must use the same tool commit, Z3 version,
 configuration file and protocol as the sessions already in the log, unless
@@ -37,18 +42,20 @@ configuration file and protocol as the sessions already in the log, unless
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing
 import multiprocessing.connection
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence, cast
+from typing import Any, Iterable, Iterator, Sequence, cast
 
 from .config import Protocol
 from .provenance import collect, relative_to_tool, sha256_file
@@ -62,6 +69,12 @@ GRACE_S = 5.0
 
 STARTUP_TIMEOUT_S = 300.0
 """Seconds a child may take to import the tool and report that it started."""
+
+PARENT_POLL_S = 1.0
+"""Seconds between two checks of a child that its parent is still alive."""
+
+ORPHAN_EXIT_CODE = 3
+"""Exit code of a child that ends because its parent has gone."""
 
 ALGORITHMS = ("ibis", "sibis", "qibis", "cegar-ibis", "cegar-sibis", "cegar-qibis")
 
@@ -230,9 +243,30 @@ def _certify(
     }
 
 
+def _exit_when_orphaned(parent_pid: int, interval_s: float = PARENT_POLL_S) -> None:
+    """End this process as soon as the process *parent_pid* is no longer its parent.
+
+    A child whose runner is gone (killed, crashed, or stopped by a signal
+    other than Ctrl-C) is reparented, and without this check it would go on
+    computing until the SIGALRM failsafe, sharing the cores with the runs of
+    the next session.  A daemon thread polls the parent id, which works on
+    Linux and macOS; Z3 releases the GIL during its queries, so the thread
+    also runs while a query is being solved.
+    """
+
+    def watch() -> None:
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(ORPHAN_EXIT_CODE)
+            time.sleep(interval_s)
+
+    threading.Thread(target=watch, name="rcmas-parent-watch", daemon=True).start()
+
+
 def _child_main(conn: Any, task: dict[str, Any]) -> None:
     """Entry point of a child process: one run, reported over *conn*."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _exit_when_orphaned(int(task.get("parent_pid") or os.getppid()))
     protocol = Protocol(**task["protocol"])
     scenario: Scenario = task["scenario"]
     if hasattr(signal, "alarm"):
@@ -591,6 +625,7 @@ def _execute(
             "protocol": protocol.as_dict(),
             "certify": certify,
             "cert_timeout_s": cert_timeout_s,
+            "parent_pid": os.getpid(),
         }
         proc = ctx.Process(target=_child_main, args=(child, task), daemon=True)
         proc.start()
@@ -698,6 +733,52 @@ def _execute(
 # ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
+
+
+class SessionTerminated(KeyboardInterrupt):
+    """The session was stopped by SIGTERM or SIGHUP.
+
+    A subclass of :class:`KeyboardInterrupt`, so that a session stopped by
+    ``kill`` (or by a closed terminal) is wound down like one stopped by
+    Ctrl-C: the running children are killed and the log gets its
+    ``session_end`` record.
+    """
+
+    def __init__(self, signum: int) -> None:
+        self.signum = int(signum)
+        self.signame = signal.Signals(signum).name
+        super().__init__(self.signame)
+
+
+@contextlib.contextmanager
+def _stop_on_signals() -> Iterator[None]:
+    """Raise :class:`SessionTerminated` on SIGTERM and SIGHUP while the block runs.
+
+    Only the main thread can set signal handlers; elsewhere this does
+    nothing.  Repeated signals during the cleanup are ignored, so that the
+    ``session_end`` record is written in full.  The previous handlers are
+    restored afterwards.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    signums = [
+        getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)
+    ]
+    previous: dict[int, Any] = {}
+
+    def handler(signum: int, frame: Any) -> None:
+        for s in signums:
+            signal.signal(s, signal.SIG_IGN)
+        raise SessionTerminated(signum)
+
+    for s in signums:
+        previous[s] = signal.signal(s, handler)
+    try:
+        yield
+    finally:
+        for s, h in previous.items():
+            signal.signal(s, h)
 
 
 def run_batch(
@@ -834,31 +915,35 @@ def run_batch(
         )
 
     interrupted = False
-    try:
-        write(header)
-        _execute(
-            work,
-            protocol=protocol,
-            workers=workers,
-            certify=certify,
-            cert_timeout_s=cert_timeout_s,
-            on_record=on_record,
-            make_record=make_record,
-            progress=progress,
-        )
-    except KeyboardInterrupt:
-        interrupted = True
-        raise
-    finally:
-        write(
-            {
-                "kind": "session_end",
-                "session": session_id,
-                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "runs_written": len(records),
-                "interrupted": interrupted,
-            }
-        )
-        if out is not None:
-            out.close()
+    stopped_by: str | None = None
+    with _stop_on_signals():
+        try:
+            write(header)
+            _execute(
+                work,
+                protocol=protocol,
+                workers=workers,
+                certify=certify,
+                cert_timeout_s=cert_timeout_s,
+                on_record=on_record,
+                make_record=make_record,
+                progress=progress,
+            )
+        except KeyboardInterrupt as e:
+            interrupted = True
+            stopped_by = e.signame if isinstance(e, SessionTerminated) else "SIGINT"
+            raise
+        finally:
+            write(
+                {
+                    "kind": "session_end",
+                    "session": session_id,
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "runs_written": len(records),
+                    "interrupted": interrupted,
+                    "signal": stopped_by,
+                }
+            )
+            if out is not None:
+                out.close()
     return prior + records

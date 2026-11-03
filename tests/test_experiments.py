@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -401,6 +402,193 @@ class TestRunner:
         assert len(rows) == 5
         assert sum(r.found_ne for r in rows) == 3
         assert {r.status for r in rows} == {"ok", "timeout", "error"}
+
+
+# ---------------------------------------------------------------------------
+# Stopping a sweep: no run may outlive its session
+# ---------------------------------------------------------------------------
+
+LONG_CONFIG = (
+    '[suite]\nname = "long"\n[protocol]\ntime_limit_s = 120\n'
+    '[[instances]]\ngrid = "symmetric/6x5.txt"\nagents = [2, 3]\n'
+    '[parameters]\nalgorithms = ["ibis"]\nsymmetry = [false]\n'
+)
+
+
+def _process_table() -> dict[int, tuple[int, str]]:
+    """``pid -> (ppid, state)`` for every process (``ps`` on Linux and macOS)."""
+    import subprocess
+
+    out = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,stat="],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    table = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            table[int(parts[0])] = (int(parts[1]), parts[2])
+    return table
+
+
+def _live_descendants(root: int) -> set[int]:
+    table = _process_table()
+    found: set[int] = set()
+    frontier = [root]
+    while frontier:
+        p = frontier.pop()
+        for pid, (ppid, _) in table.items():
+            if ppid == p and pid not in found:
+                found.add(pid)
+                frontier.append(pid)
+    return {p for p in found if not table[p][1].startswith("Z")}
+
+
+def _alive(pids: set[int]) -> set[int]:
+    table = _process_table()
+    return {p for p in pids if p in table and not table[p][1].startswith("Z")}
+
+
+def _wait_for(predicate: Any, timeout_s: float) -> bool:
+    import time
+
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.2)
+    return bool(predicate())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signals")
+class TestStopping:
+    """Stopping the runner or reproduce.sh stops every run process.
+
+    Each test starts the sweep in its own session, waits until two runs are
+    being solved, stops it in one of the ways an author might, and checks
+    that no process of the sweep is left after a few seconds.
+    """
+
+    def _start(self, cmd: list[str], tmp_path: Path) -> Any:
+        import signal
+        import subprocess
+
+        env = dict(os.environ, PYTHONHASHSEED="0", PYTHONPATH=str(ROOT))
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=open(tmp_path / "stdout", "w"),
+            stderr=open(tmp_path / "stderr", "w"),
+            start_new_session=True,
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+        )
+        return proc
+
+    def _runs_started(self, proc: Any, count: int) -> set[int]:
+        import time
+
+        def spawned() -> bool:
+            return len(self._workers(proc.pid)) >= count
+
+        assert _wait_for(spawned, 60), "the runs did not start"
+        time.sleep(3)  # past the imports, inside Z3
+        return _live_descendants(proc.pid)
+
+    @staticmethod
+    def _workers(root: int) -> set[int]:
+        import subprocess
+
+        pids = _live_descendants(root)
+        out = set()
+        for p in pids:
+            cmd = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True
+            ).stdout
+            if "multiprocessing.spawn" in cmd:
+                out.add(p)
+        return out
+
+    def _cleanup(self, proc: Any, pids: set[int]) -> None:
+        import signal
+
+        for p in _alive(pids | {proc.pid}):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=10)
+
+    def _runner_cmd(self, tmp_path: Path) -> tuple[list[str], Path]:
+        import sys
+
+        cfg = tmp_path / "long.toml"
+        cfg.write_text(LONG_CONFIG)
+        log = tmp_path / "log.jsonl"
+        cmd = [sys.executable, "-m", "experiments.run", "--config", str(cfg)]
+        cmd += ["--output", str(log), "--workers", "2", "--resume", "--no-progress"]
+        return cmd, log
+
+    def test_sigterm_to_runner_kills_runs_and_ends_session(
+        self, tmp_path: Path
+    ) -> None:
+        import signal
+
+        cmd, log = self._runner_cmd(tmp_path)
+        proc = self._start(cmd, tmp_path)
+        pids: set[int] = set()
+        try:
+            pids = self._runs_started(proc, 2)
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=30) == 128 + signal.SIGTERM
+            assert _wait_for(lambda: not _alive(pids), 15), _alive(pids)
+            last = json.loads(log.read_text().splitlines()[-1])
+            assert last["kind"] == "session_end"
+            assert last["interrupted"] is True and last["signal"] == "SIGTERM"
+            assert "Stopped by SIGTERM" in (tmp_path / "stderr").read_text()
+        finally:
+            self._cleanup(proc, pids)
+
+    def test_runs_end_when_the_runner_is_killed(self, tmp_path: Path) -> None:
+        """SIGKILL leaves no chance for cleanup; the runs notice it themselves."""
+        import signal
+
+        cmd, _ = self._runner_cmd(tmp_path)
+        proc = self._start(cmd, tmp_path)
+        pids: set[int] = set()
+        try:
+            pids = self._runs_started(proc, 2)
+            workers = self._workers(proc.pid)
+            assert len(workers) == 2
+            proc.send_signal(signal.SIGKILL)
+            proc.wait(timeout=10)
+            assert _wait_for(lambda: not _alive(pids), 15), _alive(pids)
+        finally:
+            self._cleanup(proc, pids)
+
+    def test_sigterm_to_reproduce_sh_stops_the_sweep(self, tmp_path: Path) -> None:
+        import signal
+
+        if not (ROOT / ".venv" / "bin" / "python").exists():
+            pytest.skip("reproduce.sh needs the .venv of setup.sh")
+        results = tmp_path / "results"
+        cmd = ["bash", str(ROOT / "reproduce.sh"), "--smoke", "--only", "sweep"]
+        cmd += ["--workers", "2", "--results-dir", str(results)]
+        proc = self._start(cmd, tmp_path)
+        pids: set[int] = set()
+        try:
+            pids = self._runs_started(proc, 2)
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(timeout=30) == 143
+            assert _wait_for(lambda: not _alive(pids), 15), _alive(pids)
+            log = results / "smoke-30.jsonl"
+            last = json.loads(log.read_text().splitlines()[-1])
+            assert last["kind"] == "session_end" and last["interrupted"] is True
+        finally:
+            self._cleanup(proc, pids)
 
 
 # ---------------------------------------------------------------------------

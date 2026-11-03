@@ -95,6 +95,37 @@ run_stage() {
 
 say() { printf '\n== %s\n' "$*"; }
 
+# ── Signals ─────────────────────────────────────────────────────────
+# Each long stage runs in the background while this script waits for it, so
+# that a signal reaches the script at once (bash runs a trap only after a
+# foreground command has finished).  On Ctrl-C, `kill <pid of this script>`
+# or a closed terminal, the running stage gets SIGTERM; the sweep then kills
+# its runs and writes the end of its session to the log before it exits.
+STAGE_PID=""
+stop_stage() {
+    # stop_stage SIGNAL EXIT_CODE
+    trap '' INT TERM HUP
+    if [ -n "$STAGE_PID" ]; then
+        kill -TERM "$STAGE_PID" 2>/dev/null || true
+        wait "$STAGE_PID" 2>/dev/null || true
+    fi
+    echo "reproduce.sh: stopped by SIG$1; run the same command again to resume." >&2
+    exit "$2"
+}
+trap 'stop_stage INT 130' INT
+trap 'stop_stage TERM 143' TERM
+trap 'stop_stage HUP 129' HUP
+
+run_py() {
+    # run_py ARGS...: "$PY" ARGS in the background; returns its exit code
+    "$PY" "$@" &
+    STAGE_PID=$!
+    local rc=0
+    wait "$STAGE_PID" || rc=$?
+    STAGE_PID=""
+    return $rc
+}
+
 # ── Environment ─────────────────────────────────────────────────────
 PY="$TOOL_DIR/.venv/bin/python"
 if [ ! -x "$PY" ]; then
@@ -149,7 +180,7 @@ STATUS=0
 # ── Stages ──────────────────────────────────────────────────────────
 if run_stage sweep; then
     say "sweep: $CONFIG, limit $LIMIT s -> $LOG"
-    "$PY" -m experiments.run --config "$CONFIG" \
+    run_py -m experiments.run --config "$CONFIG" \
         --output "$LOG" --workers "$WORKERS" --resume
 fi
 
@@ -157,7 +188,7 @@ certify_log() {
     # certify_log LOG CERTS
     say "certify: $1 -> $2"
     set +e
-    "$PY" -c 'import sys; from rcmas.certify import main; sys.exit(main(sys.argv[1:]))' \
+    run_py -c 'import sys; from rcmas.certify import main; sys.exit(main(sys.argv[1:]))' \
         --results "$1" --output "$2"
     local rc=$?
     set -e
@@ -179,12 +210,12 @@ fi
 
 if run_stage encoding; then
     say "encoding: time to build F -> $ENCODING"
-    "$PY" -m experiments.encoding_times --config "$CONFIG" --output "$ENCODING"
+    run_py -m experiments.encoding_times --config "$CONFIG" --output "$ENCODING"
 fi
 
 if [ "$REPEAT" = "1" ] && run_stage repeat; then
     say "repeat: $CONFIG, limit $REPEAT_LIMIT s -> $REPEAT_LOG"
-    "$PY" -m experiments.run --config "$CONFIG" --timeout "$REPEAT_LIMIT" \
+    run_py -m experiments.run --config "$CONFIG" --timeout "$REPEAT_LIMIT" \
         --output "$REPEAT_LOG" --workers "$WORKERS" --resume
     certify_log "$REPEAT_LOG" "$REPEAT_CERTS"
 fi
@@ -195,7 +226,7 @@ if run_stage assets; then
     [ -f "$CERTS" ] && CERT_ARG=(--certificates "$CERTS")
     THESIS_ARG=()
     [ -n "$THESIS_DIR" ] && THESIS_ARG=(--thesis-dir "$THESIS_DIR")
-    "$PY" -m experiments.thesis_assets --results "$LOG" ${CERT_ARG[@]+"${CERT_ARG[@]}"} \
+    run_py -m experiments.thesis_assets --results "$LOG" ${CERT_ARG[@]+"${CERT_ARG[@]}"} \
         --out-dir "$ASSETS" --mark-time "$MARK_TIME" ${THESIS_ARG[@]+"${THESIS_ARG[@]}"}
 fi
 
@@ -207,7 +238,7 @@ if run_stage numbers; then
     [ -f "$REPEAT_CERTS" ] && ARGS+=(--repeat-certificates "$REPEAT_CERTS")
     [ -f "$ENCODING" ] && ARGS+=(--encoding "$ENCODING")
     [ -n "$SCAN_DIR" ] && ARGS+=(--thesis-dir "$SCAN_DIR")
-    "$PY" -m experiments.thesis_numbers "${ARGS[@]}"
+    run_py -m experiments.thesis_numbers "${ARGS[@]}"
 fi
 
 if [ "$ARCHIVE" = "1" ]; then
