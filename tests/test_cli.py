@@ -197,7 +197,7 @@ class TestCliRuns:
     def test_wrong_horizon_is_rejected(self, tmp_path):
         from rcmas.cli import main
 
-        with pytest.raises(ValueError, match="horizon"):
+        with pytest.raises(SystemExit, match="horizon must be m"):
             main(
                 [
                     "sibis",

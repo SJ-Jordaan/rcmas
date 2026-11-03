@@ -335,7 +335,13 @@ def main(argv: list[str] | None = None) -> int:
     with open(args.grid_path, "r", encoding="utf-8") as f:
         territory = Territory.from_ascii(f)
 
-    horizon = len(territory) // args.agents if args.horizon is None else args.horizon
+    m = len(territory) // args.agents
+    horizon = m if args.horizon is None else args.horizon
+    if args.mode in ("ibis", "sibis", "qibis", "cegar") and horizon != m:
+        raise SystemExit(
+            f"--horizon must be m = floor(|T|/|Agt|) = {m} for {args.mode} "
+            f"(Definition 3.9.1), got {horizon}; omit --horizon to use m"
+        )
     timeout_ms = args.timeout_ms
 
     if args.mode == "co":
