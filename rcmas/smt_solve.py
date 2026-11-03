@@ -46,23 +46,23 @@ from typing import Any, Callable, cast
 
 from .model import Coord, State, Territory, rewards_from_owner
 from .smt_constraints import (
-  action_candidates_constraint,
-  disconnected_symmetry_constraint,
-  domain_constraint,
-  evolution_constraint,
-  fixed_actions_constraint,
-  fixed_policy_constraint,
-  init_constraint,
-  local_symmetry_breaking_constraint,
-  max_reward,
-  opponent_constraint,
-  protocol_constraint,
-  qualitative_constraint,
-  reward_bound_constraint,
-  reward_constraint,
-  symmetry_breaking_constraint,
-  weight_balance_constraint,
-  witness_constraint,
+    action_candidates_constraint,
+    disconnected_symmetry_constraint,
+    domain_constraint,
+    evolution_constraint,
+    fixed_actions_constraint,
+    fixed_policy_constraint,
+    init_constraint,
+    local_symmetry_breaking_constraint,
+    max_reward,
+    opponent_constraint,
+    protocol_constraint,
+    qualitative_constraint,
+    reward_bound_constraint,
+    reward_constraint,
+    symmetry_breaking_constraint,
+    weight_balance_constraint,
+    witness_constraint,
 )
 from .smt_objectives import collective_objective, individual_objective
 from .smt_variables import SmtVariables, create_variables
@@ -290,10 +290,10 @@ def symmetry_constraints(
     """
     from .symmetry import component_info as _component_info
     from .symmetry import (
-      find_maximal_rectangular_subregions,
-      local_symmetry_info,
-      symmetry_info,
-      territory_connected_components,
+        find_maximal_rectangular_subregions,
+        local_symmetry_info,
+        symmetry_info,
+        territory_connected_components,
     )
 
     if v.T == 0:
