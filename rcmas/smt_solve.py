@@ -4,7 +4,9 @@
 
     F = [Init] and [Evol] and [Prot] and [Dom] and [Wit] and [Rew] and [phi_sat]
 
-once per run, as a list of Z3 expressions (Section 7.1).  Every query of a
+once per run, as a list of Z3 expressions (Section 7.1), together with the
+bound ``reward_a <= R_max`` that ``F`` implies
+(:func:`~rcmas.smt_constraints.reward_bound_constraint`).  Every query of a
 run replays this list into a fresh solver and adds its own constraints:
 
 - :func:`find_feasible_from_base`: ``smt(F)``, the initial play of IBIS,
@@ -44,21 +46,23 @@ from typing import Any, Callable, cast
 
 from .model import Coord, State, Territory, rewards_from_owner
 from .smt_constraints import (
-    action_candidates_constraint,
-    disconnected_symmetry_constraint,
-    domain_constraint,
-    evolution_constraint,
-    fixed_actions_constraint,
-    fixed_policy_constraint,
-    init_constraint,
-    local_symmetry_breaking_constraint,
-    opponent_constraint,
-    protocol_constraint,
-    qualitative_constraint,
-    reward_constraint,
-    symmetry_breaking_constraint,
-    weight_balance_constraint,
-    witness_constraint,
+  action_candidates_constraint,
+  disconnected_symmetry_constraint,
+  domain_constraint,
+  evolution_constraint,
+  fixed_actions_constraint,
+  fixed_policy_constraint,
+  init_constraint,
+  local_symmetry_breaking_constraint,
+  max_reward,
+  opponent_constraint,
+  protocol_constraint,
+  qualitative_constraint,
+  reward_bound_constraint,
+  reward_constraint,
+  symmetry_breaking_constraint,
+  weight_balance_constraint,
+  witness_constraint,
 )
 from .smt_objectives import collective_objective, individual_objective
 from .smt_variables import SmtVariables, create_variables
@@ -179,10 +183,7 @@ class BaseEncoding:
     @property
     def max_reward(self) -> int:
         """``R_max`` of S-IBIS: ``m``, or the largest total weight of ``m`` sectors (Section 6.1)."""
-        v = self.variables
-        if v.weights is None:
-            return min(v.T, v.S)
-        return sum(sorted(v.weights, reverse=True)[: v.T])
+        return max_reward(self.variables)
 
     def rewards_of(
         self, owner_by_index: tuple[int, ...] | list[int]
@@ -250,6 +251,7 @@ def build_base_encoding(
     witness_constraint(collector, v)
     reward_constraint(collector, v)
     qualitative_constraint(collector, v, demands)
+    reward_bound_constraint(collector, v)
 
     if weight_balance_target is not None:
         weight_balance_constraint(collector, v, weight_balance_target)
@@ -288,10 +290,10 @@ def symmetry_constraints(
     """
     from .symmetry import component_info as _component_info
     from .symmetry import (
-        find_maximal_rectangular_subregions,
-        local_symmetry_info,
-        symmetry_info,
-        territory_connected_components,
+      find_maximal_rectangular_subregions,
+      local_symmetry_info,
+      symmetry_info,
+      territory_connected_components,
     )
 
     if v.T == 0:

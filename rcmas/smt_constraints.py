@@ -11,7 +11,9 @@ with :func:`init_constraint` (Definition 4.2.1), :func:`evolution_constraint`
 :func:`protocol_constraint` (Definition 4.2.3), :func:`domain_constraint`
 (Definition 4.2.4), :func:`witness_constraint` (Definition 4.3.1),
 :func:`reward_constraint` (Definition 4.3.2) and
-:func:`qualitative_constraint` (Definition 4.3.3).  The opponent constraint
+:func:`qualitative_constraint` (Definition 4.3.3).  The cached formula also
+contains :func:`reward_bound_constraint`, the bound ``reward_a <= R_max``
+that ``F`` implies, which removes no model and speeds up refutations.  The opponent constraint
 ``[Fix^a_pi]`` of the best-response formula ``G_a(pi) = F and [Fix^a_pi]``
 (Definition 4.7.1) is :func:`opponent_constraint`.
 
@@ -207,6 +209,34 @@ def reward_constraint(opt: Any, v: SmtVariables) -> None:
         constraints.append(v.reward[a] == (Sum(terms) if terms else IntVal(0)))
     if constraints:
         opt.add(*constraints)
+
+
+# ---------------------------------------------------------------------------
+# Implied reward bound (Section 7.1)
+# ---------------------------------------------------------------------------
+
+
+def max_reward(v: SmtVariables) -> int:
+    """``R_max``: ``m``, or the largest total weight of ``m`` sectors (Sections 4.8, 6.1)."""
+    if v.weights is None:
+        return min(v.T, v.S)
+    return sum(sorted(v.weights, reverse=True)[: v.T])
+
+
+def reward_bound_constraint(opt: Any, v: SmtVariables) -> None:
+    """``reward_a <= R_max`` for every agent.
+
+    ``F`` implies this bound: the witness region lies in the sectors that
+    ``a`` controls in ``s_m`` (Lemma 4.3.1), and in a play every agent
+    controls exactly ``m`` sectors of ``s_m`` (Lemma 3.10.1), whose total
+    weight is at most ``R_max``.  It removes no model, and it lets Z3
+    refute ``reward_a > r`` at once when ``r = R_max``, which the
+    feasibility filter of S-IBIS and VerifyNE pose for every agent whose
+    reward is already ``m``.
+    """
+    bound = max_reward(v)
+    if v.A:
+        opt.add(*[v.reward[a] <= bound for a in range(v.A)])
 
 
 # ---------------------------------------------------------------------------

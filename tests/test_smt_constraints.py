@@ -28,6 +28,7 @@ from rcmas.smt_constraints import (
     opponent_constraint,
     protocol_constraint,
     qualitative_constraint,
+    reward_bound_constraint,
     reward_constraint,
     witness_constraint,
 )
@@ -417,3 +418,50 @@ class TestActionCandidatesConstraint:
         v = create_variables(t, 2, 2)
         with pytest.raises(ValueError):
             action_candidates_constraint(z3.Solver(), v, t, (None,))
+
+
+class TestRewardBound:
+    """``reward_a <= R_max`` is implied by F and removes no model (Section 7.1)."""
+
+    @pytest.mark.parametrize(
+        "grid,n", [(["...", "..."], 2), (["...", "...", "..."], 3)]
+    )
+    def test_witness_oracle_unchanged(self, grid, n):
+        t = Territory.from_ascii(grid)
+        m = len(t) // n
+        v = create_variables(t, n, m)
+        s = z3.Solver()
+        witness_constraint(s, v)
+        reward_constraint(s, v)
+        reward_bound_constraint(s, v)
+        nb = t.neighbor_map()
+        for state in final_states(len(t), n, m):
+            r = rewards_from_owner(state, n, nb)
+            s.push()
+            s.add(*[v.owner[i][m] == state[i] for i in range(v.S)])
+            assert s.check(*[v.reward[a] == r[a] for a in range(n)]) == z3.sat
+            s.pop()
+
+    def test_plays_unchanged(self):
+        t = Territory.from_ascii(["...", "..."])
+        v = create_variables(t, 2, 3)
+        s = z3.Solver()
+        _dynamics(s, v)
+        witness_constraint(s, v)
+        reward_constraint(s, v)
+        reward_bound_constraint(s, v)
+        assert _action_models(s, v) == _all_plays(6, 2, 3)
+
+    def test_weighted_bound(self):
+        t = Territory.from_ascii(["...."])
+        v = create_variables(
+            t,
+            2,
+            2,
+            weights=(1, 4, 2, 3),
+            custom_neighbors={0: [1], 1: [0, 2], 2: [1, 3], 3: [2]},
+        )
+        s = z3.Solver()
+        reward_bound_constraint(s, v)
+        assert s.check(v.reward[0] == 7) == z3.sat
+        assert s.check(v.reward[0] == 8) == z3.unsat
