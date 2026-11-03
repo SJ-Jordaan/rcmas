@@ -621,8 +621,8 @@ def solve_smt_game(
     """
     if num_agents <= 0:
         raise ValueError("num_agents must be >= 1")
-    if horizon <= 0:
-        raise ValueError("horizon must be >= 1")
+    if horizon < 0:
+        raise ValueError("horizon must be >= 0")
     if objective is not None and objective != "sum" and not isinstance(objective, int):
         raise ValueError("objective must be 'sum', an agent index or None")
 

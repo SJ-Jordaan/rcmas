@@ -239,12 +239,56 @@ class TestInputValidation:
                 territory=territory, num_agents=0, horizon=1, objective="sum"
             )
 
-    def test_zero_horizon_raises(self):
+    def test_negative_horizon_raises(self):
         territory = Territory.from_ascii([".."])
         with pytest.raises(ValueError, match="horizon"):
             solve_smt_game(
-                territory=territory, num_agents=1, horizon=0, objective="sum"
+                territory=territory, num_agents=1, horizon=-1, objective="sum"
             )
+
+
+class TestHorizonZeroSynthesis:
+    """|Agt| > |T| gives m = floor(|T|/|Agt|) = 0 (Definition 3.9.1).
+
+    The only play is ``s_0``, so every reward is 0, and a satisfying joint
+    strategy exists exactly when every demand is 0.  ``smt(F)`` and
+    ``smt(F, f)`` (Theorems 4.5.1 and 4.6.1) must say so, with and without
+    the symmetry constraints, instead of rejecting the instance.
+    """
+
+    CASES = [
+        (["."], 2),
+        (["..", ".."], 5),
+        ([".#."], 3),
+        (["..#", ".#."], 5),
+    ]
+
+    @pytest.mark.parametrize("grid,agents", CASES)
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_matches_enumeration(self, grid, agents, symmetry):
+        territory = Territory.from_ascii(grid)
+        assert len(territory) // agents == 0
+        s0 = tuple([-1] * len(territory))
+        demand_vectors = [None, (0,) * agents, (1,) + (0,) * (agents - 1)]
+        demand_vectors.append((0,) * (agents - 1) + (1,))
+        for demands in demand_vectors:
+            # The single play of horizon 0 is satisfying iff all d(a) = 0.
+            expected = demands is None or all(d == 0 for d in demands)
+            for solve in (solve_satisfying, solve_collective_optimality):
+                sol = solve(
+                    territory=territory,
+                    num_agents=agents,
+                    horizon=0,
+                    symmetry_breaking=symmetry,
+                    demands=demands,
+                )
+                assert sol.is_sat == expected, (solve.__name__, demands)
+                if expected:
+                    assert sol.payoff_by_agent == (0,) * agents
+                    assert sol.play is not None
+                    assert sol.play.states == (s0,) and sol.play.actions == ()
+                else:
+                    assert sol.reason == "unsat"
 
     def test_invalid_objective_raises(self):
         territory = Territory.from_ascii([".."])

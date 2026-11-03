@@ -228,6 +228,32 @@ class TestCliRuns:
         assert rc == 2
         assert "outcome=uns" in capsys.readouterr().out
 
+    @pytest.mark.parametrize(
+        "extra", [[], ["--symmetry"], ["--render", "--dump-model"]]
+    )
+    def test_co_with_more_agents_than_sectors(self, tmp_path, capsys, extra):
+        """|Agt| > |T|: m = 0, and s_0 is a satisfying, optimal play."""
+        from rcmas.cli import main
+
+        grid = tmp_path / "grid.txt"
+        grid.write_text("..\n..\n")
+        rc = main(["co", "--grid", str(grid), "--agents", "5", *extra])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "sat=True" in out and "horizon=0" in out
+        assert "rewards=(0, 0, 0, 0, 0) welfare=0" in out
+
+    def test_co_horizon_zero_with_positive_demand_is_unsat(self, tmp_path, capsys):
+        from rcmas.cli import main
+
+        grid = tmp_path / "grid.txt"
+        grid.write_text("..\n..\n")
+        rc = main(
+            ["co", "--grid", str(grid), "--agents", "5", "--demands", "0,0,1,0,0"]
+        )
+        assert rc == 2
+        assert "sat=False reason=unsat horizon=0" in capsys.readouterr().out
+
     def test_co_uses_default_horizon(self, tmp_path, capsys):
         from rcmas.cli import main
 
