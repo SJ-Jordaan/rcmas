@@ -1,103 +1,77 @@
-# RCMAS — Region Control Multi-Agent System
+# RCMAS: Nash equilibrium synthesis for region-control multi-agent systems
 
-A tool for synthesising Nash equilibrium strategies in territory-control games via SMT solving and Q-learning.
+`rcmas` synthesises pure Nash equilibria of region-control multi-agent
+systems (RCMAS) with the Z3 SMT solver. It implements the encoding and the
+synthesis procedures of the PhD thesis of Steven Jordaan (University of
+Pretoria): IBIS, S-IBIS, Q-IBIS and CEGAR-NE, symmetry reduction, and an
+independent certifier for the equilibria it returns. Chapter 7 of the thesis
+describes the implementation and evaluates it; the section
+[Reproducing the thesis experiments](#reproducing-the-thesis-experiments)
+below gives the commands that regenerate its results.
 
-## Quick start
+## Setup
+
+Python 3.10 or later. The only runtime dependency is `z3-solver`, pinned to
+version 5.3.3.0 in `pyproject.toml`; `uv.lock` and `requirements-lock.txt`
+pin every other package.
 
 ```bash
-git clone <repo-url> && cd rcmas
-./setup.sh
-rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8
-```
-
-## Manual setup
-
-Requires Python 3.10 or later.
-
-```bash
-python3 -m venv .venv
+git clone https://github.com/SJ-Jordaan/rcmas.git && cd rcmas
+./setup.sh                 # creates .venv/ from the lock files and runs the tests
 source .venv/bin/activate
-pip install -e ".[dev]"
-pytest -q
 ```
+
+`setup.sh` uses `uv sync --frozen` when [uv](https://docs.astral.sh/uv/) is
+installed, and otherwise `venv` and `pip install --require-hashes -r
+requirements-lock.txt`. It stops if the environment holds another version of
+Z3. `./setup.sh --no-tests` skips the test suite.
 
 ## Usage
 
-The `rcmas` CLI has four subcommands. All require `--grid`, `--agents`, and `--horizon`.
-
-### Collective optimality (`co`)
-
-Find a collectively optimal strategy (maximise total payoff) via SMT (Def 24).
+Every command takes `--grid`, `--agents` and `--horizon`. The synthesis
+commands (`ibis`, `sibis`, `qibis`, `cegar`) accept only the horizon
+`m = floor(|T|/n)` of Definition 3.9.1, where `|T|` is the number of sectors
+and `n` the number of agents. Chapter 7 uses the iteration bound `N = 30`;
+pass `--max-iters 30` to match it.
 
 ```bash
-rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8
-
-# Show per-timestep ASCII trace
+# Collectively optimal strategy (16 sectors, 2 agents, m = 8)
 rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --render
 
-# Print model variables
-rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --dump-model
+# IBIS (Algorithm 1) and S-IBIS (Algorithm 2) on a 12-sector territory, m = 6
+rcmas ibis  --grid grids/asymmetric/interesting.txt --agents 2 --horizon 6 --max-iters 30 --progress
+rcmas sibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 6 --max-iters 30 --symmetry
 
-# Set a Z3 timeout (milliseconds)
-rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --timeout-ms 10000
+# Demands d(a): agents 1 and 2 need 2 sectors, agents 3 and 4 need 3 (m = 4)
+rcmas sibis --grid grids/symmetric/4x4.txt --agents 4 --horizon 4 --demands 2,2,3,3
+
+# Q-IBIS (Algorithm 3); its learning parameters are the fields of rcmas.qibis.QibisConfig
+rcmas qibis --grid grids/symmetric/3x3.txt --agents 3 --horizon 3 --max-iters 30
+
+# CEGAR-NE (Algorithm 4) with S-IBIS inside, from the orbit partition
+rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --horizon 4 \
+      --partition orbit --synthesiser sibis --max-iters 30 --progress
+
+# Q-learning self-play
+rcmas train --grid grids/symmetric/4x4.txt --agents 2 --horizon 8
+
+# Re-check the equilibria of a result log without SMT (thesis Section 7.5)
+rcmas certify --results results/thesis-eval-900.jsonl
 ```
 
-### Nash equilibrium via IBIS (`ibis`)
-
-Iterative best-response search for a Nash equilibrium (Algorithm 1).
-
-```bash
-rcmas ibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
-      --max-iters 25 --progress --timing --timeout-ms 10000
-
-# Enable symmetry-breaking constraints (reduces search space on symmetric grids)
-rcmas ibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
-
-# Heterogeneous demands: agents 0,1 need 3 sectors; agents 2,3 need 5 sectors
-rcmas ibis --grid grids/symmetric/4x4.txt --agents 4 --horizon 3 --symmetry --demands 3,3,5,5
-```
-
-### Q-learning-guided IBIS (`qibis`)
-
-Best-response iterations guided by Q-learning action proposals (Algorithm 2).
-
-```bash
-rcmas qibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 8 \
-      --max-iters 25 --progress --timing --timeout-ms 10000
-
-# With symmetry breaking
-rcmas qibis --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --symmetry
-```
-
-### CEGAR-NE abstraction refinement (`cegar`)
-
-Counterexample-guided abstraction refinement for NE synthesis (EUMAS Algorithm 1).
-
-```bash
-rcmas cegar --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 \
-      --partition orbit --max-iters 25 --progress --symmetry
-
-# With heterogeneous demands
-rcmas cegar --grid grids/symmetric/4x4.txt --agents 4 --horizon 3 \
-      --symmetry --demands 3,3,5,5
-```
-
-### Q-learning self-play (`train`)
-
-Train agents in self-play (default 2000 episodes), then evaluate (Sec 5.2).
-
-```bash
-rcmas train --grid grids/symmetric/6x6.txt --agents 2 --horizon 8
-```
+`--symmetry` adds the symmetry-breaking constraints of Chapter 5 to the
+query for the initial play only; best-response and verification queries
+never contain them.
 
 ## Grid format
 
-Grid files are plain text. Each character maps to a coordinate:
-
-- `.` is a sector (playable cell)
-- Any other character (including `#` and space) is a wall
-
-Rows do not need to be the same length. Example (an asymmetric territory):
+A grid file is plain text. `.` is an accessible sector; any other character,
+including `#` and a space, is inaccessible. Rows may differ in length. The
+tool numbers the sectors as in Remark 3.1.1 of the thesis: row by row from
+the bottom row, left to right within a row. A file lists its rows from top
+to bottom, so its last line holds the first sectors. Tool indices start at
+0, so tool sector `i` is sector `i + 1` of the thesis, and tool agent `a` is
+agent `a + 1`.
 
 ```text
 ..#.
@@ -105,75 +79,162 @@ Rows do not need to be the same length. Example (an asymmetric territory):
 .#.#
 ```
 
-Pre-made grids are in `grids/symmetric/` and `grids/asymmetric/`.
+The benchmark territories of Chapter 7 are in `grids/symmetric/`,
+`grids/local_symmetry/`, `grids/disconnected/` and `grids/asymmetric/` (the
+random family).
 
-## Paper-to-code mapping
+## Thesis to code
 
-Every module in `rcmas/` maps to a section of the paper. The table below gives the correspondence.
+| Thesis | Module |
+|---|---|
+| Chapter 3: territory, states, evolution, rewards (Definition 3.9.2) | `rcmas/model.py` |
+| Plays (Definition 4.2.5), canonical completion (Definition 4.4.2) | `rcmas/strategy.py` |
+| Formula F (Section 4.2), witness reward encoding (Section 4.3), opponent constraint (Definition 4.7.1), symmetry constraints (Chapter 5) | `rcmas/smt_variables.py`, `rcmas/smt_constraints.py` |
+| Objectives (Section 4.6), queries and the S-IBIS binary search | `rcmas/smt_objectives.py`, `rcmas/smt_solve.py` |
+| IBIS (Algorithm 1), S-IBIS (Algorithm 2) | `rcmas/ibis.py` |
+| Q-learning (Sections 2.4 and 4.9), Q-IBIS (Algorithm 3) | `rcmas/qlearning.py`, `rcmas/qibis.py` |
+| Symmetry detection and reduction (Chapter 5, Section 7.1) | `rcmas/symmetry.py` |
+| Partitions, abstract RCMAS, lifting, refinement (Chapter 6) | `rcmas/abstraction.py` |
+| CEGAR-NE (Algorithm 4) | `rcmas/cegar.py` |
+| Independent certifier (Section 7.5) | `rcmas/certify.py` |
+| Evaluation (Chapter 7, Appendix A) | `experiments/`, `reproduce.sh` |
 
-| Paper Reference | Module | Key Functions / Classes |
-|---|---|---|
-| Def 1--3: Territory, Sector | `model.py` | `Territory`, `Coord` |
-| Def 4--5: State, Evolve | `model.py` | `State`, `evolve()` |
-| Def 6: Adjacency | `model.py` | `neighbors4()`, `adjacent_owned()` |
-| Def 7--8: Components, Scores | `model.py` | `connected_components()`, `largest_region_size()`, `scores()` |
-| Def 9--10: Strategy types | `strategy.py` | `Policy`, `ActionCandidates`, `StateKey` |
-| Def 11--12: Freeze / hash | `strategy.py` | `freeze_policy()`, `freeze_profile()` |
-| Def 13: Policy from solution | `strategy.py` | `policy_from_solution()` |
-| Def 14: Reward | `strategy.py` | `reward()` |
-| Def 15: SMT variables | `smt_variables.py` | `SmtVariables`, `create_variables()` |
-| Def 16: Init constraint | `smt_constraints.py` | `init_constraint()` |
-| Def 17: Evolution constraint | `smt_constraints.py` | `evolution_constraint()` |
-| Def 18: Protocol constraint | `smt_constraints.py` | `protocol_constraint()` |
-| Def 19: Collision constraint | `smt_constraints.py` | `collision_constraint()` |
-| Def 20: Adjacency constraint | `smt_constraints.py` | `adjacency_constraint()` |
-| Def 21: Cohesive region | `smt_constraints.py` | `cohesive_region_constraint()` |
-| Def 22: Size constraint | `smt_constraints.py` | `size_constraint()` |
-| Def 23: Reward constraint | `smt_constraints.py` | `reward_constraint()` |
-| Def 24: Qualitative objective | `smt_objectives.py` | `qualitative_objective()` |
-| Def 25: Quantitative objective | `smt_objectives.py` | `quantitative_objective()` |
-| Alg 1: IBIS | `ibis.py` | `solve_ibis()` |
-| Sec 5.2: Q-learning | `qlearning.py` | `QTable`, `train_self_play()` |
-| Alg 2: Q-IBIS | `qibis.py` | `solve_qibis()` |
-| Symmetry reduction | `symmetry.py` | `territory_automorphisms()`, `symmetry_info()`, `SymmetryInfo` |
-| Demand classes (EUMAS Def 5) | `symmetry.py` | `demand_classes()` |
-| Lex-leader + spatial canon. (EUMAS Sec 4) | `smt_constraints.py` | `symmetry_breaking_constraint()` |
-| Territory partition (EUMAS Def 8) | `abstraction.py` | `Partition`, `orbit_partition()`, `discrete_partition()` |
-| Abstract RCMAS (EUMAS Def 9) | `abstraction.py` | `AbstractRCMAS`, `build_abstract_rcmas()` |
-| Strategy lifting (EUMAS Def 10) | `abstraction.py` | `lift_strategy()`, `LiftedStrategy` |
-| Refinement (EUMAS Def 12) | `abstraction.py` | `refine_partition()`, `compute_deviation_set()` |
-| CEGAR-NE (EUMAS Alg 1) | `cegar.py` | `solve_cegar()`, `verify_ne()` |
+## Reproducing the thesis experiments
 
-## Project structure
+One command runs the evaluation of Chapter 7 and regenerates everything the
+thesis takes from it:
 
-```
-rcmas/
-    model.py              # Def 1-8:   Territory, State, evolve, adjacency, scores
-    strategy.py           # Def 9-14:  Policy types, reward, freeze/hash
-    smt_variables.py      # Def 15:    Z3 variable creation
-    smt_constraints.py    # Def 16-23: One function per SMT constraint
-    smt_objectives.py     # Def 24-25: Qualitative and quantitative objectives
-    smt_solve.py          # Solver assembly: compose constraints, call Z3, extract solution
-    ibis.py               # Alg 1:     IBIS (iterative best-response via SMT)
-    qlearning.py          # Sec 5.2:   Tabular Q-learning, self-play training
-    qibis.py              # Alg 2:     Q-IBIS (Q-learning-guided IBIS)
-    symmetry.py           # Symmetry detection, orbits, demand classes
-    abstraction.py        # Territory partition, abstract RCMAS, lifting, refinement
-    cegar.py              # CEGAR-NE: abstraction-refinement loop for NE synthesis
-    cli.py                # Command-line interface
-tests/                    # 295 tests covering every module
-grids/                    # ASCII territory files
-pyproject.toml            # Single project configuration
-setup.sh                  # One-command setup script
+```bash
+./setup.sh --no-tests        # once
+./reproduce.sh               # or: ./reproduce.sh --workers 7
 ```
 
-## Running tests
+It runs these stages, and stops at the first error:
+
+1. **sweep**: the protocol of Sections 7.2 and 7.3, from
+   `experiments/thesis-eval.toml`. 70 instances (27 territories, every
+   `n` in 2..6 that divides `|T|`), four algorithms (IBIS, S-IBIS, Q-IBIS, and
+   CEGAR-NE with S-IBIS inside and the orbit partition), each without and
+   with symmetry reduction, demand 0, iteration bound 30, Q-IBIS seed 0, one
+   run per configuration with a wall-clock limit of 900 s: 560 runs. Each
+   run gets its own fresh process, and every equilibrium is checked by the
+   certifier as soon as it is returned; a run counts as solved only if the
+   certifier accepts it. Output: `results/thesis-eval-900.jsonl`.
+2. **certify**: `rcmas certify` re-checks every equilibrium of the log
+   (`results/thesis-eval-900.cert.jsonl`).
+3. **encoding**: the time to build the formula F for each instance
+   (`results/encoding-build.jsonl`), for the statement in Section 7.1.
+4. **repeat**: the same sweep with a limit of 300 s
+   (`results/thesis-eval-300.jsonl`), from which Section 7.2 measures the
+   variation between two runs of the same pair. `--no-repeat` skips it.
+5. **assets**: Table 7.1, Figures 7.2 and 7.3 and Table A.1, written to
+   `results/thesis-assets/chapters/experiment/` and
+   `results/thesis-assets/appendices/experiment/`, the paths from which the
+   thesis inputs them. With `--thesis-dir ../../thesis` they are also written
+   into the thesis checkout.
+6. **numbers**: `results/thesis-numbers.md` lists every `\rerun{...}` of the
+   thesis (found in `../../thesis` when the tool is checked out inside the
+   PhD repository, or in `--thesis-dir`) with its file and line, the current
+   text, the new values and a proposed replacement. Where a marked sentence
+   is qualitative, the report says so and gives the data that bear on it.
+   The script never edits the thesis.
+
+`./reproduce.sh --only assets,numbers` reruns selected stages.
+`./reproduce.sh --smoke` runs the same pipeline on four small instances with
+a limit of 30 s (outputs in `results/smoke/`); it takes about two minutes
+and checks that everything works before the long run.
+
+**Resuming.** The sweeps append to their logs and skip the runs already
+there, so after an interruption (Ctrl-C, a reboot) run the same command
+again. A run that was in progress is started again from the beginning. The
+runner refuses to resume a log that was written by another commit of the
+tool, another Z3 version, another configuration file or another protocol,
+so one log never mixes two setups; use a new `--results-dir` instead.
+
+**Hardware.** Each run is one Python process with one Z3 instance on one
+core. Chapter 7 compares times, so use at most the number of physical cores:
+the default is the number of physical cores minus one, and on Apple silicon
+the number of performance cores minus one, since Z3 runs much slower on an
+efficiency core. Do not run other heavy work on the machine during the
+sweep. The examined sweep ran 8 runs at a time on an Apple M3 Pro with
+18 GB; record the machine you use, which the logs also do.
+
+**Duration.** The examined sweep (`results/examined/thesis-eval-900.jsonl`)
+took 47 CPU-hours: 147 of its 560 runs (26%) reached the 900 s limit and
+account for 37 of those hours. The revised Q-IBIS adds a certification
+round and CEGAR-NE refines more often, so expect more timeouts. Plan for 50
+to 80 CPU-hours for the 900 s sweep (7 to 12 hours with 7 workers) and 25 to
+45 CPU-hours for the 300 s repeat; 140 and 47 CPU-hours are the bounds if
+every run reaches its limit. The certification and the other stages take
+minutes.
+
+**Provenance.** Every session of a log starts with a header record that
+holds the tool version, the git commit and whether the working tree had
+uncommitted changes, the Python and z3-solver versions, the platform, the
+CPU model, the number of cores, the memory, the start time, the SHA-256 of
+the configuration and the command line. Every run record repeats the commit
+and the Z3 version and gives the grid path relative to the tool. Commit
+your changes before the sweep, so that the logs record `tool_dirty: false`.
+
+**Outputs.** Everything goes to `results/` (ignored by git). The logs of the
+examined thesis are kept in `results/examined/`; see the README there.
+The scripts read both formats, for example
+
+```bash
+python -m experiments.thesis_numbers --results results/examined/thesis-eval-900.jsonl \
+    --no-certificate-required --thesis-dir ../../thesis
+```
+
+reproduces the numbers of the examined thesis.
+
+### Archiving on Zenodo
+
+The thesis cites the archived version of the tool as `rcmas2026zenodo`.
+After the sweep:
+
+1. Commit the result files so that the release contains them (they are under
+   an ignored directory, hence `-f`):
+
+   ```bash
+   git add -f results/thesis-eval-900.jsonl results/thesis-eval-900.cert.jsonl \
+       results/thesis-eval-300.jsonl results/thesis-eval-300.cert.jsonl \
+       results/encoding-build.jsonl results/thesis-assets results/thesis-numbers.md
+   git commit -m "Add the result logs of the thesis evaluation"
+   ```
+
+   The logs record the commit that produced them, which is the parent of
+   this one.
+2. Either enable the GitHub integration on zenodo.org (Account, GitHub, switch
+   on `rcmas`), then tag and publish a GitHub release:
+
+   ```bash
+   git tag -a v2.0.0 -m "Version of the thesis evaluation" && git push origin v2.0.0
+   gh release create v2.0.0 --title "rcmas 2.0.0" --notes "Version used in the thesis."
+   ```
+
+   Zenodo archives the release with the metadata of `.zenodo.json` and mints
+   a DOI for this version. Or run `./reproduce.sh --only none --archive`,
+   which packs the committed tool and `results/` into
+   `dist/rcmas-<version>-<commit>.tar.gz`, and upload that file as a new
+   Zenodo record of type Software.
+3. Cite the version DOI, not the concept DOI: put the version and the DOI in
+   the `note` field of `rcmas2026zenodo` in `thesis/thesis.bib` (the `plain`
+   bibliography style does not print a `doi` field), and add the DOI to
+   `CITATION.cff`.
+
+## Tests
 
 ```bash
 source .venv/bin/activate
 pytest
 ```
 
+The tests compare the encoding with brute-force enumeration on small grids,
+check every equilibrium the synthesisers return with an exhaustive oracle,
+and check that the experiment scripts reproduce the numbers of the examined
+thesis from its logs.
+
 ## Associated publications
 
-- S. Jordaan and N. Timm, "Nash Equilibrium Strategy Synthesis for Region-Control Multi-Agent Systems via Q-Learning-Guided SMT Solving," in *NASA Formal Methods (NFM)*, 2026.
+- S. Jordaan and N. Timm, "Nash Equilibrium Strategy Synthesis for
+  Region-Control Multi-Agent Systems via Q-Learning-Guided SMT Solving".

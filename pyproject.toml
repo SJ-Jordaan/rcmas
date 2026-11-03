@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rcmas"
-version = "1.0.0"
+version = "2.0.0"
 description = "Region Control Multi-Agent System: SMT-based Nash equilibrium synthesis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+# z3-solver is pinned exactly: the results of thesis Chapter 7 depend on the
+# solver version (README, "Reproducing the thesis experiments").
 dependencies = [
-    "z3-solver",
+    "z3-solver==5.3.3.0",
+    "tomli>=1.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -24,4 +27,5 @@ include = ["rcmas*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"

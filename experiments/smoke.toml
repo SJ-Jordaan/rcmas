@@ -1,0 +1,38 @@
+# Smoke test of the reproduction pipeline (./reproduce.sh --smoke).
+#
+# Four small instances from three benchmark families, with the eight
+# configurations of the thesis evaluation and a limit of 30 s.  On the 4x4
+# grid some configurations reach the limit, so the timeout path is used too.
+# It exercises the sweep, the certifier, the assets and the numbers report
+# in a few minutes; its numbers mean nothing.
+
+[suite]
+name = "smoke"
+
+[protocol]
+time_limit_s = 30
+runs = 1
+max_iters = 30
+demand = 0
+seed = 0
+
+[[instances]]
+grid = "symmetric/3x2.txt"
+agents = [2]
+
+[[instances]]
+grid = "symmetric/4x4.txt"   # some configurations time out at 30 s
+agents = [2]
+
+[[instances]]
+grid = "disconnected/2x2-2x2.txt"
+agents = [2]
+
+[[instances]]
+grid = "asymmetric/interesting.txt"
+agents = [6]
+
+[parameters]
+algorithms = ["ibis", "sibis", "qibis", "cegar-sibis"]
+partitions = ["orbit"]
+symmetry = [false, true]

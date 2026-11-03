@@ -13,7 +13,7 @@ import json
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from statistics import mean, median
+from statistics import median
 
 
 @dataclass
@@ -37,7 +37,42 @@ class ResultRow:
     cegar_final_blocks: int | None
 
 
+def row_from_record(d: dict) -> ResultRow:
+    """A :class:`ResultRow` from a run record of either log format.
+
+    Records of the current runner (``"kind": "run"``) carry ``outcome`` and
+    ``solved``; ``status`` is derived from the outcome and ``found_ne`` is
+    true only for equilibria that the certifier accepted.  Records of the
+    examined runner are taken as they are.
+    """
+    if "outcome" in d:
+        outcome = str(d.get("outcome"))
+        status = {"t/o": "timeout", "error": "error"}.get(outcome, "ok")
+        return ResultRow(
+            suite=d["suite"],
+            name=d["name"],
+            grid_path=d["grid_path"],
+            num_sectors=d["num_sectors"],
+            num_agents=d["num_agents"],
+            horizon=d["horizon"],
+            algorithm=d["algorithm"],
+            symmetry=d["symmetry"],
+            partition=d.get("partition", "orbit"),
+            run=d["run"],
+            status=status,
+            found_ne=bool(d.get("solved")),
+            payoff=d.get("rewards"),
+            iterations=d.get("iterations"),
+            time_s=d.get("time_s") or 0.0,
+            reason=d.get("reason"),
+            cegar_final_blocks=d.get("cegar_final_blocks"),
+        )
+    fields = set(ResultRow.__dataclass_fields__)
+    return ResultRow(**{k: v for k, v in d.items() if k in fields})
+
+
 def load_results(path: str) -> list[ResultRow]:
+    """Run records of a JSON-lines log (session records are skipped)."""
     rows = []
     with open(path) as f:
         for line in f:
@@ -45,13 +80,16 @@ def load_results(path: str) -> list[ResultRow]:
             if not line:
                 continue
             d = json.loads(line)
-            rows.append(ResultRow(**d))
+            if d.get("kind", "run") != "run":
+                continue
+            rows.append(row_from_record(d))
     return rows
 
 
 # ---------------------------------------------------------------------------
 # Grouping helpers
 # ---------------------------------------------------------------------------
+
 
 def _group_key_base(r: ResultRow) -> tuple:
     """Group key excluding algorithm/symmetry (for paired comparisons)."""
@@ -64,7 +102,9 @@ def _median_time(rows: list[ResultRow]) -> float | None:
 
 
 def _median_iters(rows: list[ResultRow]) -> int | None:
-    iters = [r.iterations for r in rows if r.status == "ok" and r.iterations is not None]
+    iters = [
+        r.iterations for r in rows if r.status == "ok" and r.iterations is not None
+    ]
     return int(median(iters)) if iters else None
 
 
@@ -85,6 +125,7 @@ def _timeout_rate(rows: list[ResultRow]) -> float:
 # E1/E2/E3: Symmetry speedup analysis
 # ---------------------------------------------------------------------------
 
+
 def symmetry_speedup_table(
     results: list[ResultRow],
     suites: list[str] | None = None,
@@ -98,9 +139,18 @@ def symmetry_speedup_table(
         results = [r for r in results if r.suite in suites]
 
     # Group by (suite, grid, S, n, h, algorithm)
-    groups: dict[tuple, dict[bool, list[ResultRow]]] = defaultdict(lambda: {True: [], False: []})
+    groups: dict[tuple, dict[bool, list[ResultRow]]] = defaultdict(
+        lambda: {True: [], False: []}
+    )
     for r in results:
-        key = (r.suite, r.grid_path.split("/")[-1], r.num_sectors, r.num_agents, r.horizon, r.algorithm)
+        key = (
+            r.suite,
+            r.grid_path.split("/")[-1],
+            r.num_sectors,
+            r.num_agents,
+            r.horizon,
+            r.algorithm,
+        )
         groups[key][r.symmetry].append(r)
 
     print("\n=== Symmetry Speedup ===", file=sys.stderr)
@@ -139,6 +189,7 @@ def symmetry_speedup_table(
 # E4/E5: Algorithm comparison
 # ---------------------------------------------------------------------------
 
+
 def algorithm_comparison_table(
     results: list[ResultRow],
     suites: list[str] | None = None,
@@ -148,7 +199,9 @@ def algorithm_comparison_table(
         results = [r for r in results if r.suite in suites]
 
     # Group by (grid, S, n, h) then by algorithm
-    groups: dict[tuple, dict[str, list[ResultRow]]] = defaultdict(lambda: defaultdict(list))
+    groups: dict[tuple, dict[str, list[ResultRow]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for r in results:
         base_key = (r.grid_path.split("/")[-1], r.num_sectors, r.num_agents, r.horizon)
         alg_key = r.algorithm
@@ -173,7 +226,9 @@ def algorithm_comparison_table(
             ne_str = f"{_ne_rate(rows):.0%}"
             to_str = f"{_timeout_rate(rows):.0%}"
 
-            blocks_list = [r.cegar_final_blocks for r in rows if r.cegar_final_blocks is not None]
+            blocks_list = [
+                r.cegar_final_blocks for r in rows if r.cegar_final_blocks is not None
+            ]
             b_str = str(int(median(blocks_list))) if blocks_list else "—"
 
             print(
@@ -187,6 +242,7 @@ def algorithm_comparison_table(
 # E7: Scalability
 # ---------------------------------------------------------------------------
 
+
 def scalability_table(
     results: list[ResultRow],
 ) -> None:
@@ -197,17 +253,21 @@ def scalability_table(
         return
 
     # Group by (algorithm, symmetry) then by S
-    groups: dict[tuple, dict[int, list[ResultRow]]] = defaultdict(lambda: defaultdict(list))
+    groups: dict[tuple, dict[int, list[ResultRow]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for r in results:
         groups[(r.algorithm, r.symmetry)][r.num_sectors].append(r)
 
     print("\n=== Scalability (E7) ===", file=sys.stderr)
-    header = f"{'Algorithm':>12s} {'Sym':>5s} " + " ".join(f"{'S=' + str(s):>8s}" for s in sorted({r.num_sectors for r in results}))
+    header = f"{'Algorithm':>12s} {'Sym':>5s} " + " ".join(
+        f"{'S=' + str(s):>8s}" for s in sorted({r.num_sectors for r in results})
+    )
     print(header, file=sys.stderr)
     print("-" * len(header), file=sys.stderr)
 
     sizes = sorted({r.num_sectors for r in results})
-    for (alg, sym) in sorted(groups.keys()):
+    for alg, sym in sorted(groups.keys()):
         cells = []
         for s in sizes:
             rows = groups[(alg, sym)].get(s, [])
@@ -225,6 +285,7 @@ def scalability_table(
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+
 
 def suite_summary(results: list[ResultRow]) -> None:
     """Print per-suite summary statistics."""

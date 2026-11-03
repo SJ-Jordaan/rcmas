@@ -43,7 +43,7 @@ def _grid(category: str, name: str) -> str:
 
 
 def _feasible_horizons(S: int, n: int) -> int:
-    """Horizon = S / n.  Requires S divisible by n (for require_victory)."""
+    """Horizon ``m = S / n``; these suites use only n that divide S."""
     if S % n != 0:
         raise ValueError(f"S={S} not divisible by n={n}")
     return S // n
