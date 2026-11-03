@@ -34,6 +34,9 @@ and writes its ``session_end`` record (with ``interrupted`` and ``signal``).
 A child also ends itself as soon as its parent process is gone, for
 example after SIGKILL, so no run outlives its session.
 
+A session holds an exclusive lock on its log, so a second session on the
+same log is refused (:class:`LogInUseError`).
+
 With ``resume=True`` the runs already in the log are skipped and new records
 are appended.  A resumed session must use the same tool commit, Z3 version,
 configuration file and protocol as the sessions already in the log, unless
@@ -43,6 +46,7 @@ configuration file and protocol as the sessions already in the log, unless
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import multiprocessing
 import multiprocessing.connection
@@ -60,6 +64,11 @@ from typing import Any, Iterable, Iterator, Sequence, cast
 from .config import Protocol
 from .provenance import collect, relative_to_tool, sha256_file
 from .scenarios import Scenario
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 SCHEMA = 2
 """Version of the record format (1 = the examined logs, without ``kind``)."""
@@ -735,6 +744,48 @@ def _execute(
 # ---------------------------------------------------------------------------
 
 
+class LogInUseError(RuntimeError):
+    """Another session is writing the log."""
+
+
+@contextlib.contextmanager
+def _exclusive_log(path: Path | None) -> Iterator[None]:
+    """Hold an exclusive lock on the log *path* while the block runs.
+
+    Two sessions on one log would both run every remaining run, at twice the
+    load, and could cut each other's lines when they repair the tail of the
+    log.  The lock is an ``flock`` on the log file itself, so it needs no
+    extra file and ends with the process that holds it, however that
+    process ends.  A log that this call creates and the session leaves
+    empty is removed.  Without ``fcntl`` (Windows) there is no lock.
+    """
+    if path is None or fcntl is None:
+        yield
+        return
+    existed = path.exists()
+    if not existed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                raise
+            raise LogInUseError(
+                f"another session is writing {path}; let it finish or stop it "
+                "(Ctrl-C) before you resume"
+            ) from None
+        try:
+            yield
+        finally:
+            if not existed and os.fstat(fd).st_size == 0:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+    finally:
+        os.close(fd)
+
+
 class SessionTerminated(KeyboardInterrupt):
     """The session was stopped by SIGTERM or SIGHUP.
 
@@ -802,7 +853,8 @@ def run_batch(
     the runs already in the log are skipped; the returned list then also
     holds the earlier records.  Raises :class:`MixedLogError` if a resumed
     log was written with another tool commit, Z3 version, configuration file
-    or protocol (unless *allow_mixed*).
+    or protocol (unless *allow_mixed*), and :class:`LogInUseError` if another
+    session is writing *output_path*.
     """
     scenarios = list(scenarios)
     for sc in scenarios:
@@ -810,7 +862,40 @@ def run_batch(
             raise ValueError(f"unknown algorithm: {sc.algorithm}")
     workers = max(1, int(workers))
     os.environ["PYTHONHASHSEED"] = "0"  # inherited by the spawned children
+    out_path = Path(output_path) if output_path is not None else None
+    with _exclusive_log(out_path):
+        return _run_session(
+            scenarios,
+            protocol=protocol,
+            out_path=out_path,
+            workers=workers,
+            resume=resume,
+            progress=progress,
+            certify=certify,
+            cert_timeout_s=cert_timeout_s,
+            config_path=config_path,
+            argv=argv,
+            allow_mixed=allow_mixed,
+            order=order,
+        )
 
+
+def _run_session(
+    scenarios: list[Scenario],
+    *,
+    protocol: Protocol,
+    out_path: Path | None,
+    workers: int,
+    resume: bool,
+    progress: bool,
+    certify: bool,
+    cert_timeout_s: float,
+    config_path: str | Path | None,
+    argv: list[str] | None,
+    allow_mixed: bool,
+    order: bool,
+) -> list[dict[str, Any]]:
+    """The body of :func:`run_batch`, run while this session holds the log."""
     session_id = uuid.uuid4().hex[:12]
     header = collect(
         config_path=config_path,
@@ -829,7 +914,6 @@ def run_batch(
 
     prior: list[dict[str, Any]] = []
     done_keys: set[tuple] = set()
-    out_path = Path(output_path) if output_path is not None else None
     if out_path is not None and resume and out_path.exists():
         sessions, prior, valid = read_log(out_path)
         problems = _check_compatible(sessions, header)

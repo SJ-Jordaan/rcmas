@@ -157,10 +157,12 @@ reboot) run the same command again. Ctrl-C, SIGTERM and SIGHUP, sent to
 session in the log; if the runner itself is killed with SIGKILL or crashes,
 its runs notice within a second and exit, so no run of an earlier session
 shares the cores with the next one. A run that was in progress is started
-again from the beginning. The
-runner refuses to resume a log that was written by another commit of the
-tool, another Z3 version, another configuration file or another protocol,
-so one log never mixes two setups; use a new `--results-dir` instead.
+again from the beginning. A session holds a lock on its log, so a second
+`./reproduce.sh` or runner on the same log stops with an error instead of
+running every run twice. The runner refuses to resume a log that was written
+by another commit of the tool, another Z3 version, another configuration
+file or another protocol, so one log never mixes two setups; use a new
+`--results-dir` instead.
 
 **Hardware.** Each run is one Python process with one Z3 instance on one
 core. Chapter 7 compares times, so use at most the number of physical cores:

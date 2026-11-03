@@ -27,7 +27,7 @@ from dataclasses import replace
 
 from .config import Protocol, load_config, load_protocol
 from .provenance import default_workers
-from .runner import MixedLogError, SessionTerminated, run_batch
+from .runner import LogInUseError, MixedLogError, SessionTerminated, run_batch
 
 
 def _summary(records: list[dict]) -> None:
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             argv=sys.argv if argv is None else ["python -m experiments.run", *argv],
             allow_mixed=args.allow_mixed,
         )
-    except (MixedLogError, FileExistsError) as e:
+    except (MixedLogError, LogInUseError, FileExistsError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as e:

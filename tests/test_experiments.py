@@ -21,6 +21,7 @@ from experiments import provenance  # noqa: E402
 from experiments.config import Protocol, load_config, load_protocol  # noqa: E402
 from experiments.results import load  # noqa: E402
 from experiments.runner import (  # noqa: E402
+    LogInUseError,
     MixedLogError,
     family_of,
     read_log,
@@ -367,6 +368,57 @@ class TestRunner:
                 progress=False,
                 config_path=cfg,
             )
+
+    @pytest.mark.skipif(os.name != "posix", reason="flock")
+    def test_second_session_on_a_log_is_refused(
+        self, sweep: tuple[Path, list[dict]], tmp_path: Path
+    ) -> None:
+        """While one process holds the log, another session must not start."""
+        import subprocess
+        import sys
+
+        out, _ = sweep
+        copy = tmp_path / "log.jsonl"
+        copy.write_text("\n".join(out.read_text().splitlines()[:-3]) + "\n")
+        before = copy.read_bytes()
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, sys, time\n"
+                "f = open(sys.argv[1], 'a')\n"
+                "fcntl.flock(f, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "time.sleep(60)\n",
+                str(copy),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        sc = [_sc("new", "symmetric/3x2.txt", 3, "ibis")]
+        kw: dict[str, Any] = dict(
+            protocol=Protocol(time_limit_s=2),
+            output_path=copy,
+            resume=True,
+            progress=False,
+            config_path=ROOT / "experiments" / "smoke.toml",
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "locked"
+            with pytest.raises(LogInUseError, match="another session"):
+                run_batch(sc, **kw)
+            assert copy.read_bytes() == before  # not read, repaired or appended
+        finally:
+            holder.kill()
+            holder.wait()
+        recs = run_batch(sc, **kw)  # the lock ends with the process
+        assert "new" in [r["name"] for r in recs]
+
+    def test_no_empty_log_is_left_behind(self, tmp_path: Path) -> None:
+        log = tmp_path / "sub" / "never.jsonl"
+        assert run_batch([], output_path=log, progress=False) == []
+        assert not log.exists()
 
     def test_unknown_algorithm_rejected_up_front(self) -> None:
         with pytest.raises(ValueError, match="unknown algorithm"):
