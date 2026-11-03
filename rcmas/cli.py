@@ -6,11 +6,13 @@ Subcommands map to paper constructs:
   qibis — Algorithm 2: Q-IBIS
   cegar — Algorithm 1 (EUMAS): CEGAR-NE
   train — Q-learning self-play (Sec 5.2)
+  certify — independent certifier of logged equilibria (thesis Section 7.5)
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 
 from .model import Coord, State, Territory, scores
@@ -153,6 +155,13 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     train = sub.add_parser("train", help="Q-learning self-play training (Sec 5.2)")
     _add_common_args(train)
 
+    # ── certify: independent certifier (thesis Section 7.5) ──────
+    # Listed here for `rcmas --help`; main() hands `rcmas certify ...` to
+    # rcmas.certify.main, which needs no grid or agent count.
+    from .certify import add_arguments as _add_certify_args
+
+    _add_certify_args(sub.add_parser("certify", help="Re-check the equilibria of result logs without SMT (thesis Section 7.5)"))
+
     ns = p.parse_args(argv)
     if ns.agents <= 0:
         raise SystemExit("--agents must be >= 1")
@@ -189,6 +198,11 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if raw_argv[:1] == ["certify"]:
+        from .certify import main as certify_main
+
+        return certify_main(raw_argv[1:])
     try:
         args = _parse_args(argv)
     except BrokenPipeError:  # pragma: no cover
