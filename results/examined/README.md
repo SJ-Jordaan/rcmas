@@ -23,3 +23,12 @@ The scripts of `experiments/` still read these logs (records without a
 `python -m experiments.thesis_numbers --results results/examined/thesis-eval-900.jsonl --no-certificate-required`,
 which reproduces the numbers of the examined thesis. The tests use them for
 that purpose.
+
+## legacy/
+
+Earlier exploratory logs, written before the thesis sweep by the same
+pre-revision tool (`1-unoptimised-results.jsonl` to `5-sibis-symmetry.jsonl`,
+`cegar-*.jsonl`), and the script `run_large_symmetry.py` used for large-grid
+symmetry runs. They used to sit at the top of the repository. Like the logs
+above they are kept for the record only; none of the thesis numbers comes
+from them, and they must not be read as results of the revised tool.

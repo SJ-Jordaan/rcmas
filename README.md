@@ -28,32 +28,38 @@ Z3. `./setup.sh --no-tests` skips the test suite.
 
 ## Usage
 
-Every command takes `--grid`, `--agents` and `--horizon`. The synthesis
-commands (`ibis`, `sibis`, `qibis`, `cegar`) accept only the horizon
+Every command takes `--grid` and `--agents`. `--horizon` defaults to
 `m = floor(|T|/n)` of Definition 3.9.1, where `|T|` is the number of sectors
-and `n` the number of agents. Chapter 7 uses the iteration bound `N = 30`;
-pass `--max-iters 30` to match it.
+and `n` the number of agents; the synthesis commands (`ibis`, `sibis`,
+`qibis`, `cegar`) accept no other horizon. `--max-iters` is the iteration
+bound `N` (the loop runs `i = 0..N`) and defaults to 30, as in Chapter 7; for
+`cegar` it is the bound of the inner synthesiser. A synthesis command prints
+its outcome (`ne`, `n/c`, `unk`, `uns`, or for CEGAR-NE also `fail`), the
+rewards and the play, with agents and sectors numbered from 1 as in the
+thesis, and exits with 0 only for an equilibrium.
 
 ```bash
 # Collectively optimal strategy (16 sectors, 2 agents, m = 8)
-rcmas co --grid grids/symmetric/4x4.txt --agents 2 --horizon 8 --render
+rcmas co --grid grids/symmetric/4x4.txt --agents 2 --render
 
 # IBIS (Algorithm 1) and S-IBIS (Algorithm 2) on a 12-sector territory, m = 6
-rcmas ibis  --grid grids/asymmetric/interesting.txt --agents 2 --horizon 6 --max-iters 30 --progress
-rcmas sibis --grid grids/asymmetric/interesting.txt --agents 2 --horizon 6 --max-iters 30 --symmetry
+rcmas ibis  --grid grids/asymmetric/interesting.txt --agents 2 --progress
+rcmas sibis --grid grids/asymmetric/interesting.txt --agents 2 --symmetry
 
 # Demands d(a): agents 1 and 2 need 2 sectors, agents 3 and 4 need 3 (m = 4)
-rcmas sibis --grid grids/symmetric/4x4.txt --agents 4 --horizon 4 --demands 2,2,3,3
+rcmas sibis --grid grids/symmetric/4x4.txt --agents 4 --demands 2,2,3,3
 
-# Q-IBIS (Algorithm 3); its learning parameters are the fields of rcmas.qibis.QibisConfig
-rcmas qibis --grid grids/symmetric/3x3.txt --agents 3 --horizon 3 --max-iters 30
+# Q-IBIS (Algorithm 3); --seed and --top-k set the learners' seed and k of TopK,
+# the other learning parameters are the fields of rcmas.qibis.QibisConfig
+rcmas qibis --grid grids/symmetric/3x3.txt --agents 3 --seed 0 --top-k 3
 
-# CEGAR-NE (Algorithm 4) with S-IBIS inside, from the orbit partition
-rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --horizon 4 \
-      --partition orbit --synthesiser sibis --max-iters 30 --progress
+# CEGAR-NE (Algorithm 4); the defaults are those of Chapter 7: S-IBIS inside,
+# the orbit partition as the initial partition
+rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --progress
+rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --partition balanced --synthesiser ibis
 
 # Q-learning self-play
-rcmas train --grid grids/symmetric/4x4.txt --agents 2 --horizon 8
+rcmas train --grid grids/symmetric/4x4.txt --agents 2
 
 # Re-check the equilibria of a result log without SMT (thesis Section 7.5)
 rcmas certify --results results/thesis-eval-900.jsonl
@@ -176,8 +182,11 @@ the configuration and the command line. Every run record repeats the commit
 and the Z3 version and gives the grid path relative to the tool. Commit
 your changes before the sweep, so that the logs record `tool_dirty: false`.
 
-**Outputs.** Everything goes to `results/` (ignored by git). The logs of the
-examined thesis are kept in `results/examined/`; see the README there.
+**Outputs.** Everything goes to `results/`; git ignores only
+`results/smoke/`, so the logs and assets of the sweep can be committed. The
+logs of the examined thesis are kept in `results/examined/`, and earlier
+exploratory logs of the pre-revision tool in `results/examined/legacy/`; see
+the README there.
 The scripts read both formats, for example
 
 ```bash
@@ -192,11 +201,10 @@ reproduces the numbers of the examined thesis.
 The thesis cites the archived version of the tool as `rcmas2026zenodo`.
 After the sweep:
 
-1. Commit the result files so that the release contains them (they are under
-   an ignored directory, hence `-f`):
+1. Commit the result files so that the release contains them:
 
    ```bash
-   git add -f results/thesis-eval-900.jsonl results/thesis-eval-900.cert.jsonl \
+   git add results/thesis-eval-900.jsonl results/thesis-eval-900.cert.jsonl \
        results/thesis-eval-300.jsonl results/thesis-eval-300.cert.jsonl \
        results/encoding-build.jsonl results/thesis-assets results/thesis-numbers.md
    git commit -m "Add the result logs of the thesis evaluation"

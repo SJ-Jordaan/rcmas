@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Long-running symmetry experiment on large grids.
+"""Long-running symmetry experiment on large grids (pre-revision, legacy).
+
+Kept for the record with the logs of results/examined/legacy/.  It is not
+part of the thesis experiments, which ``./reproduce.sh`` runs.
 
 Runs 8x8 (8 agents) and 6x6 (6 agents) with sym ON/OFF in parallel.
 All 4 configs run simultaneously — wall clock ≈ 1 hour max.
@@ -8,7 +11,7 @@ Each config gets its own verbose log file in logs/.
 Usage:
     cd tools/rcmas
     source .venv/bin/activate
-    nohup python run_large_symmetry.py &
+    nohup python results/examined/legacy/run_large_symmetry.py &
 
     # Watch progress:
     tail -f logs/8x8_n8_ibis_symON.log
@@ -22,11 +25,14 @@ import os
 import signal
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from multiprocessing import Pool
 from typing import Any
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# The tool root, three levels above results/examined/legacy/.
+SCRIPT_DIR = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 GRIDS = os.path.join(SCRIPT_DIR, "grids", "symmetric")
 OUTPUT = os.path.join(SCRIPT_DIR, "results-large-symmetry.jsonl")
 LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
@@ -47,10 +53,10 @@ CONFIGS = [
     # S-IBIS only — IBIS results already collected in logs/
     # 8x8, 8 agents, h=8 — the main event
     Config("8x8_n8_sibis_symOFF", os.path.join(GRIDS, "8x8.txt"), 8, 8, "sibis", False),
-    Config("8x8_n8_sibis_symON",  os.path.join(GRIDS, "8x8.txt"), 8, 8, "sibis", True),
+    Config("8x8_n8_sibis_symON", os.path.join(GRIDS, "8x8.txt"), 8, 8, "sibis", True),
     # 6x6, 6 agents, h=6 — calibration
     Config("6x6_n6_sibis_symOFF", os.path.join(GRIDS, "6x6.txt"), 6, 6, "sibis", False),
-    Config("6x6_n6_sibis_symON",  os.path.join(GRIDS, "6x6.txt"), 6, 6, "sibis", True),
+    Config("6x6_n6_sibis_symON", os.path.join(GRIDS, "6x6.txt"), 6, 6, "sibis", True),
 ]
 
 
@@ -115,6 +121,7 @@ def _run_config(cfg: Config) -> dict[str, Any]:
     try:
         if cfg.algorithm == "ibis":
             from rcmas.ibis import solve_ibis
+
             res = solve_ibis(
                 territory=territory,
                 num_agents=cfg.num_agents,
@@ -127,6 +134,7 @@ def _run_config(cfg: Config) -> dict[str, Any]:
             )
         elif cfg.algorithm == "sibis":
             from rcmas.ibis import solve_sibis
+
             res = solve_sibis(
                 territory=territory,
                 num_agents=cfg.num_agents,
@@ -139,6 +147,7 @@ def _run_config(cfg: Config) -> dict[str, Any]:
             )
         elif cfg.algorithm == "cegar-ibis":
             from rcmas.cegar import solve_cegar
+
             res = solve_cegar(
                 territory=territory,
                 num_agents=cfg.num_agents,
@@ -158,14 +167,16 @@ def _run_config(cfg: Config) -> dict[str, Any]:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
-        result.update({
-            "status": "ok",
-            "found_ne": res.found_ne,
-            "payoff": list(res.payoff_by_agent) if res.payoff_by_agent else None,
-            "iterations": res.iterations,
-            "time_s": elapsed,
-            "reason": res.reason,
-        })
+        result.update(
+            {
+                "status": "ok",
+                "found_ne": res.found_ne,
+                "payoff": list(res.payoff_by_agent) if res.payoff_by_agent else None,
+                "iterations": res.iterations,
+                "time_s": elapsed,
+                "reason": res.reason,
+            }
+        )
 
         log(f"\n{'='*60}")
         log(f"FINISHED: {'NE found' if res.found_ne else 'no NE'}")
@@ -181,14 +192,16 @@ def _run_config(cfg: Config) -> dict[str, Any]:
         signal.signal(signal.SIGALRM, old_handler)
         elapsed = round(time.perf_counter() - t0, 3)
 
-        result.update({
-            "status": "timeout",
-            "found_ne": None,
-            "payoff": None,
-            "iterations": None,
-            "time_s": elapsed,
-            "reason": "timeout",
-        })
+        result.update(
+            {
+                "status": "timeout",
+                "found_ne": None,
+                "payoff": None,
+                "iterations": None,
+                "time_s": elapsed,
+                "reason": "timeout",
+            }
+        )
 
         log(f"\n{'='*60}")
         log(f"TIMEOUT after {elapsed:.1f}s")
@@ -200,14 +213,16 @@ def _run_config(cfg: Config) -> dict[str, Any]:
         signal.signal(signal.SIGALRM, old_handler)
         elapsed = round(time.perf_counter() - t0, 3)
 
-        result.update({
-            "status": "error",
-            "found_ne": None,
-            "payoff": None,
-            "iterations": None,
-            "time_s": elapsed,
-            "reason": str(e),
-        })
+        result.update(
+            {
+                "status": "error",
+                "found_ne": None,
+                "payoff": None,
+                "iterations": None,
+                "time_s": elapsed,
+                "reason": str(e),
+            }
+        )
 
         log(f"\n{'='*60}")
         log(f"ERROR after {elapsed:.1f}s: {e}")
@@ -221,12 +236,18 @@ def _run_config(cfg: Config) -> dict[str, Any]:
     status_str = result["status"]
     if status_str == "ok":
         ne = "NE" if result["found_ne"] else "no NE"
-        print(f"[DONE] {cfg.name}: {ne} in {result['time_s']:.1f}s "
-              f"(iters={result['iterations']}, payoff={result['payoff']})",
-              file=sys.stderr, flush=True)
+        print(
+            f"[DONE] {cfg.name}: {ne} in {result['time_s']:.1f}s "
+            f"(iters={result['iterations']}, payoff={result['payoff']})",
+            file=sys.stderr,
+            flush=True,
+        )
     else:
-        print(f"[DONE] {cfg.name}: {status_str} after {result['time_s']:.1f}s",
-              file=sys.stderr, flush=True)
+        print(
+            f"[DONE] {cfg.name}: {status_str} after {result['time_s']:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return result
 
@@ -238,22 +259,30 @@ def _run_wrapper(cfg: Config) -> dict[str, Any]:
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
 
-    print(f"Running {len(CONFIGS)} configs in parallel, timeout={TIMEOUT_S}s each", flush=True)
+    print(
+        f"Running {len(CONFIGS)} configs in parallel, timeout={TIMEOUT_S}s each",
+        flush=True,
+    )
     print(f"Results: {OUTPUT}", flush=True)
     print(f"Logs:    {LOG_DIR}/", flush=True)
     print(f"Start:   {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(flush=True)
 
     for c in CONFIGS:
-        print(f"  {c.name:30s}  {os.path.basename(c.grid_path):8s}  "
-              f"A={c.num_agents} h={c.horizon} sym={c.symmetry}", flush=True)
+        print(
+            f"  {c.name:30s}  {os.path.basename(c.grid_path):8s}  "
+            f"A={c.num_agents} h={c.horizon} sym={c.symmetry}",
+            flush=True,
+        )
     print(flush=True)
     print(f"Watch progress:  tail -f {LOG_DIR}/<name>.log", flush=True)
     print(f"Watch all:       tail -f {LOG_DIR}/*.log", flush=True)
     print(flush=True)
 
     with open(OUTPUT, "w") as out:
-        with Pool(processes=len(CONFIGS), initializer=_worker_init) as pool:
+        with Pool(
+            processes=len(CONFIGS), initializer=_worker_init, maxtasksperchild=1
+        ) as pool:
             for result in pool.imap_unordered(_run_wrapper, CONFIGS):
                 out.write(json.dumps(result) + "\n")
                 out.flush()
@@ -267,11 +296,17 @@ def main():
     for r in sorted(rows, key=lambda x: x["name"]):
         if r["status"] == "ok":
             ne = "NE" if r["found_ne"] else "no NE"
-            print(f"  {r['name']:30s}  {ne:>6s}  {r['time_s']:8.1f}s  "
-                  f"iters={r['iterations']}  payoff={r['payoff']}", flush=True)
+            print(
+                f"  {r['name']:30s}  {ne:>6s}  {r['time_s']:8.1f}s  "
+                f"iters={r['iterations']}  payoff={r['payoff']}",
+                flush=True,
+            )
         else:
-            print(f"  {r['name']:30s}  {r['status']:>6s}  {r['time_s']:8.1f}s  "
-                  f"reason={r['reason']}", flush=True)
+            print(
+                f"  {r['name']:30s}  {r['status']:>6s}  {r['time_s']:8.1f}s  "
+                f"reason={r['reason']}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
