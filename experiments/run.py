@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-mixed",
         action="store_true",
-        help="Resume even if the log was written by another tool commit, Z3 version or protocol",
+        help="Resume even if the log was written by another tool commit, other uncommitted "
+        "changes, another Z3 version, configuration or protocol",
     )
     parser.add_argument(
         "--workers",

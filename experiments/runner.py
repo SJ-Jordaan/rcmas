@@ -38,7 +38,8 @@ A session holds an exclusive lock on its log, so a second session on the
 same log is refused (:class:`LogInUseError`).
 
 With ``resume=True`` the runs already in the log are skipped and new records
-are appended.  A resumed session must use the same tool commit, Z3 version,
+are appended.  A resumed session must use the same tool commit, the same uncommitted
+changes (none, or the same ``git diff``), the same Z3 version,
 configuration file and protocol as the sessions already in the log, unless
 ``allow_mixed`` is set, so that one log never mixes two versions.
 """
@@ -522,8 +523,13 @@ def read_log(
 
 
 def _compat_key(header: dict[str, Any]) -> dict[str, Any]:
+    tool = header.get("tool", {})
     return {
-        "tool_commit": header.get("tool", {}).get("commit"),
+        "tool_commit": tool.get("commit"),
+        # Uncommitted changes: a clean and a dirty tree, or two different
+        # dirty trees, of one commit are two versions of the tool.
+        "tool_dirty": tool.get("dirty"),
+        "tool_diff_sha256": tool.get("diff_sha256"),
         "z3_version": header.get("z3_version"),
         "config_sha256": header.get("config_sha256"),
         "protocol": header.get("protocol"),
@@ -852,8 +858,8 @@ def run_batch(
     Records are appended to *output_path* as they finish.  With *resume*,
     the runs already in the log are skipped; the returned list then also
     holds the earlier records.  Raises :class:`MixedLogError` if a resumed
-    log was written with another tool commit, Z3 version, configuration file
-    or protocol (unless *allow_mixed*), and :class:`LogInUseError` if another
+    log was written with another tool commit or other uncommitted changes,
+    Z3 version, configuration file or protocol (unless *allow_mixed*), and :class:`LogInUseError` if another
     session is writing *output_path*.
     """
     scenarios = list(scenarios)

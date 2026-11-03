@@ -60,8 +60,11 @@ def git_info(root: Path = TOOL_ROOT) -> dict[str, Any]:
     """Commit, dirty flag and ``git describe`` of the tool checkout.
 
     ``dirty`` is true if a tracked file differs from the commit; untracked
-    files (such as result logs) do not count.  Outside a git checkout the
-    commit is read from ``.git-commit`` if present, and ``dirty`` is ``None``.
+    files (such as result logs) do not count.  ``diff_sha256`` is the
+    SHA-256 of ``git diff HEAD --binary`` when the tree is dirty and
+    ``None`` otherwise, so two sessions with different uncommitted changes
+    can be told apart.  Outside a git checkout the commit is read from
+    ``.git-commit`` if present, and ``dirty`` is ``None``.
     """
     top = _run(["git", "rev-parse", "--show-toplevel"], cwd=root)
     inside = top is not None and Path(top).resolve() == Path(root).resolve()
@@ -70,11 +73,18 @@ def git_info(root: Path = TOOL_ROOT) -> dict[str, Any]:
         status = _run(
             ["git", "status", "--porcelain", "--untracked-files=no"], cwd=root
         )
+        dirty = bool(status) if status is not None else None
+        diff_sha256 = None
+        if dirty:
+            diff = _run(["git", "diff", "HEAD", "--binary"], cwd=root)
+            if diff is not None:
+                diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
         describe = _run(["git", "describe", "--tags", "--always", "--dirty"], cwd=root)
         branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
         return {
             "commit": commit,
-            "dirty": bool(status) if status is not None else None,
+            "dirty": dirty,
+            "diff_sha256": diff_sha256,
             "describe": describe,
             "branch": branch,
             "source": "git",
@@ -85,6 +95,7 @@ def git_info(root: Path = TOOL_ROOT) -> dict[str, Any]:
         return {
             "commit": text[0] if text else None,
             "dirty": None,
+            "diff_sha256": None,
             "describe": None,
             "branch": None,
             "source": ".git-commit",
@@ -92,6 +103,7 @@ def git_info(root: Path = TOOL_ROOT) -> dict[str, Any]:
     return {
         "commit": None,
         "dirty": None,
+        "diff_sha256": None,
         "describe": None,
         "branch": None,
         "source": None,

@@ -199,6 +199,32 @@ class TestProvenance:
         assert info["commit"] == "a" * 40 and info["source"] == ".git-commit"
         assert provenance.git_info(outer)["source"] == "git"
 
+    def test_dirty_trees_are_told_apart(self, tmp_path: Path) -> None:
+        import subprocess
+
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(tmp_path)]
+        (tmp_path / "f").write_text("x\n")
+        try:
+            subprocess.run(git + ["init", "-q"], check=True)
+            subprocess.run(git + ["add", "f"], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            pytest.skip("git not available")
+        clean = provenance.git_info(tmp_path)
+        assert clean["dirty"] is False and clean["diff_sha256"] is None
+        (tmp_path / "untracked.jsonl").write_text("{}\n")  # result logs do not count
+        assert provenance.git_info(tmp_path)["diff_sha256"] is None
+        (tmp_path / "f").write_text("y\n")
+        one = provenance.git_info(tmp_path)
+        (tmp_path / "f").write_text("z\n")
+        two = provenance.git_info(tmp_path)
+        assert one["dirty"] is True and two["dirty"] is True
+        assert one["diff_sha256"] and two["diff_sha256"]
+        assert one["diff_sha256"] != two["diff_sha256"]
+        assert one["commit"] == two["commit"] == clean["commit"]
+        (tmp_path / "f").write_text("y\n")
+        assert provenance.git_info(tmp_path)["diff_sha256"] == one["diff_sha256"]
+
     def test_workers_and_paths(self) -> None:
         assert provenance.physical_cores() >= 1
         assert provenance.default_workers() == max(1, provenance.physical_cores() - 1)
@@ -350,6 +376,24 @@ class TestRunner:
                 progress=False,
                 config_path=cfg,
             )
+        # Same commit, other uncommitted changes: a clean tree against a
+        # dirty one, or two different dirty trees.
+        header = json.loads(lines[0])
+        for dirty, diff, key in (
+            (not header["tool"]["dirty"], header["tool"].get("diff_sha256"), "dirty"),
+            (True, "0" * 64, "tool_diff_sha256"),
+        ):
+            header["tool"]["dirty"], header["tool"]["diff_sha256"] = dirty, diff
+            copy.write_text("\n".join([json.dumps(header)] + lines[1:]) + "\n")
+            with pytest.raises(MixedLogError, match=key):
+                run_batch(
+                    sc,
+                    protocol=Protocol(time_limit_s=2),
+                    output_path=copy,
+                    resume=True,
+                    progress=False,
+                    config_path=cfg,
+                )
         with pytest.raises(MixedLogError, match="protocol"):
             run_batch(
                 sc,

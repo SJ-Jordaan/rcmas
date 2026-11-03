@@ -160,9 +160,9 @@ shares the cores with the next one. A run that was in progress is started
 again from the beginning. A session holds a lock on its log, so a second
 `./reproduce.sh` or runner on the same log stops with an error instead of
 running every run twice. The runner refuses to resume a log that was written
-by another commit of the tool, another Z3 version, another configuration
-file or another protocol, so one log never mixes two setups; use a new
-`--results-dir` instead.
+by another commit of the tool or with other uncommitted changes, another Z3
+version, another configuration file or another protocol, so one log never
+mixes two setups; use a new `--results-dir` instead.
 
 **Hardware.** Each run is one Python process with one Z3 instance on one
 core. Chapter 7 compares times, so use at most the number of physical cores:
@@ -182,12 +182,13 @@ every run reaches its limit. The certification and the other stages take
 minutes.
 
 **Provenance.** Every session of a log starts with a header record that
-holds the tool version, the git commit and whether the working tree had
-uncommitted changes, the Python and z3-solver versions, the platform, the
-CPU model, the number of cores, the memory, the start time, the SHA-256 of
-the configuration and the command line. Every run record repeats the commit
-and the Z3 version and gives the grid path relative to the tool. Commit
-your changes before the sweep, so that the logs record `tool_dirty: false`.
+holds the tool version, the git commit, whether the working tree had
+uncommitted changes and, if so, the SHA-256 of `git diff HEAD`, the Python
+and z3-solver versions, the platform, the CPU model, the number of cores,
+the memory, the start time, the SHA-256 of the configuration and the command
+line. Every run record repeats the commit and the Z3 version and gives the
+grid path relative to the tool. Commit your changes before the sweep, so
+that the logs record `tool_dirty: false`.
 
 **Outputs.** Everything goes to `results/`; git ignores only
 `results/smoke/`, so the logs and assets of the sweep can be committed. The
