@@ -349,9 +349,11 @@ class TestCegarQibis:
             synthesiser="qibis",
             initial_partition="discrete",
         )
+        # The discrete-partition result is verified by VerifyNE (Algorithm 4,
+        # lines 18-20), not returned unchecked as the old "concrete_fallback".
         assert res.is_sat
         assert res.found_ne
-        assert res.reason == "concrete_fallback"
+        assert res.outcome == "ne" and res.at_discrete
 
     def test_cegar_invalid_synthesiser(self, territory_2x2: Territory):
         from rcmas.cegar import solve_cegar
@@ -434,7 +436,9 @@ class TestCliSynthesiserFlag:
                 "2",
             ]
         )
-        assert args.synthesiser == "ibis"
+        # Chapter 7 runs CEGAR-NE with S-IBIS as its inner synthesiser (the
+        # old CLI defaulted to IBIS).
+        assert args.synthesiser == "sibis"
 
 
 # ---------------------------------------------------------------------------

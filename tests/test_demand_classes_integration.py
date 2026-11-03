@@ -308,7 +308,10 @@ class TestCegarWithDemandClasses:
         assert len(result.payoff_by_agent) == 3
 
     def test_cegar_discrete_with_demands(self, territory_2x2: Territory):
-        """Discrete partition with demands falls through to concrete IBIS."""
+        """At the discrete partition the inner S-IBIS runs on M itself, and its
+        play is verified by VerifyNE before it is returned (Algorithm 4,
+        lines 18-20).  The old tool returned it unchecked as a
+        ``concrete_fallback``."""
         from rcmas.cegar import solve_cegar
 
         result = solve_cegar(
@@ -321,7 +324,8 @@ class TestCegarWithDemandClasses:
         )
         assert result.is_sat
         assert result.found_ne
-        assert result.reason == "concrete_fallback"
+        assert result.outcome == "ne" and result.reason == "ne"
+        assert result.at_discrete
 
     def test_cegar_demands_none_backward_compatible(self, territory_2x2: Territory):
         """CEGAR with demands=None should work identically to before."""

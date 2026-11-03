@@ -517,8 +517,11 @@ class TestUnknown:
 
         monkeypatch.setattr(smt_solve, "_check", second_unknown)
         current = base.rewards_of(play.final_state)
+        # hi = R_max + 1 exceeds every value of reward_0 in a model, so a probe
+        # always follows the filter, whichever model Z3 returns for it (the
+        # model depends on Z3 state left by earlier tests in the process).
         res = best_response_binsearch_from_base(
-            base, play, 0, current_reward=current[0]
+            base, play, 0, current_reward=current[0], max_reward=base.max_reward + 1
         )
         assert res.reason == "unknown" and res.checks == 2
 
