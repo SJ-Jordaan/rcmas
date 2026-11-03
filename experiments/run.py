@@ -4,7 +4,10 @@
 The thesis sweep (Chapter 7) is::
 
     python -m experiments.run --config experiments/thesis-eval.toml \\
-        --output results/thesis-eval-900.jsonl --workers 7 --resume
+        --output results/thesis-eval-900.jsonl --workers 0 --resume
+
+(``--workers 0``: physical cores minus one, on Apple silicon performance
+cores minus one.)
 
 The ``[protocol]`` table of the configuration fixes the limit per run
 (900 s), the number of runs (1), the iteration bound (N = 30), the demand

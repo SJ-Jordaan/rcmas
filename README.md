@@ -13,7 +13,11 @@ below gives the commands that regenerate its results.
 
 Python 3.10 or later. The only runtime dependency is `z3-solver`, pinned to
 version 5.3.3.0 in `pyproject.toml`; `uv.lock` and `requirements-lock.txt`
-pin every other package.
+pin every other package. z3-solver 5.3.3.0 has binary wheels for macOS 13 or
+later (Apple silicon and Intel), Linux x86_64 with glibc 2.27 or later,
+Linux aarch64 with glibc 2.38 or later, and Windows. On other systems, for
+example macOS 11 or 12, uv and pip build Z3 from its source distribution,
+which needs CMake and a C++ compiler and takes a long time.
 
 ```bash
 git clone https://github.com/SJ-Jordaan/rcmas.git && cd rcmas
@@ -112,7 +116,7 @@ thesis takes from it:
 
 ```bash
 ./setup.sh --no-tests        # once
-./reproduce.sh               # or: ./reproduce.sh --workers 7
+./reproduce.sh               # on macOS: caffeinate -i ./reproduce.sh
 ```
 
 It runs these stages, and stops at the first error:
@@ -168,17 +172,26 @@ mixes two setups; use a new `--results-dir` instead.
 core. Chapter 7 compares times, so use at most the number of physical cores:
 the default is the number of physical cores minus one, and on Apple silicon
 the number of performance cores minus one, since Z3 runs much slower on an
-efficiency core. Do not run other heavy work on the machine during the
-sweep. The examined sweep ran 8 runs at a time on an Apple M3 Pro with
-18 GB; record the machine you use, which the logs also do.
+efficiency core. On an Apple M3 Pro the default is 4 workers (11-core model,
+5 performance cores) or 5 (12-core model, 6 performance cores). The examined
+sweep ran 8 runs at a time on an Apple M3 Pro with 18 GB, more runs than the
+machine has performance cores. Do not run other heavy work on the machine
+during the sweep, and record the machine you use, which the logs also do.
+Keep the machine awake for the whole sweep: on macOS, start the pipeline as
+`caffeinate -i ./reproduce.sh` (or switch off sleep in the system settings)
+and keep the lid of a laptop open, since a Mac that sleeps suspends the
+sweep until it wakes.
 
 **Duration.** The examined sweep (`results/examined/thesis-eval-900.jsonl`)
 took 47 CPU-hours: 147 of its 560 runs (26%) reached the 900 s limit and
-account for 37 of those hours. The revised Q-IBIS adds a certification
-round and CEGAR-NE refines more often, so expect more timeouts. Plan for 50
-to 80 CPU-hours for the 900 s sweep (7 to 12 hours with 7 workers) and 25 to
-45 CPU-hours for the 300 s repeat; 140 and 47 CPU-hours are the bounds if
-every run reaches its limit. The certification and the other stages take
+account for 37 of those hours. The revised Q-IBIS adds a certification round
+and CEGAR-NE refines more often, so expect more timeouts. Plan for 50 to 80
+CPU-hours for the 900 s sweep and 25 to 45 CPU-hours for the 300 s repeat;
+140 and 47 CPU-hours are the bounds if every run reaches its limit. Divide
+by the number of workers for the time on the clock. With the 4 or 5 workers
+of an M3 Pro, that is about 10 to 20 hours for the sweep and 5 to 11 hours
+for the repeat, so 15 to 31 hours (up to 1.3 days) for the whole pipeline;
+`--no-repeat` skips the repeat. The certification and the other stages take
 minutes.
 
 **Provenance.** Every session of a log starts with a header record that
