@@ -2,9 +2,10 @@
 #
 # Four small instances from three benchmark families, with the eight
 # configurations and the protocol of the thesis evaluation
-# (experiments/thesis-eval.toml) and a limit of 30 s.  It exercises the
-# sweep, the certifier, the assets and the numbers report in a few minutes;
-# its numbers mean nothing.
+# (experiments/thesis-eval.toml) and a limit of 30 s.  On the 4x4 grid
+# CEGAR-NE refines for longer than the limit, so the timeout path is used
+# too.  It exercises the sweep, the certifier, the assets and the numbers
+# report in a few minutes; its numbers mean nothing.
 
 [suite]
 name = "smoke"
