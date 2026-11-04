@@ -19,7 +19,7 @@ from rcmas.ibis import BestResponse, IbisResult, run_ibis_loop, solve_ibis, solv
 from rcmas.model import Territory, rewards_from_owner
 from rcmas.strategy import CanonicalCompletion, Play
 
-from .brute_force import best_deviation, is_equilibrium
+from .brute_force import best_deviation, is_equilibrium, max_welfare
 
 z3 = pytest.importorskip("z3")
 
@@ -376,3 +376,249 @@ class TestValidation:
         """|T| < |Agt|: the empty play is an equilibrium (no agent acts)."""
         res = solve_sibis(territory=Territory.from_ascii(["."]), num_agents=2)
         assert res.outcome == "ne" and res.rewards == (0, 0)
+
+
+# ===================================================================
+# The protocol of Chapter 7: no iteration bound, collectively optimal start
+# ===================================================================
+
+PROTOCOL_CASES = SOUNDNESS_CASES + [
+    (["..", ".", ".."], 1, None),  # L-shape
+    (["..#.."], 2, None),  # disconnected
+    (["...", "..."], 2, (2, 2)),
+]
+
+
+class TestUnboundedAndCollective:
+    """``max_iters=None`` and ``initial="collective"`` (Sections 4.6 and 4.7)."""
+
+    def test_unbounded_loop_stops_at_recurrence(self):
+        """Without a bound the loop of Remark 4.7.1 still ends, by recurrence."""
+        plays = _line_plays(2)
+
+        def br(play, a, cur):
+            other = plays[1] if play == plays[0] else plays[0]
+            return BestResponse("ok", cur[a] + (1 if a == 0 else 0), other, None, 1)
+
+        res = run_ibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: (0, 0, 0),
+            max_iters=None,
+        )
+        assert res.outcome == "n/c" and res.reason == "cycle" and res.iterations == 2
+
+    def test_unbounded_loop_runs_past_any_bound(self):
+        """A chain of 40 improving plays converges without a bound, but not with N = 30."""
+        plays = _line_plays(41)
+        nxt = {plays[k]: plays[k + 1] for k in range(40)}
+
+        def br(play, a, cur):
+            step = a == 0 and play in nxt
+            return BestResponse(
+                "ok", cur[a] + step, nxt[play] if step else None, None, 1
+            )
+
+        kw = dict(
+            initial_play=plays[0],
+            initial_solution=None,
+            best_response=br,
+            rewards_of=lambda s: (0, 0, 0),
+        )
+        bounded = run_ibis_loop(**kw, max_iters=30)
+        assert bounded.outcome == "n/c" and bounded.reason == "max_iters"
+        free = run_ibis_loop(**kw, max_iters=None)
+        assert free.outcome == "ne" and free.iterations == 40
+        assert free.play == plays[40] and len(free.trace) == 41
+
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    @pytest.mark.parametrize("initial", ["satisfying", "collective"])
+    @pytest.mark.parametrize("symmetry", [False, True])
+    @pytest.mark.parametrize("grid,n,demands", PROTOCOL_CASES)
+    def test_unbounded_runs_terminate_and_are_sound(
+        self, solver, initial, symmetry, grid, n, demands
+    ):
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        res = solver(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            max_iters=None,
+            initial=initial,
+            symmetry=symmetry,
+        )
+        assert res.outcome in ("ne", "n/c")
+        assert res.reason in ("ne", "cycle")  # no bound, so never "max_iters"
+        assert res.initial == initial and res.initial_query_s is not None
+        assert res.initial_play is not None
+        assert res.initial_rewards == rewards_from_owner(
+            res.initial_play.final_state, n, nb
+        )
+        assert res.trace[0].rewards == res.initial_rewards
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, demands)
+            assert res.returned_initial == (res.iterations == 0)
+            if res.returned_initial:
+                assert res.play == res.initial_play
+
+    @pytest.mark.parametrize("symmetry", [False, True])
+    @pytest.mark.parametrize("grid,n,demands", PROTOCOL_CASES)
+    def test_collective_start_is_a_collectively_optimal_model_of_F(
+        self, symmetry, grid, n, demands
+    ):
+        """``pi^0`` satisfies F and its welfare is the brute-force optimum of ``f``."""
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        res = solve_sibis(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            initial="collective",
+            symmetry=symmetry,
+            max_iters=0,
+        )
+        play0 = res.initial_play
+        assert play0 is not None and play0.horizon == m
+        r0 = rewards_from_owner(play0.final_state, n, nb)
+        assert res.initial_rewards == r0
+        d = demands or (0,) * n
+        assert all(r0[a] >= d[a] for a in range(n))  # [phi_sat] of F
+        assert sum(r0) == max_welfare(len(t), n, m, nb, demands)
+
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    @pytest.mark.parametrize(
+        "grid,n", [(["...", "..."], 2), (["...", "..."], 3), (["..#..", "..#.."], 2)]
+    )
+    def test_all_m_collective_play_returns_in_iteration_0(self, solver, grid, n):
+        """Every reward m: an equilibrium under any completion, returned at once."""
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        assert max_welfare(len(t), n, m, nb) == n * m  # the optimum gives every agent m
+        res = solver(territory=t, num_agents=n, initial="collective", max_iters=None)
+        assert res.initial_rewards == (m,) * n
+        assert res.outcome == "ne" and res.iterations == 0 and res.returned_initial
+        assert len(res.trace) == 1 and res.trace[0].improvement == (0,) * n
+        assert res.play == res.initial_play
+        assert is_equilibrium(res.play, nb)
+
+    def test_collective_start_in_a_weighted_game(self):
+        """In an abstract game the start maximises the sum of weighted rewards."""
+        abstract = Territory.from_ascii([".....", ""])
+        w = (2, 1, 3, 1, 2)
+        nb = {0: [1, 2], 1: [0, 3], 2: [0, 4], 3: [1], 4: [2]}
+        res = solve_sibis(
+            territory=abstract,
+            num_agents=2,
+            weights=w,
+            custom_neighbors=nb,
+            initial="collective",
+            max_iters=None,
+        )
+        r0 = rewards_from_owner(res.initial_play.final_state, 2, nb, w)
+        assert res.initial_rewards == r0
+        assert sum(r0) == max_welfare(5, 2, 2, nb, None, w)
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, None, w)
+
+    def test_unknown_collective_query_stops_with_unk(self, monkeypatch):
+        """An initial query answered unknown (for example at the Z3 timeout) gives unk."""
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        seen = []
+        res = solve_ibis(
+            territory=Territory.from_ascii(["..", ".."]),
+            num_agents=2,
+            initial="collective",
+            max_iters=None,
+            on_initial=seen.append,
+        )
+        assert res.outcome == "unk" and res.reason == "unknown" and not res.is_sat
+        assert res.initial == "collective" and res.initial_query_s is not None
+        assert res.initial_play is None and not res.returned_initial
+        assert len(seen) == 1 and seen[0].reason == "unknown"
+
+    def test_collective_query_uses_the_timeout(self, monkeypatch):
+        """The initial query gets the run's Z3 timeout, like every other query."""
+        timeouts = []
+        real = smt_solve._new_solver
+
+        def spy(kind, timeout_ms):
+            timeouts.append((kind, timeout_ms))
+            return real(kind, timeout_ms)
+
+        monkeypatch.setattr(smt_solve, "_new_solver", spy)
+        solve_sibis(
+            territory=Territory.from_ascii(["...", "..."]),
+            num_agents=2,
+            initial="collective",
+            timeout_ms=12345,
+        )
+        assert timeouts[0] == ("opt", 12345)  # the collective query is an optimisation
+        assert all(t == 12345 for _, t in timeouts)
+
+    def test_on_initial_reports_the_initial_query(self):
+        seen = []
+        res = solve_sibis(
+            territory=Territory.from_ascii(["...", "..."]),
+            num_agents=2,
+            initial="collective",
+            on_initial=seen.append,
+        )
+        (init,) = seen
+        assert init.reason == "sat" and init.initial == "collective"
+        assert init.play == res.initial_play and init.query_s == res.initial_query_s
+
+    def test_given_initial_play_has_no_query(self):
+        play = Play.from_actions(4, 2, [[0, 3], [1, 2]])
+        res = solve_ibis(
+            territory=Territory.from_ascii(["..", ".."]),
+            num_agents=2,
+            initial_play=play,
+            max_iters=None,
+        )
+        assert res.initial == "given" and res.initial_query_s is None
+        assert res.initial_play == play
+
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    def test_invalid_initial_query_raises(self, solver):
+        with pytest.raises(ValueError, match="initial"):
+            solver(territory=Territory.from_ascii([".."]), num_agents=1, initial="best")
+
+
+@pytest.mark.parametrize(
+    "grid,n",
+    [
+        ("local_symmetry/L-4x4-2.txt", 2),  # local symmetry constraints
+        ("disconnected/2x2-2x2.txt", 4),  # component-wise constraints
+        ("disconnected/3x2-2x1.txt", 2),
+        ("asymmetric/interesting.txt", 3),  # the optimum does not give every agent m
+    ],
+)
+def test_collective_start_on_benchmark_grids(grid, n):
+    """With and without the symmetry constraints, ``pi^0`` reaches the optimum of ``f``.
+
+    The constraints of Chapter 5 keep a collectively optimal model (Section
+    5.4.5), so the welfare of the initial play is the same in both settings.
+    """
+    import os
+
+    from experiments.scenarios import GRIDS_DIR
+
+    with open(os.path.join(GRIDS_DIR, grid), encoding="utf-8") as f:
+        t = Territory.from_ascii(f)
+    nb = t.neighbor_map()
+    m = len(t) // n
+    best = max_welfare(len(t), n, m, nb)
+    for symmetry in (False, True):
+        res = solve_sibis(
+            territory=t,
+            num_agents=n,
+            initial="collective",
+            symmetry=symmetry,
+            max_iters=0,
+        )
+        assert res.initial_rewards is not None
+        assert sum(res.initial_rewards) == best, (grid, n, symmetry)

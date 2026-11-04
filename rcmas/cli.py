@@ -12,7 +12,10 @@ Subcommands:
 
 The horizon defaults to ``m = floor(|T|/|Agt|)`` (Definition 3.9.1), the only
 horizon IBIS, S-IBIS, Q-IBIS and CEGAR-NE accept, and the iteration bound
-``N`` defaults to 30, as in Chapter 7.  Plays are printed in the numbering of
+``N`` defaults to 30; ``--max-iters none`` runs without a bound, which stops
+at an equilibrium or at the first recurring play.  ``--initial collective``
+takes the initial play from ``smt(F, f)`` (Definition 4.6.1) instead of
+``smt(F)``.  Plays are printed in the numbering of
 the thesis: agents ``1..n`` and sectors ``1..|T|`` in the enumeration of
 Remark 3.1.1 (bottom row first, left to right).  The tool numbers both from
 0 internally.
@@ -26,13 +29,34 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from types import EllipsisType
 
 from .model import Coord, Territory
-from .smt_solve import SmtSolution
+from .smt_solve import INITIAL_QUERIES, SmtSolution
 from .strategy import Play
 
 DEFAULT_MAX_ITERS = 30
-"""The iteration bound ``N`` of Chapter 7."""
+"""The default iteration bound ``N`` (that of the first run of Chapter 7)."""
+
+NO_BOUND = "none"
+"""The value of ``--max-iters`` (and the CEGAR-NE bounds) for no bound."""
+
+
+def parse_bound(text: str) -> int | None:
+    """An iteration bound: a non-negative integer, or ``none`` for no bound."""
+    if text.strip().lower() == NO_BOUND:
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a non-negative integer or '{NO_BOUND}', got {text!r}"
+        ) from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(
+            f"an iteration bound must be >= 0 or '{NO_BOUND}', got {value}"
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +65,7 @@ class RunArgs:
     grid_path: str
     agents: int
     horizon: int | None
-    max_iters: int
+    max_iters: int | None
     progress: bool
     timing: bool
     timeout_ms: int | None
@@ -53,6 +77,9 @@ class RunArgs:
     demands: tuple[int, ...] | None
     seed: int = 0
     top_k: int = 3
+    initial: str = "satisfying"
+    inner_max_iters: int | None | EllipsisType = ...
+    discrete_max_iters: int | None | EllipsisType = ...
 
 
 def _agent_symbol(o: int) -> str:
@@ -145,7 +172,18 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
 
 def _add_synthesis_args(p: argparse.ArgumentParser, *, max_iters_help: str) -> None:
     p.add_argument(
-        "--max-iters", type=int, default=DEFAULT_MAX_ITERS, help=max_iters_help
+        "--max-iters",
+        type=parse_bound,
+        default=DEFAULT_MAX_ITERS,
+        metavar="N",
+        help=max_iters_help,
+    )
+    p.add_argument(
+        "--initial",
+        choices=list(INITIAL_QUERIES),
+        default="satisfying",
+        help="Query for the initial play: satisfying = smt(F) (default), "
+        "collective = smt(F, f) of Definition 4.6.1",
     )
     p.add_argument(
         "--timeout-ms",
@@ -167,7 +205,10 @@ def _add_synthesis_args(p: argparse.ArgumentParser, *, max_iters_help: str) -> N
     )
 
 
-_BOUND_HELP = "Iteration bound N: the loop runs i = 0..N (default 30)"
+_BOUND_HELP = (
+    "Iteration bound N: the loop runs i = 0..N (default 30); 'none' runs "
+    "without a bound until an equilibrium or a recurring play"
+)
 
 
 def _parse_args(argv: list[str] | None = None) -> RunArgs:
@@ -237,8 +278,25 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
     )
     _add_synthesis_args(
         cegar,
-        max_iters_help="Iteration bound N of the inner synthesiser (default 30); "
-        "Algorithm 4 itself needs no bound (Theorem 6.4.2)",
+        max_iters_help="Iteration bound N of the inner synthesiser at every "
+        "partition (default 30; 'none' for no bound); Algorithm 4 itself "
+        "needs no bound (Theorem 6.4.2)",
+    )
+    cegar.add_argument(
+        "--inner-max-iters",
+        type=parse_bound,
+        default=...,
+        metavar="N",
+        help="Bound of the inner synthesiser at a coarse partition (default: "
+        "--max-iters)",
+    )
+    cegar.add_argument(
+        "--discrete-max-iters",
+        type=parse_bound,
+        default=...,
+        metavar="N",
+        help="Bound of the inner synthesiser at the discrete partition "
+        "(default: --max-iters; 'none' as in the thesis protocol)",
     )
     cegar.add_argument(
         "--seed", type=int, default=0, help="Seed of an inner Q-IBIS (default 0)"
@@ -267,8 +325,6 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         raise SystemExit("--horizon must be >= 0")
 
     max_iters = getattr(ns, "max_iters", DEFAULT_MAX_ITERS)
-    if max_iters < 0:
-        raise SystemExit("--max-iters must be >= 0")
 
     timeout_ms_raw = getattr(ns, "timeout_ms", 0)
     if timeout_ms_raw < 0:
@@ -288,7 +344,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         grid_path=ns.grid,
         agents=ns.agents,
         horizon=ns.horizon,
-        max_iters=int(max_iters),
+        max_iters=max_iters,
         progress=bool(getattr(ns, "progress", False)),
         timing=bool(getattr(ns, "timing", False)),
         timeout_ms=None if int(timeout_ms_raw) == 0 else int(timeout_ms_raw),
@@ -300,6 +356,9 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         demands=demands,
         seed=int(getattr(ns, "seed", 0)),
         top_k=int(top_k),
+        initial=str(getattr(ns, "initial", "satisfying")),
+        inner_max_iters=getattr(ns, "inner_max_iters", ...),
+        discrete_max_iters=getattr(ns, "discrete_max_iters", ...),
     )
 
 
@@ -314,6 +373,14 @@ def _report(res: object, args: RunArgs, territory: Territory) -> int:
     if rewards is not None:
         print(f"rewards={tuple(rewards)}")
     print(f"iterations={getattr(res, 'iterations', None)}")
+    init_s = getattr(res, "initial_query_s", None)
+    init_r = getattr(res, "initial_rewards", None)
+    print(
+        f"initial={args.initial} initial_query_s="
+        f"{'-' if init_s is None else f'{init_s:.3f}'} "
+        f"initial_rewards={None if init_r is None else tuple(init_r)} "
+        f"returned_initial={getattr(res, 'returned_initial', False)}"
+    )
     _print_play(getattr(res, "play", None), args.agents)
     final = getattr(res, "final_solution", None)
     if args.render and final is not None:
@@ -402,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
             num_agents=args.agents,
             horizon=horizon,
             max_iters=args.max_iters,
+            initial=args.initial,
             progress=args.progress,
             timing=args.timing,
             timeout_ms=timeout_ms,
@@ -415,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
 
         cfg = QibisConfig(
             max_iters=args.max_iters,
+            initial=args.initial,
             progress=args.progress,
             timing=args.timing,
             timeout_ms=timeout_ms,
@@ -438,6 +507,9 @@ def main(argv: list[str] | None = None) -> int:
             initial_partition=args.partition,
             synthesiser=args.synthesiser,
             max_iters=args.max_iters,
+            inner_max_iters=args.inner_max_iters,
+            discrete_max_iters=args.discrete_max_iters,
+            initial=args.initial,
             progress=args.progress,
             timing=args.timing,
             timeout_ms=timeout_ms,

@@ -1,11 +1,15 @@
 """IBIS and S-IBIS (thesis Algorithms 1 and 2, Sections 4.7 and 4.8).
 
 Both run the loop of Algorithm 1 on a single play.  The initial play
-``pi^0`` is the play of a model of ``smt(F)`` (with the symmetry-breaking
-constraints of Chapter 5 only if symmetry is on).  In iteration ``i`` the
-run stops if ``pi^i`` occurred before (outcome ``"n/c"``).  Otherwise every
-agent ``a`` gets a best response ``beta_a`` against the canonical completion
-of ``pi^i`` (Definition 4.4.2), and its improvement potential is
+``pi^0`` is the play of a model of ``smt(F)`` or, with
+``initial="collective"``, of the collectively optimal query ``smt(F, f)``
+(Definition 4.6.1); with symmetry on, the symmetry-breaking constraints of
+Chapter 5 are added to this query and to no other.  A model of either query
+is a model of ``F``, which is all that Theorem 4.7.3 uses of ``pi^0``.  In
+iteration ``i`` the run stops if ``pi^i`` occurred before (outcome
+``"n/c"``).  Otherwise every agent ``a`` gets a best response ``beta_a``
+against the canonical completion of ``pi^i`` (Definition 4.4.2), and its
+improvement potential is
 
     IP^i(a) = r_a(pi_{beta_a}) - r_a(pi^i),
 
@@ -14,39 +18,46 @@ with both rewards evaluated on final states (Definition 3.9.2, Remark
 demand-constrained Nash equilibrium (Theorem 4.7.3) and the run returns it.
 Otherwise the agent with the largest potential, the smallest index on ties,
 replaces the play by its best-response play, and all strategies are
-completed again from the new play.  The loop runs for ``i = 0, ..., N``.
+completed again from the new play.  The loop runs for ``i = 0, ..., N``, or
+without a bound if ``N`` is ``None``.  An unbounded loop also ends: a game
+has finitely many plays, and every iteration either returns or moves to a
+play that has not occurred before.
 
 IBIS computes each best response with the optimisation query
 ``smt(G_a(pi^i), reward_a)``; S-IBIS uses the feasibility filter and binary
 search of Algorithm 2, which give the same potentials (Theorem 4.8.1).
-No query contains symmetry-breaking constraints except the initial one.
-When Z3 answers a query with unknown, the run stops with outcome ``"unk"``
-(Section 7.1).
+When Z3 answers a query with unknown, the initial query included, the run
+stops with outcome ``"unk"`` (Section 7.1).
 
 Outcomes: ``"ne"`` (equilibrium), ``"n/c"`` (play recurs, ``reason="cycle"``,
-or the iteration bound is reached, ``reason="max_iters"``), ``"unk"``
-(``reason="unknown"``) and ``"uns"`` (``smt(F)`` is unsatisfiable, so no
-satisfying strategy exists; ``reason="unsat"``).
+or the iteration bound is reached, ``reason="max_iters"``, which cannot
+happen without a bound), ``"unk"`` (``reason="unknown"``) and ``"uns"``
+(the initial query is unsatisfiable, so no satisfying strategy exists;
+``reason="unsat"``).
 """
 
 from __future__ import annotations
 
+import itertools
 import sys
 import time
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, replace
+from typing import Callable, Iterable, TypeVar
 
 from .model import Coord, Territory
 from .smt_solve import (
+    INITIAL_QUERIES,
     BaseEncoding,
     ExtraConstraints,
     SmtSolution,
     best_response_binsearch_from_base,
     best_response_from_base,
     build_base_encoding,
-    find_feasible_from_base,
+    initial_from_base,
 )
 from .strategy import CanonicalCompletion, Play, StateKey, canonical_completion
+
+ResultT = TypeVar("ResultT")
 
 OUTCOME_BY_REASON = {
     "ne": "ne",
@@ -100,6 +111,12 @@ class IbisResult:
         play: the final play ``pi^i`` (tool sector indices).
         outcome: ``"ne"``, ``"n/c"``, ``"unk"`` or ``"uns"``.
         trace: one :class:`IbisIteration` per iteration.
+        initial: the initial query, ``"satisfying"`` or ``"collective"``
+            (``"given"`` if the caller passed the initial play).
+        initial_query_s: wall-clock time of the initial query (``None`` for
+            a given initial play).
+        initial_play: ``pi^0``, if the initial query had a model.
+        initial_rewards: ``r_a(pi^0)``, evaluated on the final state.
 
     The returned joint strategy is ``completion()``, the canonical
     completion of ``play`` (Definition 4.4.2) under the sector enumeration
@@ -116,11 +133,20 @@ class IbisResult:
     play: Play | None = None
     outcome: str = ""
     trace: tuple[IbisIteration, ...] = ()
+    initial: str = "satisfying"
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
 
     @property
     def rewards(self) -> tuple[int, ...] | None:
         """``r_a(play)`` (alias of ``payoff_by_agent``)."""
         return self.payoff_by_agent
+
+    @property
+    def returned_initial(self) -> bool:
+        """The run returned the initial play ``pi^0`` (an equilibrium in iteration 0)."""
+        return self.found_ne and self.iterations == 0
 
     def completion(self) -> CanonicalCompletion | None:
         """The canonical completion of the final play, or ``None``."""
@@ -162,7 +188,7 @@ def run_ibis_loop(
     initial_solution: SmtSolution | None,
     best_response: BestResponseFn,
     rewards_of: Callable[[StateKey], tuple[int, ...]],
-    max_iters: int,
+    max_iters: int | None,
     territory: Territory | None = None,
     log: Callable[[str], None] | None = None,
 ) -> IbisResult:
@@ -170,8 +196,9 @@ def run_ibis_loop(
 
     *best_response* computes ``beta_a`` for an agent; *rewards_of* evaluates
     ``r_a`` on a final control vector.  The loop runs for ``i = 0, ...,
-    max_iters`` (``max_iters`` is the bound ``N``).  *territory* is used
-    only to report the play as coordinates.
+    max_iters`` (``max_iters`` is the bound ``N``), or until it returns if
+    *max_iters* is ``None``.  *territory* is used only to report the play
+    as coordinates.
     """
 
     def _log(msg: str) -> None:
@@ -195,15 +222,12 @@ def run_ibis_loop(
             trace=tuple(trace),
         )
 
-    if max_iters < 0:
-        raise ValueError("max_iters must be >= 0")
-
     play = initial_play
     solution = initial_solution
     seen: set[Play] = set()
     trace: list[IbisIteration] = []
 
-    for i in range(max_iters + 1):
+    for i in iteration_indices(max_iters):
         current = rewards_of(play.final_state)
         if play in seen:
             _log(f"iter={i} play recurs")
@@ -245,7 +269,21 @@ def run_ibis_loop(
         play = new_play
         solution = responses[chosen].solution
 
+    assert max_iters is not None  # an unbounded loop returns inside
     return _result("max_iters", play, solution, max_iters)
+
+
+def iteration_indices(max_iters: int | None) -> Iterable[int]:
+    """``0, ..., N`` for the bound ``N = max_iters``, or ``0, 1, ...`` without a bound.
+
+    Raises :class:`ValueError` for a negative bound.  A loop over the
+    unbounded range ends because it stops at the first recurring play.
+    """
+    if max_iters is None:
+        return itertools.count()
+    if max_iters < 0:
+        raise ValueError("max_iters must be >= 0 or None")
+    return range(max_iters + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +338,11 @@ def binsearch_best_response(
 
 
 def _validate(
-    territory: Territory, num_agents: int, horizon: int | None, max_iters: int
+    territory: Territory,
+    num_agents: int,
+    horizon: int | None,
+    max_iters: int | None,
+    initial: str = "satisfying",
 ) -> int:
     if num_agents <= 0:
         raise ValueError("num_agents must be >= 1")
@@ -311,9 +353,74 @@ def _validate(
         raise ValueError(
             f"horizon must be m = floor(|T|/|Agt|) = {m} (Definition 3.9.1), got {horizon}"
         )
-    if max_iters < 0:
-        raise ValueError("max_iters must be >= 0")
+    if max_iters is not None and max_iters < 0:
+        raise ValueError("max_iters must be >= 0 or None")
+    if initial not in INITIAL_QUERIES:
+        raise ValueError(f"initial must be one of {INITIAL_QUERIES}, got {initial!r}")
     return horizon
+
+
+@dataclass(frozen=True, slots=True)
+class InitialPlay:
+    """The outcome of the initial query of a run (lines 1-4 of Algorithm 1).
+
+    Attributes:
+        reason: ``"sat"``, ``"unsat"``, ``"unknown"`` or ``"given"`` (the
+            caller passed the initial play).
+        play: ``pi^0``, if any.
+        solution: the model whose play is ``pi^0``, if any.
+        rewards: ``r_a(pi^0)``, if any.
+        query_s: wall-clock time of the query (``None`` for a given play).
+        initial: ``"satisfying"``, ``"collective"`` or ``"given"``.
+    """
+
+    reason: str
+    play: Play | None
+    solution: SmtSolution | None
+    rewards: tuple[int, ...] | None
+    query_s: float | None
+    initial: str
+
+
+InitialHook = Callable[[InitialPlay], None]
+"""Called with the outcome of the initial query as soon as it is known."""
+
+
+def initial_play_of(
+    base: BaseEncoding,
+    *,
+    initial: str,
+    symmetry: bool,
+    extra_constraints: ExtraConstraints | None,
+    timeout_ms: int | None,
+    given: Play | None = None,
+) -> InitialPlay:
+    """Pose the initial query of IBIS, S-IBIS or Q-IBIS, or take the *given* play.
+
+    *initial* selects ``smt(F)`` (``"satisfying"``) or ``smt(F, f)``
+    (``"collective"``, Definition 4.6.1); *symmetry* adds the
+    symmetry-breaking constraints of the territory and *extra_constraints*
+    further constraints, both to this query only.
+    """
+    if given is not None:
+        if given.num_agents != base.num_agents or given.horizon != base.horizon:
+            raise ValueError("initial_play does not match the game")
+        return InitialPlay(
+            "given", given, None, base.rewards_of(given.final_state), None, "given"
+        )
+    t0 = time.perf_counter()
+    sol = initial_from_base(
+        base,
+        initial=initial,
+        symmetry=symmetry,
+        extra_constraints=extra_constraints,
+        timeout_ms=timeout_ms,
+    )
+    elapsed = time.perf_counter() - t0
+    if not sol.is_sat:
+        return InitialPlay(sol.reason, None, None, None, elapsed, initial)
+    assert sol.play is not None and sol.payoff_by_agent is not None
+    return InitialPlay("sat", sol.play, sol, sol.payoff_by_agent, elapsed, initial)
 
 
 def _ibis_core(
@@ -321,7 +428,8 @@ def _ibis_core(
     territory: Territory,
     num_agents: int,
     horizon: int | None,
-    max_iters: int,
+    max_iters: int | None,
+    initial: str,
     progress: bool,
     timing: bool,
     timeout_ms: int | None,
@@ -333,8 +441,9 @@ def _ibis_core(
     initial_constraints: ExtraConstraints | None,
     initial_play: Play | None,
     make_best_response: Callable[[BaseEncoding, int | None], BestResponseFn],
+    on_initial: InitialHook | None = None,
 ) -> IbisResult:
-    h = _validate(territory, num_agents, horizon, max_iters)
+    h = _validate(territory, num_agents, horizon, max_iters, initial)
     t0 = time.perf_counter()
 
     def _log(msg: str) -> None:
@@ -353,42 +462,69 @@ def _ibis_core(
         weight_balance_target=weight_balance_target,
     )
 
-    if initial_play is None:
-        abstract = weights is not None or custom_neighbors is not None
-        use_symmetry = symmetry and not abstract
-        if symmetry and abstract and initial_constraints is None:
-            _log(
-                "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
-            )
-        init = find_feasible_from_base(
-            base,
-            symmetry=use_symmetry,
-            extra_constraints=initial_constraints,
-            timeout_ms=timeout_ms,
+    abstract = weights is not None or custom_neighbors is not None
+    if initial_play is None and symmetry and abstract and initial_constraints is None:
+        _log(
+            "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
         )
-        if init.reason == "unknown":
-            _log("initial query: solver answered unknown")
-            return IbisResult(
-                False, "unknown", False, 0, None, None, None, outcome="unk"
-            )
-        if not init.is_sat:
-            _log("initial query unsatisfiable: no satisfying strategy exists")
-            return IbisResult(False, "unsat", False, 0, None, None, None, outcome="uns")
-        assert init.play is not None
-        start, start_sol = init.play, init
-    else:
-        if initial_play.num_agents != num_agents or initial_play.horizon != h:
-            raise ValueError("initial_play does not match the game")
-        start, start_sol = initial_play, None
+    init = initial_play_of(
+        base,
+        initial=initial,
+        symmetry=symmetry and not abstract,
+        extra_constraints=initial_constraints,
+        timeout_ms=timeout_ms,
+        given=initial_play,
+    )
+    if on_initial is not None:
+        on_initial(init)
+    if init.reason == "unknown":
+        _log(f"initial query ({initial}): solver answered unknown")
+        return failed_initial(IbisResult, init)
+    if init.play is None:
+        _log("initial query unsatisfiable: no satisfying strategy exists")
+        return failed_initial(IbisResult, init)
+    if init.query_s is not None:
+        _log(
+            f"initial query ({initial}): rewards={init.rewards} in {init.query_s:.3f}s"
+        )
 
-    return run_ibis_loop(
-        initial_play=start,
-        initial_solution=start_sol,
+    res = run_ibis_loop(
+        initial_play=init.play,
+        initial_solution=init.solution,
         best_response=make_best_response(base, timeout_ms),
         rewards_of=base.rewards_of,
         max_iters=max_iters,
         territory=territory,
         log=_log if progress else None,
+    )
+    return with_initial(res, init)
+
+
+def failed_initial(cls: Callable[..., ResultT], init: InitialPlay) -> ResultT:
+    """The result of a run whose initial query had no model (``unk`` or ``uns``)."""
+    reason = "unknown" if init.reason == "unknown" else "unsat"
+    return cls(
+        False,
+        reason,
+        False,
+        0,
+        None,
+        None,
+        None,
+        outcome=OUTCOME_BY_REASON[reason],
+        initial=init.initial,
+        initial_query_s=init.query_s,
+    )
+
+
+def with_initial(res: ResultT, init: InitialPlay) -> ResultT:
+    """*res* with the fields that describe its initial play."""
+    return replace(  # type: ignore[type-var]
+        res,
+        initial=init.initial,
+        initial_query_s=init.query_s,
+        initial_play=init.play,
+        initial_rewards=init.rewards,
     )
 
 
@@ -398,7 +534,8 @@ def solve_ibis(
     num_agents: int,
     horizon: int | None = None,
     seed: int = 0,
-    max_iters: int = 30,
+    max_iters: int | None = 30,
+    initial: str = "satisfying",
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -410,15 +547,22 @@ def solve_ibis(
     require_victory: bool = False,
     initial_constraints: ExtraConstraints | None = None,
     initial_play: Play | None = None,
+    on_initial: InitialHook | None = None,
 ) -> IbisResult:
     """Run IBIS (Algorithm 1) with the iteration bound ``N = max_iters``.
 
-    *horizon* must be ``m = floor(|T|/|Agt|)`` (``None`` selects it).
-    *symmetry* adds the symmetry-breaking constraints of the territory to the
-    initial query only; for an abstract game (*weights* or
-    *custom_neighbors* given) pass its constraints as *initial_constraints*.
-    *initial_play* replaces the initial query.  *seed* and *require_victory*
-    are accepted for backward compatibility and have no effect.
+    *max_iters* ``None`` runs the loop without a bound: it stops at an
+    equilibrium or at the first recurring play.  *initial* selects the
+    query for the initial play, ``"satisfying"`` (``smt(F)``, the default)
+    or ``"collective"`` (``smt(F, f)``, Definition 4.6.1).  *horizon* must
+    be ``m = floor(|T|/|Agt|)`` (``None`` selects it).  *symmetry* adds the
+    symmetry-breaking constraints of the territory to the initial query
+    only; for an abstract game (*weights* or *custom_neighbors* given) pass
+    its constraints as *initial_constraints*.  *initial_play* replaces the
+    initial query.  *on_initial* is called with the outcome of the initial
+    query (an :class:`InitialPlay`) as soon as it is known.  *seed* and
+    *require_victory* are accepted for backward compatibility and have no
+    effect.
     """
     _ = (seed, require_victory)
     return _ibis_core(
@@ -426,6 +570,7 @@ def solve_ibis(
         num_agents=num_agents,
         horizon=horizon,
         max_iters=max_iters,
+        initial=initial,
         progress=progress,
         timing=timing,
         timeout_ms=timeout_ms,
@@ -437,6 +582,7 @@ def solve_ibis(
         initial_constraints=initial_constraints,
         initial_play=initial_play,
         make_best_response=smt_best_response,
+        on_initial=on_initial,
     )
 
 
@@ -446,7 +592,8 @@ def solve_sibis(
     num_agents: int,
     horizon: int | None = None,
     seed: int = 0,
-    max_iters: int = 30,
+    max_iters: int | None = 30,
+    initial: str = "satisfying",
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -458,6 +605,7 @@ def solve_sibis(
     require_victory: bool = False,
     initial_constraints: ExtraConstraints | None = None,
     initial_play: Play | None = None,
+    on_initial: InitialHook | None = None,
 ) -> IbisResult:
     """Run S-IBIS (Algorithm 2): the loop of IBIS with binary-search best responses.
 
@@ -470,6 +618,7 @@ def solve_sibis(
         num_agents=num_agents,
         horizon=horizon,
         max_iters=max_iters,
+        initial=initial,
         progress=progress,
         timing=timing,
         timeout_ms=timeout_ms,
@@ -481,4 +630,5 @@ def solve_sibis(
         initial_constraints=initial_constraints,
         initial_play=initial_play,
         make_best_response=binsearch_best_response,
+        on_initial=on_initial,
     )

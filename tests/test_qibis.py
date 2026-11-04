@@ -35,7 +35,13 @@ from rcmas.qlearning import LearningGame, LearningParams
 from rcmas.smt_solve import build_base_encoding
 from rcmas.strategy import CanonicalCompletion, Play, is_live
 
-from .brute_force import best_deviation, deviations, is_equilibrium, random_play
+from .brute_force import (
+    best_deviation,
+    deviations,
+    is_equilibrium,
+    max_welfare,
+    random_play,
+)
 
 z3 = pytest.importorskip("z3")
 
@@ -656,3 +662,86 @@ class TestValidation:
                 cfg=QibisConfig(**FAST),
                 initial_play=Play.from_actions(4, 2, [[0, 1]]),
             )
+
+
+# ===================================================================
+# The protocol of Chapter 7: no iteration bound, collectively optimal start
+# ===================================================================
+
+
+class TestUnboundedAndCollective:
+    def test_unbounded_loop_stops_at_recurrence(self):
+        plays = _line_plays(2)
+        back = {plays[0]: plays[1], plays[1]: plays[0]}
+        res = run_qibis_loop(
+            initial_play=plays[0],
+            initial_solution=None,
+            refine=lambda p: [{} for _ in range(3)],
+            restricted_best_response=lambda p, a, cur, c: BestResponse(
+                "ok", cur[a] + (a == 0), back[p] if a == 0 else None, None, 1
+            ),
+            best_response=None,
+            rewards_of=lambda s: (1, 1, 1),
+            max_iters=None,
+        )
+        assert res.outcome == "n/c" and res.reason == "cycle" and res.iterations == 2
+
+    @pytest.mark.parametrize("initial", ["satisfying", "collective"])
+    @pytest.mark.parametrize("symmetry", [False, True])
+    @pytest.mark.parametrize(
+        "grid,n,demands",
+        [
+            (["..", ".."], 2, None),
+            (["...", "..."], 3, None),
+            (["...", "...", "..."], 2, None),
+            (["..#..", "..#.."], 2, None),
+            (["...", "..."], 2, (2, 2)),
+        ],
+    )
+    def test_unbounded_runs_terminate_and_are_sound(
+        self, initial, symmetry, grid, n, demands
+    ):
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        cfg = QibisConfig(
+            max_iters=None, initial=initial, symmetry=symmetry, demands=demands, **FAST
+        )
+        res = solve_qibis(territory=t, num_agents=n, cfg=cfg)
+        assert res.outcome in ("ne", "n/c") and res.reason in ("ne", "cycle")
+        assert res.initial == initial and res.initial_query_s is not None
+        assert res.initial_rewards == rewards_from_owner(
+            res.initial_play.final_state, n, nb
+        )
+        if initial == "collective":
+            m = len(t) // n
+            assert sum(res.initial_rewards) == max_welfare(len(t), n, m, nb, demands)
+        if res.outcome == "ne":
+            assert is_equilibrium(res.play, nb, demands)
+            if res.returned_initial:
+                assert res.play == res.initial_play and res.iterations == 0
+
+    def test_all_m_collective_play_returns_in_iteration_0(self):
+        t = Territory.from_ascii(["...", "..."])
+        cfg = QibisConfig(max_iters=None, initial="collective", **FAST)
+        res = solve_qibis(territory=t, num_agents=2, cfg=cfg)
+        assert res.initial_rewards == (3, 3)
+        assert res.outcome == "ne" and res.iterations == 0 and res.returned_initial
+        it = res.trace[0]
+        assert it.restricted == (0, 0) and it.certified == (0, 0)  # certified as well
+        assert is_equilibrium(res.play, t.neighbor_map())
+
+    def test_unknown_collective_query_stops_with_unk(self, monkeypatch):
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        cfg = QibisConfig(initial="collective", **FAST)
+        res = solve_qibis(
+            territory=Territory.from_ascii(["..", ".."]), num_agents=2, cfg=cfg
+        )
+        assert res.outcome == "unk" and res.initial == "collective"
+        assert res.initial_query_s is not None and res.initial_play is None
+
+    def test_invalid_parameters_raise(self):
+        t = Territory.from_ascii([".."])
+        with pytest.raises(ValueError, match="initial"):
+            solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(initial="x"))
+        with pytest.raises(ValueError, match="max_iters"):
+            solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(max_iters=-2))

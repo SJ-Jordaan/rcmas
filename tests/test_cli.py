@@ -261,3 +261,72 @@ class TestCliRuns:
         out = capsys.readouterr().out
         assert rc == 0
         assert "horizon=3" in out and "welfare=9" in out
+
+
+class TestCliProtocol:
+    """``--max-iters none``, ``--initial`` and the CEGAR-NE bounds (Chapter 7 protocol)."""
+
+    def _grid(self, tmp_path, text="...\n...\n"):
+        grid = tmp_path / "grid.txt"
+        grid.write_text(text)
+        return str(grid)
+
+    def test_parse_bounds_and_initial(self, tmp_path):
+        g = self._grid(tmp_path)
+        for cmd in ("ibis", "sibis", "qibis", "cegar"):
+            base = [cmd, "--grid", g, "--agents", "2"]
+            assert _parse_args(base).initial == "satisfying"
+            args = _parse_args(
+                base + ["--max-iters", "none", "--initial", "collective"]
+            )
+            assert args.max_iters is None and args.initial == "collective"
+            assert _parse_args(base + ["--max-iters", "None"]).max_iters is None
+            assert _parse_args(base + ["--max-iters", "0"]).max_iters == 0
+            for bad in (["--max-iters", "x"], ["--initial", "best"]):
+                with pytest.raises(SystemExit):
+                    _parse_args(base + bad)
+        args = _parse_args(["cegar", "--grid", g, "--agents", "2"])
+        assert args.inner_max_iters is ... and args.discrete_max_iters is ...
+        args = _parse_args(
+            [
+                "cegar",
+                "--grid",
+                g,
+                "--agents",
+                "2",
+                "--inner-max-iters",
+                "30",
+                "--discrete-max-iters",
+                "none",
+            ]
+        )
+        assert args.inner_max_iters == 30 and args.discrete_max_iters is None
+
+    @pytest.mark.parametrize("cmd", ["ibis", "sibis", "qibis", "cegar"])
+    def test_runs_with_the_thesis_protocol(self, tmp_path, capsys, cmd):
+        from rcmas.cli import main
+
+        g = self._grid(tmp_path)
+        extra = (
+            ["--inner-max-iters", "30", "--discrete-max-iters", "none"]
+            if cmd == "cegar"
+            else []
+        )
+        code = main(
+            [
+                cmd,
+                "--grid",
+                g,
+                "--agents",
+                "2",
+                "--max-iters",
+                "none",
+                "--initial",
+                "collective",
+                *extra,
+            ]
+        )
+        out = capsys.readouterr().out
+        assert code == 0 and "outcome=ne" in out and "initial=collective" in out
+        if cmd != "cegar":  # CEGAR-NE reports the lift of an abstract initial play
+            assert "initial_rewards=(3, 3)" in out and "returned_initial=True" in out

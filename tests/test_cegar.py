@@ -635,3 +635,176 @@ class TestLimitsAndParameters:
         _check_run(res, territory_2x2, 2, None)
         assert res.outcome == "ne" and res.at_discrete and res.reason == "ne"
         assert res.trace[0].verify_queries == 2
+
+
+# ---------------------------------------------------------------------------
+# The protocol of Chapter 7: separate inner bounds, collectively optimal start
+# ---------------------------------------------------------------------------
+
+
+def _spy_inner(monkeypatch, fail_at_discrete: bool = False, fail_coarse: bool = False):
+    """Record (concrete?, max_iters, initial) of every inner S-IBIS call.
+
+    With *fail_at_discrete*, the inner run at the discrete partition ends by
+    recurrence without an equilibrium (``n/c``, reason ``cycle``), as an
+    unbounded run can; with *fail_coarse*, every run at a coarse partition
+    ends at its bound without an equilibrium (``n/c``, reason ``max_iters``).
+    """
+    from dataclasses import replace
+
+    import rcmas.ibis as ibis_mod
+
+    calls: list[tuple[bool, int | None, str]] = []
+    real = ibis_mod.solve_sibis
+
+    def spy(**kw):
+        concrete = kw.get("weights") is None
+        calls.append((concrete, kw["max_iters"], kw["initial"]))
+        res = real(**kw)
+        if fail_at_discrete and concrete:
+            return replace(res, reason="cycle", found_ne=False, outcome="n/c")
+        if fail_coarse and not concrete:
+            return replace(res, reason="max_iters", found_ne=False, outcome="n/c")
+        return res
+
+    monkeypatch.setattr(ibis_mod, "solve_sibis", spy)
+    return calls
+
+
+class TestProtocolBounds:
+    def test_coarse_bounded_discrete_unbounded(self, monkeypatch) -> None:
+        """inner_max_iters at a coarse partition, discrete_max_iters at the discrete one."""
+        calls = _spy_inner(monkeypatch)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            symmetry=True,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+        )
+        _check_run(res, t, 2, None)
+        _sound_inner(res)
+        coarse = [c for c in calls if not c[0]]
+        discrete = [c for c in calls if c[0]]
+        assert coarse and all(b == 30 for _, b, _ in coarse)
+        assert all(b is None for _, b, _ in discrete)
+        assert all(init == "collective" for *_, init in calls)
+        assert [row.blocks < len(t) for row in res.trace] == [
+            not c for c, _, _ in calls
+        ]
+
+    def test_defaults_keep_one_bound_everywhere(self, monkeypatch) -> None:
+        calls = _spy_inner(monkeypatch)
+        t = _t(GRID_4x2)
+        solve_cegar(territory=t, num_agents=2, symmetry=True, max_iters=7)
+        assert calls and {b for _, b, _ in calls} == {7}
+        assert {init for *_, init in calls} == {"satisfying"}
+        calls.clear()
+        solve_cegar(territory=t, num_agents=2, symmetry=True, discrete_max_iters=None)
+        assert {b for c, b, _ in calls if not c} <= {30}
+        assert {b for c, b, _ in calls if c} <= {None}
+
+    def test_recurrence_at_the_discrete_partition_is_failure(self, monkeypatch) -> None:
+        """An unbounded inner run that ends by recurrence at P_bot gives FAILURE (line 9).
+
+        Every coarse run ends at its bound, so CEGAR-NE bisects until the
+        discrete partition, in ``|T| - |P_0| + 1`` iterations (Theorem 6.4.2).
+        """
+        calls = _spy_inner(monkeypatch, fail_at_discrete=True, fail_coarse=True)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+        )
+        _check_run(res, t, 2, None)
+        assert res.outcome == "fail" and res.reason == "failure_no_candidate"
+        assert res.iterations == len(t) - 1 + 1 and res.refinements == len(t) - 1
+        assert [c for c, _, _ in calls] == [False] * (len(t) - 1) + [True]
+        assert {b for c, b, _ in calls if not c} == {30}
+        assert calls[-1][1] is None
+        last = res.trace[-1]
+        assert last.blocks == len(t) and last.synthesis == "n/c"
+        assert last.check == "no_candidate" and last.refinement is None
+        assert all(row.refinement == "bisect" for row in res.trace[:-1])
+
+    def test_recurrence_at_discrete_orbit_partition_is_failure(
+        self, monkeypatch
+    ) -> None:
+        """On a territory whose orbit partition is discrete the first call is at P_bot."""
+        _spy_inner(monkeypatch, fail_at_discrete=True)
+        t = _t(["..#", "...", ".#."])  # asymmetric: every orbit is one sector
+        res = solve_cegar(
+            territory=t, num_agents=2, discrete_max_iters=None, initial="collective"
+        )
+        assert res.initial_partition_size == len(t)
+        assert res.outcome == "fail" and res.reason == "failure_no_candidate"
+        assert res.iterations == 1 and res.refinements == 0
+
+    @pytest.mark.parametrize("rows, n, demands", SOUNDNESS_CASES)
+    @pytest.mark.parametrize("symmetry", [False, True])
+    @pytest.mark.parametrize("bounds", [(30, None), (None, None)])
+    def test_terminates_and_is_sound_without_bounds(
+        self, rows, n, demands, symmetry, bounds
+    ) -> None:
+        """Theorem 6.4.2 holds with unbounded inner runs; every equilibrium is certified."""
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            symmetry=symmetry,
+            inner_max_iters=bounds[0],
+            discrete_max_iters=bounds[1],
+            initial="collective",
+        )
+        _check_run(res, t, n, demands)
+        _sound_inner(res)
+        for row in res.trace:
+            assert row.initial_query_s is not None
+            if row.blocks == len(t) and row.synthesis == "n/c":
+                assert res.reason == "failure_no_candidate"
+
+    def test_initial_fields(self) -> None:
+        t = _t(["...", "..."])
+        seen = []
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="discrete",
+            initial="collective",
+            discrete_max_iters=None,
+            on_initial=seen.append,
+        )
+        # At P_bot the inner game is M, and its collectively optimal play gives (3, 3).
+        assert res.outcome == "ne" and res.iterations == 1 and res.returned_initial
+        assert res.initial_rewards == (3, 3) and res.initial_query_s is not None
+        assert res.initial_play == res.play
+        (info,) = seen
+        assert info.iteration == 1 and info.blocks == 6 and info.status == "sat"
+        assert info.lifted_rewards == (3, 3) and info.abstract_rewards == (3, 3)
+        assert res.trace[0].initial_query_s == info.query_s
+
+    def test_lifted_initial_play_of_a_coarse_partition(self) -> None:
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t, num_agents=2, symmetry=True, initial="collective"
+        )
+        assert res.initial_play is not None and res.initial_play.horizon == 4
+        assert res.initial_rewards == res.initial_play.rewards(t.neighbor_map())
+        assert res.returned_initial == (
+            res.found_ne and res.iterations == 1 and res.trace[0].returned_initial
+        )
+
+    def test_invalid_bounds_and_initial(self, territory_2x2) -> None:
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, inner_max_iters=-1)
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, discrete_max_iters=-1)
+        with pytest.raises(ValueError, match="initial"):
+            solve_cegar(territory=territory_2x2, num_agents=2, initial="best")

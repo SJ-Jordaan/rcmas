@@ -8,7 +8,9 @@ the pure-Python model, so the SMT tests can compare against it:
   and the others follow a total strategy (Corollary 4.4.2);
 - :func:`best_deviation`: ``BR_a(pi)`` of Lemma 4.7.2 by enumeration, with
   the lexicographically smallest optimal action sequence of the deviator;
-- :func:`random_play`: a uniformly random play.
+- :func:`random_play`: a uniformly random play;
+- :func:`max_welfare`: the optimum of the collectively optimal query
+  ``smt(F, f)`` (Definition 4.6.1) by enumeration of final states.
 """
 
 from __future__ import annotations
@@ -141,3 +143,30 @@ def random_play(
             state[i] = a
         actions.append(prof)
     return Play.from_actions(num_sectors, num_agents, actions)
+
+
+def max_welfare(
+    num_sectors: int,
+    num_agents: int,
+    horizon: int,
+    neighbors: dict,
+    demands: tuple[int, ...] | None = None,
+    weights: tuple[int, ...] | None = None,
+) -> int | None:
+    """The largest ``f = sum_a r_a`` over the satisfying final states (Definition 4.6.1).
+
+    Every control vector in which each agent controls *horizon* sectors is
+    the final state of some play (claim the sectors in any order), and the
+    rewards depend only on the final state, so the optimum of ``smt(F, f)``
+    is the maximum over :func:`final_states`.  ``None`` if no final state
+    meets the demands.
+    """
+    d = demands if demands is not None else (0,) * num_agents
+    best: int | None = None
+    for final in final_states(num_sectors, num_agents, horizon):
+        r = rewards_from_owner(final, num_agents, neighbors, weights)
+        if any(r[a] < d[a] for a in range(num_agents)):
+            continue
+        if best is None or sum(r) > best:
+            best = sum(r)
+    return best

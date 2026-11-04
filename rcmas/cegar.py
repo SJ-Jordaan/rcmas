@@ -6,9 +6,14 @@
 1. (line 5) build the abstract RCMAS of ``P`` (Definition 6.1.2), with block
    weights and block adjacency;
 2. (line 6) run the inner synthesiser, S-IBIS by default, or IBIS or Q-IBIS,
-   on it with the same iteration bound ``N`` as a direct run.  At the
-   discrete partition the abstract game is ``M`` (Section 6.1), and the
-   synthesiser runs on the concrete encoding of ``M``;
+   on it.  At the discrete partition the abstract game is ``M`` (Section
+   6.1), and the synthesiser runs on the concrete encoding of ``M``.  The
+   inner run has its own iteration bound at a coarse partition
+   (*inner_max_iters*) and at the discrete partition
+   (*discrete_max_iters*); either may be ``None`` (no bound), and by
+   default both are the bound ``N = max_iters`` of a direct run.  Its
+   initial play comes from ``smt(F)`` or, with ``initial="collective"``,
+   from the collectively optimal query of the game it runs on;
 3. (lines 7-12) if it returns no equilibrium (the abstract game has no
    satisfying strategy, or the synthesiser stops with ``n/c``), return
    FAILURE at the discrete partition, and otherwise split the largest block
@@ -36,7 +41,10 @@ returns after at most ``|T| - |P_0| + 1`` iterations (Theorem 6.4.2), and the
 returned joint strategy is the canonical completion of a satisfying play
 that passed VerifyNE, hence a demand-constrained Nash equilibrium of ``M``
 (Theorem 6.4.1).  Neither property depends on the inner synthesiser, which
-can be any :data:`SynthesiseFn`.
+can be any :data:`SynthesiseFn` whose calls terminate.  IBIS, S-IBIS and
+Q-IBIS terminate without an iteration bound too, since they stop at the
+first recurring play of a game with finitely many plays; an unbounded inner
+run that ends by recurrence at the discrete partition gives FAILURE.
 
 Symmetry reduction (Section 6.5) adds the lex-leader and spatial
 canonicalisation constraints, computed from the automorphisms of the
@@ -58,7 +66,8 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import EllipsisType
 from typing import Any, Callable
 
 from .abstraction import (
@@ -117,6 +126,9 @@ class SynthesisGame:
             territory to the initial query (discrete partition only).
         initial_constraints: constraints for the initial query only, here
             the symmetry constraints of the weighted abstract graph.
+        on_initial: called by the synthesiser with the outcome of its
+            initial query (an :class:`~rcmas.ibis.InitialPlay`) as soon as
+            it is known; ``None`` for no call.
     """
 
     abstract: AbstractRCMAS
@@ -128,6 +140,7 @@ class SynthesisGame:
     custom_neighbors: dict[int, list[int]] | None
     symmetry: bool
     initial_constraints: ExtraConstraints | None
+    on_initial: Callable[[Any], None] | None = None
 
     @property
     def is_concrete(self) -> bool:
@@ -147,6 +160,10 @@ class InnerResult:
         iterations: iterations of the inner synthesiser.
         rewards: rewards of ``play`` in the game (abstract rewards).
         detail: the synthesiser's own result object.
+        initial_query_s: time of the inner run's initial query, if known.
+        initial_play: the inner run's initial play, if known.
+        initial_rewards: its rewards in the game, if known.
+        returned_initial: the inner run returned its initial play.
     """
 
     outcome: str
@@ -154,31 +171,64 @@ class InnerResult:
     iterations: int = 0
     rewards: tuple[int, ...] | None = None
     detail: Any = None
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
 
 
 SynthesiseFn = Callable[[SynthesisGame], InnerResult]
 """``SynthesiseNE``: a game -> an equilibrium play of it, or no candidate."""
 
 
+SAME = ...
+"""Default of the CEGAR-NE bounds: the same bound as ``max_iters``."""
+
+
+def _bound(value: int | None | EllipsisType, default: int | None) -> int | None:
+    bound = default if value is ... else value
+    if bound is not None and bound < 0:
+        raise ValueError("iteration bounds must be >= 0 or None")
+    return bound
+
+
 def make_synthesiser(
     name: str,
     *,
-    max_iters: int = 30,
+    max_iters: int | None = 30,
+    discrete_max_iters: int | None | EllipsisType = SAME,
+    initial: str = "satisfying",
     timeout_ms: int | None = None,
     seed: int = 0,
     progress: bool = False,
 ) -> SynthesiseFn:
-    """IBIS, S-IBIS or Q-IBIS as ``SynthesiseNE``, with the iteration bound ``N = max_iters``."""
+    """IBIS, S-IBIS or Q-IBIS as ``SynthesiseNE``.
+
+    The inner run has the iteration bound *max_iters* at a coarse partition
+    and *discrete_max_iters* at the discrete partition (``...``, the
+    default, takes *max_iters*); ``None`` runs it without a bound.
+    *initial* selects its initial query, ``"satisfying"`` or
+    ``"collective"``, posed on the game of the call (weighted rewards at a
+    coarse partition).
+    """
     if name not in SYNTHESISERS:
         raise ValueError("synthesiser must be 'ibis', 'qibis', or 'sibis'")
+    from .smt_solve import INITIAL_QUERIES
+
+    if initial not in INITIAL_QUERIES:
+        raise ValueError(f"initial must be one of {INITIAL_QUERIES}, got {initial!r}")
+    coarse_bound = _bound(max_iters, None)
+    discrete_bound = _bound(discrete_max_iters, coarse_bound)
 
     def run(game: SynthesisGame) -> InnerResult:
         res: Any
+        bound = discrete_bound if game.is_concrete else coarse_bound
         if name == "qibis":
             from .qibis import QibisConfig, solve_qibis
 
             cfg = QibisConfig(
-                max_iters=max_iters,
+                max_iters=bound,
+                initial=initial,
                 timeout_ms=timeout_ms,
                 symmetry=game.symmetry,
                 demands=game.demands,
@@ -193,6 +243,7 @@ def make_synthesiser(
                 weights=game.weights,
                 custom_neighbors=game.custom_neighbors,
                 initial_constraints=game.initial_constraints,
+                on_initial=game.on_initial,
             )
         else:
             from .ibis import solve_ibis, solve_sibis
@@ -202,17 +253,29 @@ def make_synthesiser(
                 territory=game.territory,
                 num_agents=game.num_agents,
                 horizon=game.horizon,
-                max_iters=max_iters,
+                max_iters=bound,
+                initial=initial,
                 timeout_ms=timeout_ms,
                 symmetry=game.symmetry,
                 demands=game.demands,
                 weights=game.weights,
                 custom_neighbors=game.custom_neighbors,
                 initial_constraints=game.initial_constraints,
+                on_initial=game.on_initial,
                 progress=progress,
             )
         play = res.play if res.outcome == "ne" else None
-        return InnerResult(res.outcome, play, res.iterations, res.payoff_by_agent, res)
+        return InnerResult(
+            res.outcome,
+            play,
+            res.iterations,
+            res.payoff_by_agent,
+            res,
+            initial_query_s=res.initial_query_s,
+            initial_play=res.initial_play,
+            initial_rewards=res.initial_rewards,
+            returned_initial=res.returned_initial,
+        )
 
     return run
 
@@ -256,6 +319,28 @@ def synthesis_game(
         symmetry=False,
         initial_constraints=init,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CegarInitial:
+    """The initial query of one inner call, reported as soon as it is answered.
+
+    Attributes:
+        iteration: the iteration of Algorithm 4 (1-based).
+        blocks: ``|P|`` of the call's partition.
+        query_s: wall-clock time of the query.
+        abstract_rewards: rewards of the initial play in the call's game.
+        lifted_rewards: ``r_a`` in ``M`` of its lift (first call only).
+        status: the answer to the query, ``"sat"``, ``"unsat"`` or
+            ``"unknown"``.
+    """
+
+    iteration: int
+    blocks: int
+    query_s: float | None
+    abstract_rewards: tuple[int, ...] | None
+    lifted_rewards: tuple[int, ...] | None
+    status: str = "sat"
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +439,10 @@ class CegarIteration:
         blocks_after: ``|P|`` at the end of the iteration.
         verify_queries: number of VerifyNE queries.
         time_s: wall-clock time of the iteration.
+        initial_query_s: time of the inner run's initial query, if known.
+        initial_rewards: rewards of the inner run's initial play in the
+            game of this iteration (abstract rewards), if known.
+        returned_initial: the inner run returned its initial play.
     """
 
     index: int
@@ -369,6 +458,9 @@ class CegarIteration:
     blocks_after: int
     verify_queries: int
     time_s: float
+    initial_query_s: float | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +492,12 @@ class CegarResult:
             the iterations of the loop.
         partition: the final partition.
         trace: one :class:`CegarIteration` per iteration.
+        initial_query_s: time of the initial query of the first inner call.
+        initial_play: the lift (Definition 6.2.1) of the initial play of
+            the first inner call, a play of ``M``.
+        initial_rewards: ``r_a`` of that lifted play in ``M``.
+        returned_initial: the run returned in its first iteration the
+            initial play of the first inner call (lifted and verified).
 
     The returned joint strategy is ``completion()``, the canonical completion
     of ``play`` (line 20 of Algorithm 4).
@@ -421,6 +519,10 @@ class CegarResult:
     inner_iterations: int = 0
     partition: Partition | None = None
     trace: tuple[CegarIteration, ...] = ()
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
 
     @property
     def rewards(self) -> tuple[int, ...] | None:
@@ -472,7 +574,10 @@ def solve_cegar(
     horizon: int | None = None,
     initial_partition: str | Partition = "orbit",
     synthesiser: str | SynthesiseFn = "sibis",
-    max_iters: int = 30,
+    max_iters: int | None = 30,
+    inner_max_iters: int | None | EllipsisType = SAME,
+    discrete_max_iters: int | None | EllipsisType = SAME,
+    initial: str = "satisfying",
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -481,6 +586,7 @@ def solve_cegar(
     seed: int = 0,
     max_refinements: int | None = None,
     time_limit_s: float | None = None,
+    on_initial: Callable[[CegarInitial], None] | None = None,
 ) -> CegarResult:
     """Run CEGAR-NE (Algorithm 4) on ``M = (Agt, T, d)``.
 
@@ -497,9 +603,21 @@ def solve_cegar(
         ``"sibis"`` (default, as in Chapter 7), ``"ibis"``, ``"qibis"``, or
         any :data:`SynthesiseFn`.
     max_iters
-        The iteration bound ``N`` of the inner synthesiser, the same bound
-        as a direct run (Section 7.2).  It does not bound the loop of
-        Algorithm 4, which needs no bound (Theorem 6.4.2).
+        The iteration bound ``N`` of the inner synthesiser at every
+        partition, the same bound as a direct run; ``None`` means no bound.
+        It does not bound the loop of Algorithm 4, which needs no bound
+        (Theorem 6.4.2).
+    inner_max_iters, discrete_max_iters
+        Separate bounds of the inner synthesiser at a coarse partition and
+        at the discrete partition, where nothing is left to refine; ``...``
+        (the default) takes *max_iters*, ``None`` means no bound.  The
+        thesis protocol bounds the coarse runs (CEGAR-NE refines after a
+        coarse run that ends without converging) and leaves the discrete
+        run unbounded, like a direct run.
+    initial
+        The initial query of every inner call, ``"satisfying"`` (``smt(F)``
+        of the call's game) or ``"collective"`` (its ``smt(F, f)``, with
+        weighted rewards at a coarse partition).
     timeout_ms
         Z3 timeout per query; an expired query answers unknown and the run
         stops with outcome ``"unk"``.
@@ -513,6 +631,9 @@ def solve_cegar(
         instead of refining more than *max_refinements* times, or with
         ``"t/o"`` at the start of an iteration once *time_limit_s* seconds
         have passed.
+    on_initial
+        Called with a :class:`CegarInitial` as soon as the initial query of
+        an inner call has been answered.
     progress, timing
         Log every iteration to stderr, with times.
     """
@@ -539,11 +660,16 @@ def solve_cegar(
         demands = tuple(demands)
         if len(demands) != n:
             raise ValueError("demands must have one entry per agent")
-    if max_iters < 0:
-        raise ValueError("max_iters must be >= 0")
+    coarse_bound = _bound(inner_max_iters, _bound(max_iters, None))
+    discrete_bound = _bound(discrete_max_iters, _bound(max_iters, None))
     if isinstance(synthesiser, str):
         synth = make_synthesiser(
-            synthesiser, max_iters=max_iters, timeout_ms=timeout_ms, seed=seed
+            synthesiser,
+            max_iters=coarse_bound,
+            discrete_max_iters=discrete_bound,
+            initial=initial,
+            timeout_ms=timeout_ms,
+            seed=seed,
         )
     else:
         synth = synthesiser
@@ -564,6 +690,7 @@ def solve_cegar(
     inner_total = 0
     last_play: Play | None = None
     last_rewards: tuple[int, ...] | None = None
+    first: dict[str, Any] = {}
 
     def _result(reason: str, it: int, k: int, ne: bool = False) -> CegarResult:
         play = last_play
@@ -588,7 +715,40 @@ def solve_cegar(
             inner_iterations=inner_total,
             partition=partition,
             trace=tuple(trace),
+            initial_query_s=first.get("query_s"),
+            initial_play=first.get("play"),
+            initial_rewards=first.get("rewards"),
+            returned_initial=bool(
+                ne and it == 1 and trace and trace[0].returned_initial
+            ),
         )
+
+    def _note_first(
+        abstract: AbstractRCMAS, query_s: float | None, play0: Play | None
+    ) -> CegarInitial:
+        """Record the initial play of the first inner call, lifted to ``M``."""
+        lifted = None if play0 is None else lift_play(abstract, play0)
+        r0 = (
+            None
+            if lifted is None
+            else rewards_from_owner(lifted.final_state, n, neighbors)
+        )
+        first.update(query_s=query_s, play=lifted, rewards=r0)
+        return CegarInitial(1, len(abstract.partition), query_s, None, r0)
+
+    def _initial_hook(it: int, abstract: AbstractRCMAS) -> Callable[[Any], None]:
+        def hook(init: Any) -> None:
+            if it == 1:
+                info = _note_first(abstract, init.query_s, init.play)
+            else:
+                info = CegarInitial(
+                    it, len(abstract.partition), init.query_s, None, None
+                )
+            info = replace(info, abstract_rewards=init.rewards, status=init.reason)
+            if on_initial is not None:
+                on_initial(info)
+
+        return hook
 
     def _push(row: dict[str, Any], started: float, **fields: Any) -> None:
         row.update(fields)
@@ -619,10 +779,16 @@ def solve_cegar(
         # Line 5: the abstract RCMAS.  Line 6: SynthesiseNE.
         abstract = build_abstract_rcmas(territory, n, partition)
         game = synthesis_game(abstract, demands=demands, symmetry=symmetry)
+        game = replace(game, on_initial=_initial_hook(it, abstract))
         inner = synth(game)
         inner_total += inner.iterations
         row["synthesis"] = inner.outcome
         row["inner_iterations"] = inner.iterations
+        row["initial_query_s"] = inner.initial_query_s
+        row["initial_rewards"] = inner.initial_rewards
+        row["returned_initial"] = inner.returned_initial
+        if it == 1 and not first:
+            _note_first(abstract, inner.initial_query_s, inner.initial_play)
         _log(
             f"cegar iter={it} blocks={k} horizon={game.horizon} "
             f"synthesis={inner.outcome} inner_iters={inner.iterations} "

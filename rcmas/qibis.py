@@ -8,8 +8,10 @@ before it returns it:
 1. (line 1) every agent's Q-table is pre-trained against uniformly random
    opponents for ``E_off`` episodes;
 2. (lines 2-6) the initial play ``pi^0`` is the play of a model of
-   ``smt(F)``; with symmetry reduction on, this is the only query that
-   carries the symmetry-breaking constraints (Section 5.4.5, Section 7.1);
+   ``smt(F)`` or, with ``initial="collective"``, of the collectively
+   optimal query ``smt(F, f)`` (Definition 4.6.1); with symmetry reduction
+   on, this is the only query that carries the symmetry-breaking
+   constraints (Section 5.4.5, Section 7.1);
 3. (lines 8-10) in iteration ``i`` the run stops if ``pi^i`` occurred
    before (outcome ``"n/c"``);
 4. (line 11) every Q-table is trained further for ``E_on`` episodes while
@@ -41,10 +43,15 @@ symmetry-breaking constraints.  When Z3 answers a query with unknown, the
 run stops with outcome ``"unk"`` and never reads the answer as the absence
 of an improvement (Section 7.1).
 
+The loop runs for ``i = 0, ..., N``, or without a bound if ``N`` is
+``None``; an unbounded loop ends at an equilibrium or at the first
+recurring play, since a game has finitely many plays.
+
 The result has the fields of :class:`~rcmas.ibis.IbisResult`: ``play``,
 ``rewards`` (``payoff_by_agent``), ``outcome`` (``"ne"``, ``"n/c"``,
-``"unk"`` or ``"uns"``), ``reason`` and ``iterations``, the index ``i`` of
-the iteration in which the run stopped (``N`` if the bound is reached).
+``"unk"`` or ``"uns"``), ``reason``, ``iterations``, the index ``i`` of
+the iteration in which the run stopped (``N`` if the bound is reached), and
+the initial play with the time of its query.
 """
 
 from __future__ import annotations
@@ -55,7 +62,17 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .ibis import OUTCOME_BY_REASON, BestResponse, BestResponseFn, smt_best_response
+from .ibis import (
+    OUTCOME_BY_REASON,
+    BestResponse,
+    BestResponseFn,
+    InitialHook,
+    failed_initial,
+    initial_play_of,
+    iteration_indices,
+    smt_best_response,
+    with_initial,
+)
 from .model import Coord, Territory
 from .qlearning import (
     LearningGame,
@@ -66,12 +83,12 @@ from .qlearning import (
     train_q,
 )
 from .smt_solve import (
+    INITIAL_QUERIES,
     BaseEncoding,
     ExtraConstraints,
     SmtSolution,
     best_response_from_base,
     build_base_encoding,
-    find_feasible_from_base,
 )
 from .strategy import ActionCandidates, CanonicalCompletion, Play, canonical_completion
 
@@ -94,10 +111,18 @@ RestrictedBestResponseFn = Callable[
 
 @dataclass(frozen=True, slots=True)
 class QibisConfig:
-    """Parameters of Q-IBIS; the defaults are those of Section 4.9 and Chapter 7.
+    """Parameters of Q-IBIS; the defaults are those of Section 4.9.
+
+    ``max_iters`` and ``initial`` default to the first run of Chapter 7
+    (``N = 30``, ``smt(F)``); the revised protocol of
+    ``experiments/thesis-eval.toml`` sets ``max_iters=None`` and
+    ``initial="collective"``.
 
     Attributes:
-        max_iters: the iteration bound ``N`` (the loop runs ``i = 0..N``).
+        max_iters: the iteration bound ``N`` (the loop runs ``i = 0..N``);
+            ``None`` runs the loop without a bound.
+        initial: the query for the initial play, ``"satisfying"``
+            (``smt(F)``) or ``"collective"`` (``smt(F, f)``).
         top_k: ``k`` of ``TopK``.
         offline_episodes: ``E_off``, episodes per agent of the pre-training.
         online_episodes: ``E_on``, episodes per agent in every iteration.
@@ -114,7 +139,8 @@ class QibisConfig:
         demands: ``d(a)`` for every agent (``None`` = all 0).
     """
 
-    max_iters: int = 30
+    max_iters: int | None = 30
+    initial: str = "satisfying"
     top_k: int = 3
     offline_episodes: int = 800
     online_episodes: int = 1000
@@ -196,6 +222,8 @@ class QibisResult:
         play: the final play ``pi^i`` (tool sector indices).
         outcome: ``"ne"``, ``"n/c"``, ``"unk"`` or ``"uns"``.
         trace: one :class:`QibisIteration` per iteration.
+        initial, initial_query_s, initial_play, initial_rewards: the initial
+            query and its play, as in :class:`~rcmas.ibis.IbisResult`.
 
     The returned joint strategy is ``completion()``, the canonical
     completion of ``play`` (Definition 4.4.2).
@@ -211,11 +239,20 @@ class QibisResult:
     play: Play | None = None
     outcome: str = ""
     trace: tuple[QibisIteration, ...] = ()
+    initial: str = "satisfying"
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
 
     @property
     def rewards(self) -> tuple[int, ...] | None:
         """``r_a(play)`` (alias of ``payoff_by_agent``)."""
         return self.payoff_by_agent
+
+    @property
+    def returned_initial(self) -> bool:
+        """The run returned the initial play ``pi^0`` (an equilibrium in iteration 0)."""
+        return self.found_ne and self.iterations == 0
 
     def completion(self) -> CanonicalCompletion | None:
         """The canonical completion of the final play, or ``None``."""
@@ -360,7 +397,7 @@ def run_qibis_loop(
     restricted_best_response: RestrictedBestResponseFn,
     best_response: BestResponseFn,
     rewards_of: Callable[[StateKey], tuple[int, ...]],
-    max_iters: int,
+    max_iters: int | None,
     territory: Territory | None = None,
     log: Callable[[str], None] | None = None,
 ) -> QibisResult:
@@ -371,7 +408,8 @@ def run_qibis_loop(
     answers the restricted query (line 14); *best_response* answers the
     unrestricted query of the certification round (line 19).  *rewards_of*
     evaluates ``r_a`` on a final control vector.  The loop runs for
-    ``i = 0, ..., max_iters``.
+    ``i = 0, ..., max_iters``, or until it returns if *max_iters* is
+    ``None``.
     """
 
     def _log(msg: str) -> None:
@@ -406,16 +444,13 @@ def run_qibis_loop(
             )
         return ip
 
-    if max_iters < 0:
-        raise ValueError("max_iters must be >= 0")
-
     play = initial_play
     solution = initial_solution
     seen: set[Play] = set()
     trace: list[QibisIteration] = []
     n = play.num_agents
 
-    for i in range(max_iters + 1):
+    for i in iteration_indices(max_iters):
         current = rewards_of(play.final_state)
         if play in seen:
             _log(f"iter={i} play recurs")
@@ -498,6 +533,7 @@ def run_qibis_loop(
         play = new_play
         solution = responses[chosen].solution
 
+    assert max_iters is not None  # an unbounded loop returns inside
     return _result("max_iters", play, solution, max_iters)
 
 
@@ -518,8 +554,12 @@ def _validate(
         raise ValueError(
             f"horizon must be m = floor(|T|/|Agt|) = {m} (Definition 3.9.1), got {horizon}"
         )
-    if cfg.max_iters < 0:
-        raise ValueError("max_iters must be >= 0")
+    if cfg.max_iters is not None and cfg.max_iters < 0:
+        raise ValueError("max_iters must be >= 0 or None")
+    if cfg.initial not in INITIAL_QUERIES:
+        raise ValueError(
+            f"initial must be one of {INITIAL_QUERIES}, got {cfg.initial!r}"
+        )
     if cfg.top_k < 0:
         raise ValueError("top_k must be >= 0")
     if cfg.offline_episodes < 0 or cfg.online_episodes < 0:
@@ -538,6 +578,7 @@ def solve_qibis(
     weight_balance_target: int | None = None,
     initial_constraints: ExtraConstraints | None = None,
     initial_play: Play | None = None,
+    on_initial: InitialHook | None = None,
 ) -> QibisResult:
     """Run Q-IBIS (Algorithm 3) with the parameters of *cfg*.
 
@@ -545,8 +586,10 @@ def solve_qibis(
     *weights* and *custom_neighbors* describe an abstract RCMAS (Definition
     6.1.2); grid symmetry is then skipped, and the symmetry constraints of
     the abstract game can be passed as *initial_constraints*, which are
-    added to the initial query only.  *initial_play* replaces the initial
-    query.
+    added to the initial query only.  ``cfg.initial`` selects the initial
+    query, ``smt(F)`` or ``smt(F, f)``; *initial_play* replaces it.
+    *on_initial* is called with the outcome of the initial query as soon as
+    it is known.
     """
     h = _validate(territory, num_agents, horizon, cfg)
     t0 = time.perf_counter()
@@ -575,39 +618,42 @@ def solve_qibis(
     learner.pretrain(cfg.offline_episodes)
     _log(f"pretrained episodes={cfg.offline_episodes} per agent")
 
-    # Lines 2-6: the initial play, from smt(F).
-    if initial_play is None:
-        abstract = weights is not None or custom_neighbors is not None
-        if cfg.symmetry and abstract and initial_constraints is None:
-            _log(
-                "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
-            )
-        init = find_feasible_from_base(
-            base,
-            symmetry=cfg.symmetry and not abstract,
-            extra_constraints=initial_constraints,
-            timeout_ms=cfg.timeout_ms,
+    # Lines 2-6: the initial play, from smt(F) or smt(F, f).
+    abstract = weights is not None or custom_neighbors is not None
+    if (
+        initial_play is None
+        and cfg.symmetry
+        and abstract
+        and initial_constraints is None
+    ):
+        _log(
+            "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
         )
-        if init.reason == "unknown":
-            _log("initial query: solver answered unknown")
-            return QibisResult(
-                False, "unknown", False, 0, None, None, None, outcome="unk"
-            )
-        if not init.is_sat:
-            _log("initial query unsatisfiable: no satisfying strategy exists")
-            return QibisResult(
-                False, "unsat", False, 0, None, None, None, outcome="uns"
-            )
-        assert init.play is not None
-        start, start_sol = init.play, init
-    else:
-        if initial_play.num_agents != num_agents or initial_play.horizon != h:
-            raise ValueError("initial_play does not match the game")
-        start, start_sol = initial_play, None
+    init = initial_play_of(
+        base,
+        initial=cfg.initial,
+        symmetry=cfg.symmetry and not abstract,
+        extra_constraints=initial_constraints,
+        timeout_ms=cfg.timeout_ms,
+        given=initial_play,
+    )
+    if on_initial is not None:
+        on_initial(init)
+    if init.reason == "unknown":
+        _log(f"initial query ({cfg.initial}): solver answered unknown")
+        return failed_initial(QibisResult, init)
+    if init.play is None:
+        _log("initial query unsatisfiable: no satisfying strategy exists")
+        return failed_initial(QibisResult, init)
+    if init.query_s is not None:
+        _log(
+            f"initial query ({cfg.initial}): rewards={init.rewards} "
+            f"in {init.query_s:.3f}s"
+        )
 
-    return run_qibis_loop(
-        initial_play=start,
-        initial_solution=start_sol,
+    res = run_qibis_loop(
+        initial_play=init.play,
+        initial_solution=init.solution,
         refine=lambda play: learner.refine(play, cfg.online_episodes),
         restricted_best_response=restricted_smt_best_response(base, cfg.timeout_ms),
         best_response=smt_best_response(base, cfg.timeout_ms),
@@ -616,3 +662,4 @@ def solve_qibis(
         territory=territory,
         log=_log if cfg.progress else None,
     )
+    return with_initial(res, init)

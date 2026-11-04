@@ -15,6 +15,9 @@ push/pop scope, so these checks run in Z3's incremental mode:
 - :func:`find_feasible_from_base`: ``smt(F)``, the initial play of IBIS,
   S-IBIS and Q-IBIS (line 1 of Algorithm 1), optionally with the
   symmetry-breaking constraints;
+- :func:`initial_from_base`: the query for the initial play, either
+  ``smt(F)`` or the collectively optimal query ``smt(F, f)`` of Definition
+  4.6.1, optionally with the symmetry-breaking constraints;
 - :func:`best_response_from_base`: the best-response query
   ``smt(G_a(pi), reward_a)`` with ``G_a(pi) = F and [Fix^a_pi]``
   (Definition 4.7.1), on Z3's optimisation engine;
@@ -25,7 +28,8 @@ push/pop scope, so these checks run in Z3's incremental mode:
 
 The symmetry-breaking constraints of Chapter 5 are never part of ``F``.
 :func:`symmetry_constraints` adds them, and the tool uses it only for the
-initial query of IBIS, S-IBIS and Q-IBIS and for satisfying and
+initial query of IBIS, S-IBIS and Q-IBIS (satisfying or collectively
+optimal) and for satisfying and
 collectively optimal synthesis (:func:`solve_smt_game`,
 :func:`solve_collective_optimality`), never in a best-response or
 verification query (Section 5.4.5 and Section 7.1).
@@ -431,6 +435,52 @@ def solve_from_base(
     if res != sat:
         return _no_model(res)
     return _extract_solution(opt.model(), base, debug)
+
+
+INITIAL_QUERIES = ("satisfying", "collective")
+"""Queries for the initial play ``pi^0``: ``smt(F)`` or ``smt(F, f)``."""
+
+
+def initial_from_base(
+    base: BaseEncoding,
+    *,
+    initial: str = "satisfying",
+    symmetry: bool = False,
+    extra_constraints: ExtraConstraints | None = None,
+    timeout_ms: int | None = None,
+) -> SmtSolution:
+    """The query whose model gives the initial play ``pi^0`` of IBIS, S-IBIS and Q-IBIS.
+
+    *initial* ``"satisfying"`` poses ``smt(F)`` (line 1 of Algorithm 1),
+    ``"collective"`` the collectively optimal query ``smt(F, f)`` with
+    ``f = sum_a reward_a`` (Definition 4.6.1; in an abstract game the
+    rewards are weighted).  A model of either query is a model of ``F``,
+    which is all that Theorem 4.7.3 needs of ``pi^0``.  With *symmetry* the
+    symmetry-breaking constraints of the territory are added; the solution
+    sets of both queries are closed under the symmetry group, so the
+    constraints keep a model of each (Section 5.4.5).  *extra_constraints*
+    adds further constraints to this query only, for example the symmetry
+    constraints of an abstract game.
+    """
+    if initial not in INITIAL_QUERIES:
+        raise ValueError(f"initial must be one of {INITIAL_QUERIES}, got {initial!r}")
+    if initial == "satisfying":
+        return find_feasible_from_base(
+            base,
+            symmetry=symmetry,
+            extra_constraints=extra_constraints,
+            timeout_ms=timeout_ms,
+        )
+
+    def extra(solver: Any, v: SmtVariables) -> None:
+        if extra_constraints is not None:
+            extra_constraints(solver, v)
+        if symmetry:
+            symmetry_constraints(solver, v, base.territory, base.demands)
+
+    return solve_from_base(
+        base, objective="sum", extra_constraints=extra, timeout_ms=timeout_ms
+    )
 
 
 def best_response_from_base(
