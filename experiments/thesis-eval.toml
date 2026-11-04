@@ -8,6 +8,16 @@
 # configurations and 560 runs.  T-5x5 (13 sectors) has no such n and is
 # therefore not listed.
 #
+# Protocol of the revised evaluation.  The direct runs of IBIS, S-IBIS and
+# Q-IBIS have no iteration bound: a run stops at an equilibrium, at the
+# first recurring play, or at the time limit.  Every synthesis call takes
+# its initial play from the collectively optimal query smt(F, f)
+# (Definition 4.6.1), with the symmetry-breaking constraints when symmetry
+# reduction is on.  The inner S-IBIS of CEGAR-NE keeps the bound 30 at a
+# coarse partition, after which CEGAR-NE refines, and has no bound at the
+# discrete partition, where nothing is left to refine.  The first run used
+# N = 30 everywhere and smt(F); experiments/thesis-eval-n30.toml repeats it.
+#
 # Usage (./reproduce.sh runs this and the rest of the pipeline):
 #   python -m experiments.run --config experiments/thesis-eval.toml --list
 #   python -m experiments.run --config experiments/thesis-eval.toml \
@@ -17,11 +27,14 @@
 name = "thesis-eval"
 
 [protocol]
-time_limit_s = 900   # wall-clock limit per run (Section 7.2)
-runs = 1             # one run per (instance, configuration)
-max_iters = 30       # iteration bound N, also of the inner S-IBIS of CEGAR-NE
-demand = 0           # d(a) = 0 for every agent
-seed = 0             # seed of the Q-IBIS learners
+time_limit_s = 900                 # wall-clock limit per run (Section 7.2)
+runs = 1                           # one run per (instance, configuration)
+max_iters = "none"                 # no iteration bound for IBIS, S-IBIS, Q-IBIS
+initial = "collective"             # initial play from smt(F, f)
+cegar_inner_max_iters = 30         # inner S-IBIS of CEGAR-NE, coarse partition
+cegar_discrete_max_iters = "none"  # inner S-IBIS of CEGAR-NE, discrete partition
+demand = 0                         # d(a) = 0 for every agent
+seed = 0                           # seed of the Q-IBIS learners
 
 [grids]
 symmetric = [

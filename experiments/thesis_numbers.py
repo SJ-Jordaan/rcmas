@@ -36,12 +36,24 @@ thesis from the examined log, see ``tests/test_experiments.py``):
   as slow" a speed-up of at most 1/2;
 * a median speed-up is "within the measured variation" ``v`` if it lies in
   ``[1/(1+v), 1+v]``.
+
+The report reads logs of both protocols of the evaluation: the first run
+(iteration bound ``N = 30`` everywhere, initial play from ``smt(F)``) and the
+revised protocol (no bound for the direct runs, initial play from
+``smt(F, f)``, CEGAR-NE inner bound 30 at a coarse and none at the discrete
+partition).  Besides the markers it reports the protocol of the log, the
+share of returned equilibria in which every agent has reward ``m``, the
+runs that returned their initial play, the median time of the initial query
+per algorithm with and without symmetry reduction (a run whose initial query
+did not finish within the limit counts as taking at least the limit), and
+the outcomes of the runs with the reason each run stopped.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -269,6 +281,42 @@ def _orbit_blocks_from_grid(grid_path: str) -> int | None:
         return None
 
 
+REASON_LABEL = {
+    "cycle": "recurrence",
+    "max_iters": "bound",
+    "failure_no_candidate": "no candidate",
+    "failure_refuted": "refuted",
+    "unknown": "unknown",
+    "unsat": "unsatisfiable",
+    "timeout": "limit",
+    "max_refinements": "refinement cap",
+}
+
+
+def outcome_reason(r: Run) -> str:
+    """``"n/c (recurrence)"``-style label of how a run stopped."""
+    if r.outcome in ("ne", "t/o", "error"):
+        if r.outcome == "ne" and not r.solved:
+            return "ne (not certified)"
+        return r.outcome
+    label = REASON_LABEL.get(str(r.reason), str(r.reason))
+    return f"{r.outcome} ({label})"
+
+
+def bound_text(n: int | None) -> str:
+    return "none" if n is None else str(n)
+
+
+def protocol_text(p: dict[str, Any]) -> str:
+    return (
+        f"direct runs N = {bound_text(p.get('max_iters'))}, initial play "
+        f"{'smt(F, f)' if p.get('initial') == 'collective' else 'smt(F)'} "
+        f"({p.get('initial')}), CEGAR-NE inner N = "
+        f"{bound_text(p.get('cegar_inner_max_iters'))} at a coarse and "
+        f"{bound_text(p.get('cegar_discrete_max_iters'))} at the discrete partition"
+    )
+
+
 class Analysis:
     """The quantities behind the ``\\rerun`` markers, computed from the logs."""
 
@@ -362,6 +410,70 @@ class Analysis:
         if x is None or v is None:
             return None
         return 1 / (1 + v) <= x <= 1 + v
+
+    # -- protocol and initial play ---------------------------------------
+    @property
+    def protocol(self) -> dict[str, Any]:
+        return self.d.protocol
+
+    @property
+    def max_iters(self) -> int | None:
+        return self.d.max_iters
+
+    def all_m_share(self, runs: list[Run] | None = None) -> tuple[int, int]:
+        """(equilibria in which every agent has reward ``m``, equilibria) among solved runs."""
+        solved = self.solved_runs() if runs is None else [r for r in runs if r.solved]
+        return sum(r.all_at_bound for r in solved), len(solved)
+
+    def returned_initial(self, alg: str, sym: bool) -> list[Run] | None:
+        """Solved runs of a configuration that returned their initial play (``None``: not recorded)."""
+        runs = self.d.runs_of(alg, sym)
+        if not any(r.has_initial_fields for r in runs):
+            return None
+        return [r for r in runs if r.solved and r.initial_was_ne]
+
+    def initial_all_m(self, alg: str, sym: bool) -> tuple[int, int] | None:
+        """(runs whose initial play gives every agent ``m``, runs with a recorded initial play)."""
+        runs = [r for r in self.d.runs_of(alg, sym) if r.initial_rewards is not None]
+        if not any(r.has_initial_fields for r in self.d.runs_of(alg, sym)):
+            return None
+        return sum(bool(r.initial_all_m) for r in runs), len(runs)
+
+    def initial_query_times(
+        self, alg: str, sym: bool
+    ) -> tuple[float | None, int, int] | None:
+        """Median time of the initial query, runs counted, and runs whose query did not finish.
+
+        A run whose initial query was not answered (cut off at the limit,
+        or answered unknown at the Z3 timeout) counts as taking at least the
+        limit (``inf`` in the median).  ``None`` if the log does not record
+        the initial query.
+        """
+        runs = [r for r in self.d.runs_of(alg, sym) if r.has_initial_fields]
+        if not runs:
+            return None
+        xs: list[float] = []
+        unfinished = 0
+        for r in runs:
+            t = r.initial_query_s
+            if t is not None and r.initial_query_finished:
+                xs.append(t)
+            elif r.outcome in ("t/o", "unk"):
+                xs.append(float("inf"))
+                unfinished += 1
+        med = statistics.median(xs) if xs else None
+        return med, len(xs), unfinished
+
+    def outcomes_by_reason(self) -> dict[tuple[str, bool], dict[str, int]]:
+        """For every configuration: ``"outcome (reason)" -> number of runs``."""
+        out: dict[tuple[str, bool], dict[str, int]] = {}
+        for cfg in self.d.configs:
+            counts: dict[str, int] = {}
+            for r in self.d.runs_of(*cfg):
+                key = outcome_reason(r)
+                counts[key] = counts.get(key, 0) + 1
+            out[cfg] = counts
+        return out
 
     # -- time curves ----------------------------------------------------
     def solved_within(self, alg: str, sym: bool, t: float) -> int:
@@ -868,7 +980,7 @@ def _iterations(a: Analysis, o: Occurrence) -> Finding:
     from collections import Counter
 
     by_cfg = Counter(config_label(r.algorithm, r.symmetry) for r in all_nc)
-    N = a.d.runs[0].raw.get("max_iters", 30) if a.d.runs else 30
+    N = a.max_iters
     vals = [
         ("max iterations of a solved IBIS/S-IBIS run", str(mx)),
         (
@@ -880,16 +992,29 @@ def _iterations(a: Analysis, o: Occurrence) -> Finding:
             ", ".join(f"{k} {v}" for k, v in sorted(by_cfg.items())) or "none",
         ),
     ]
-    proposed = (
-        f"\\gls{{ibis}} and \\gls{{sibis}} need at most {words(mx) if mx is not None else '--'} improvement iterations on every instance they solve, "
-        f"while {len(q_bound)} \\gls{{qibis}} runs reach the iteration bound of {N} without an equilibrium (``n/c'')"
-        + (f" and {len(q_cycle)} return to an earlier play" if q_cycle else "")
-        + "."
+    head = f"\\gls{{ibis}} and \\gls{{sibis}} need at most {words(mx) if mx is not None else '--'} improvement iterations on every instance they solve, "
+    if N is None:
+        proposed = (
+            head
+            + f"while {len(q_cycle)} \\gls{{qibis}} runs return to an earlier play without an equilibrium (``n/c'')."
+        )
+    else:
+        proposed = (
+            head
+            + f"while {len(q_bound)} \\gls{{qibis}} runs reach the iteration bound of {N} without an equilibrium (``n/c'')"
+            + (f" and {len(q_cycle)} return to an earlier play" if q_cycle else "")
+            + "."
+        )
+    note = (
+        "The direct runs have no iteration bound in this protocol, so a Q-IBIS run ends n/c only by recurrence."
+        if N is None
+        else None
     )
-    note = None
     others = sum(v for k, v in by_cfg.items() if not k.startswith("Q-IBIS"))
     if others:
-        note = f"{others} runs of other configurations also end n/c (see above)."
+        note = (
+            note + " " if note else ""
+        ) + f"{others} runs of other configurations also end n/c (see above)."
     return Finding(values=vals, proposed=proposed, note=note)
 
 
@@ -1405,8 +1530,23 @@ def _qibis_bound(a: Analysis, o: Occurrence) -> Finding:
         for r in a.d.runs
         if r.algorithm == "qibis" and r.outcome == "n/c" and r.reason == "max_iters"
     ]
+    cyc = [
+        r
+        for r in a.d.runs
+        if r.algorithm == "qibis" and r.outcome == "n/c" and r.reason == "cycle"
+    ]
+    vals = [
+        ("Q-IBIS runs at the iteration bound", str(len(q))),
+        ("Q-IBIS runs ending by recurrence", str(len(cyc))),
+    ]
+    if a.max_iters is None:
+        return Finding(
+            values=vals,
+            proposed=f"In the evaluation, which had no iteration bound for the direct runs, {len(cyc)} \\gls{{qibis}} runs returned to an earlier play without an equilibrium.",
+            note="The direct runs have no iteration bound in this protocol; the sentence now counts the runs that end by recurrence.",
+        )
     return Finding(
-        values=[("Q-IBIS runs at the iteration bound", str(len(q)))],
+        values=vals,
         proposed=f"In the evaluation, {len(q)} \\gls{{qibis}} runs reached the iteration bound without an equilibrium.",
     )
 
@@ -1800,6 +1940,97 @@ def _session_lines(a: Analysis) -> list[str]:
     return out or ["- no session header (log of the examined runner)"]
 
 
+def _initial_section(a: Analysis) -> list[str]:
+    """Equilibria at the bound ``m``, runs that returned their initial play,
+    initial-query times and stopping reasons."""
+    lines = ["## Initial play, equilibria at the bound m, and stopping reasons", ""]
+    k, n = a.all_m_share()
+    lines.append(
+        f"- equilibria (solved runs) in which every agent has reward m: {k} of {n}"
+        + (f" ({pct(k / n)})" if n else "")
+    )
+    if not a.d.has_initial_fields:
+        lines.append(
+            "- the log does not record the initial play (a log of the first run "
+            "or of the examined runner): no initial-query times and no count of "
+            "runs that returned their initial play"
+        )
+    lines.append("")
+    lines.append(
+        "| configuration | equilibria with every reward m | returned the initial play "
+        "| initial play with every reward m | median initial query (s) |"
+    )
+    lines.append("|---|---|---|---|---|")
+    for alg, sym in a.d.configs:
+        kk, nn = a.all_m_share(a.d.runs_of(alg, sym))
+        ret = a.returned_initial(alg, sym)
+        im = a.initial_all_m(alg, sym)
+        iq = a.initial_query_times(alg, sym)
+        if iq is None:
+            iq_s = "--"
+        else:
+            med, cnt, unf = iq
+            med_s = (
+                "> limit"
+                if med == float("inf")
+                else t1(med) if med is None else f"{med:.2f}"
+            )
+            iq_s = f"{med_s} over {cnt} runs" + (
+                f", {unf} not answered within the limit" if unf else ""
+            )
+        lines.append(
+            f"| {config_label(alg, sym)} | {kk} of {nn} | "
+            f"{'--' if ret is None else len(ret)} | "
+            f"{'--' if im is None else f'{im[0]} of {im[1]}'} | {iq_s} |"
+        )
+    lines.append("")
+    lines.append(
+        "Initial-query medians per algorithm, without / with symmetry reduction (s):"
+    )
+    lines.append("")
+    for alg in a.algs:
+        cells = []
+        for sym in (False, True):
+            iq = a.initial_query_times(alg, sym)
+            if iq is None or iq[0] is None:
+                cells.append("--")
+            elif iq[0] == float("inf"):
+                cells.append("> limit")
+            else:
+                cells.append(f"{iq[0]:.2f}")
+        lines.append(f"- {PLAIN.get(alg, alg)}: {cells[0]} / {cells[1]}")
+    lines.append("")
+    lines.append("Outcomes by the reason each run stopped:")
+    lines.append("")
+    table = a.outcomes_by_reason()
+    keys = sorted({k for c in table.values() for k in c}, key=_outcome_order)
+    lines.append("| configuration | " + " | ".join(keys) + " |")
+    lines.append("|---|" + "---|" * len(keys))
+    for cfg, counts in table.items():
+        lines.append(
+            f"| {config_label(*cfg)} | "
+            + " | ".join(str(counts.get(k, 0)) for k in keys)
+            + " |"
+        )
+    totals = {k: sum(c.get(k, 0) for c in table.values()) for k in keys}
+    lines.append("| all | " + " | ".join(str(totals[k]) for k in keys) + " |")
+    return lines
+
+
+def _outcome_order(key: str) -> tuple[int, str]:
+    order = ["ne", "ne (not certified)", "t/o", "n/c", "fail", "unk", "uns", "error"]
+    head = key.split(" ", 1)[0]
+    return (order.index(head) if head in order else len(order), key)
+
+
+PLAIN = {
+    "ibis": "IBIS",
+    "sibis": "S-IBIS",
+    "qibis": "Q-IBIS",
+    "cegar-sibis": "CEGAR-NE",
+}
+
+
 def build_report(
     a: Analysis,
     occurrences: list[Occurrence],
@@ -1817,6 +2048,15 @@ def build_report(
     lines.append("")
     lines.append("## Provenance of the log")
     lines += _session_lines(a)
+    lines.append("")
+    lines.append("## Protocol")
+    lines.append("")
+    for proto in a.d.protocols or [a.protocol]:
+        lines.append(f"- {protocol_text(proto)}")
+    if len(a.d.protocols) > 1:
+        lines.append(
+            "- **the log mixes synthesis protocols; its numbers are not comparable**"
+        )
     lines.append("")
     lines.append("## Data checks")
     expected = a.N * len(a.d.configs)
@@ -1853,6 +2093,8 @@ def build_report(
         lines.append(
             f"| {config_label(alg, sym)} | {a.count(alg, sym)}/{a.N} | {t1(a.median(alg, sym))} | {inst_label(big) if big else '--'} |"
         )
+    lines.append("")
+    lines += _initial_section(a)
     lines.append("")
     lines.append(f"## Markers ({len(occurrences)} occurrences)")
     lines.append("")
@@ -1965,11 +2207,32 @@ def facts(a: Analysis) -> dict[str, Any]:
             default=None,
         ),
         "certificates": a.certificate_counts(),
+        "protocol": a.protocol,
+        "equilibria_all_m": a.all_m_share()[0],
+        "equilibria": a.all_m_share()[1],
+        "returned_initial": None,
+        "outcomes_by_reason": {
+            config_label(*cfg): counts for cfg, counts in a.outcomes_by_reason().items()
+        },
     }
+    returned = [a.returned_initial(alg, sym) for alg, sym in a.d.configs]
+    if any(x is not None for x in returned):
+        out["returned_initial"] = sum(len(x) for x in returned if x is not None)
     for alg, sym in a.d.configs:
         key = config_label(alg, sym)
         out[f"solved[{key}]"] = a.count(alg, sym)
         out[f"median[{key}]"] = a.median(alg, sym)
+        ret = a.returned_initial(alg, sym)
+        out[f"returned_initial[{key}]"] = None if ret is None else len(ret)
+        iq = a.initial_query_times(alg, sym)
+        med = None if iq is None else iq[0]
+        over = med is not None and math.isinf(med)
+        # JSON has no infinity: a median above the limit is null with the flag set.
+        out[f"initial_query_median[{key}]"] = None if over else med
+        out[f"initial_query_median_over_limit[{key}]"] = over
+        out[f"initial_query_unfinished[{key}]"] = None if iq is None else iq[2]
+        k, n = a.all_m_share(a.d.runs_of(alg, sym))
+        out[f"equilibria_all_m[{key}]"] = k
     return out
 
 

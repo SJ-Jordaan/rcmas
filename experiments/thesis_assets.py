@@ -301,13 +301,35 @@ def scatter_cegar(d: Results) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _marks_sentence(marks: set[str]) -> str:
+NC_TEXT = {
+    frozenset({"max_iters"}): "a run that reached the iteration bound",
+    frozenset({"cycle"}): "a run that returned to an earlier play",
+}
+"""Caption text of ``n/c`` when the log has only one of its two reasons."""
+
+
+def nc_text(d: Results | None) -> str:
+    """What ``n/c`` stands for in the runs of *d*.
+
+    Without an iteration bound (the revised protocol) a direct run ends
+    ``n/c`` only by recurrence, so the caption does not mention a bound.
+    """
+    if d is None:
+        return MARK_TEXT["n/c"]
+    reasons = frozenset(
+        str(r.reason) for r in d.runs if r.outcome == "n/c" and not r.solved
+    )
+    return NC_TEXT.get(reasons, MARK_TEXT["n/c"])
+
+
+def _marks_sentence(marks: set[str], d: Results | None = None) -> str:
     """``\\emph{t/o} marks a timeout, \\emph{n/c} a run that ..., and ...``."""
     present = [m for m in MARK_ORDER if m in marks]
     parts = []
     for i, m in enumerate(present):
         verb = " marks " if i == 0 else " "
-        parts.append(rf"\emph{{{m}}}{verb}{MARK_TEXT[m]}")
+        text = nc_text(d) if m == "n/c" else MARK_TEXT[m]
+        parts.append(rf"\emph{{{m}}}{verb}{text}")
     if not parts:
         return ""
     if len(parts) == 1:
@@ -324,7 +346,7 @@ def _caption(d: Results, marks: set[str]) -> str:
         r"\caption[Per-instance synthesis times]{Wall-clock synthesis time in seconds"
         rf" for every instance and configuration, with a limit of {d.time_limit_s:g} seconds per run,"
         r" from the result logs of the archived version of the tool~\cite{rcmas2026zenodo}."
-        + _marks_sentence(marks)
+        + _marks_sentence(marks, d)
         + r" Paired columns are without and with symmetry reduction.}\label{tab:exp:full}\\"
     )
 

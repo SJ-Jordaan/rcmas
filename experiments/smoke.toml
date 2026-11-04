@@ -1,10 +1,10 @@
 # Smoke test of the reproduction pipeline (./reproduce.sh --smoke).
 #
 # Four small instances from three benchmark families, with the eight
-# configurations of the thesis evaluation and a limit of 30 s.  On the 4x4
-# grid some configurations reach the limit, so the timeout path is used too.
-# It exercises the sweep, the certifier, the assets and the numbers report
-# in a few minutes; its numbers mean nothing.
+# configurations and the protocol of the thesis evaluation
+# (experiments/thesis-eval.toml) and a limit of 30 s.  It exercises the
+# sweep, the certifier, the assets and the numbers report in a few minutes;
+# its numbers mean nothing.
 
 [suite]
 name = "smoke"
@@ -12,7 +12,10 @@ name = "smoke"
 [protocol]
 time_limit_s = 30
 runs = 1
-max_iters = 30
+max_iters = "none"
+initial = "collective"
+cegar_inner_max_iters = 30
+cegar_discrete_max_iters = "none"
 demand = 0
 seed = 0
 

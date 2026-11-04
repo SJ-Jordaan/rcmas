@@ -41,7 +41,25 @@ With ``resume=True`` the runs already in the log are skipped and new records
 are appended.  A resumed session must use the same tool commit, the same uncommitted
 changes (none, or the same ``git diff``), the same Z3 version,
 configuration file and protocol as the sessions already in the log, unless
-``allow_mixed`` is set, so that one log never mixes two versions.
+``allow_mixed`` is set, so that one log never mixes two versions.  The
+synthesis protocol (the iteration bounds and the initial query, recorded in
+the session header and in every run record) must always be the same:
+``allow_mixed`` does not override it (:class:`ProtocolMismatchError`).
+Logs of the first run of the thesis evaluation record only ``max_iters``;
+their other fields are read as ``initial = "satisfying"`` and CEGAR-NE
+bounds equal to ``max_iters`` (:func:`experiments.config.normalise_protocol`).
+
+A run record also describes the initial play of the run: the time of the
+initial query (``initial_query_s``; for CEGAR-NE that of the first inner
+call, with one entry per inner call in ``cegar_initial_queries`` and in
+``cegar_trace``), the rewards of the initial play in ``M``
+(``initial_rewards``, for CEGAR-NE of the lift of the first inner call's
+initial play), their sum (``initial_welfare``), whether every reward is
+``m`` (``initial_all_m``) and whether the run returned the initial play as
+its equilibrium (``initial_was_ne``).  The child reports the initial query
+as soon as it is answered, so a run killed at the limit keeps these fields;
+``initial_query_s`` is ``null`` on a timeout only if the initial query did
+not finish.
 """
 
 from __future__ import annotations
@@ -62,7 +80,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence, cast
 
-from .config import Protocol
+from .config import SYNTHESIS_FIELDS, Protocol, bound_text, normalise_protocol
 from .provenance import collect, relative_to_tool, sha256_file
 from .scenarios import Scenario
 
@@ -105,19 +123,66 @@ def _play_lists(play: Any) -> list[list[int]] | None:
     return [[int(x) for x in profile] for profile in play.actions]
 
 
+def _initial_fields(
+    query_s: float | None,
+    rewards: Any,
+    horizon: int,
+    returned_initial: bool,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """The ``initial_*`` fields of a run record.
+
+    ``initial_query_status`` is the answer to the initial query (``"sat"``,
+    ``"unsat"`` or ``"unknown"``, the last also when the query reached the
+    Z3 timeout).
+
+    ``initial_rewards`` are rewards in ``M`` (for CEGAR-NE those of the lift
+    of the first inner call's initial play), so ``initial_all_m`` says
+    whether every agent has reward ``m``, which makes the play an
+    equilibrium under any completion (Lemma 3.10.1).
+    """
+    r = None if rewards is None else [int(x) for x in rewards]
+    if status is None and query_s is not None:
+        status = "sat" if r is not None else "unknown"
+    return {
+        "initial_query_s": None if query_s is None else round(float(query_s), 4),
+        "initial_query_status": status,
+        "initial_rewards": r,
+        "initial_welfare": None if r is None else sum(r),
+        "initial_all_m": None if r is None else all(x == horizon for x in r),
+        "initial_was_ne": bool(returned_initial),
+    }
+
+
 def _run_algorithm(
     territory: Any,
     scenario: Scenario,
     protocol: Protocol,
     timeout_ms: int | None,
+    report: Any = None,
 ) -> dict[str, Any]:
-    """Run one synthesiser and return the fields of the run record it determines."""
+    """Run one synthesiser and return the fields of the run record it determines.
+
+    *report* ``(kind, payload)``, if given, is called as soon as an initial
+    query has been answered, so that a run that is killed at the limit
+    still records it (``"initial"`` for a direct run, ``"cegar_initial"``
+    for each inner call of CEGAR-NE).
+    """
     alg = scenario.algorithm
     n = scenario.num_agents
     h = scenario.horizon
     sym = scenario.symmetry
     demands = _demands(n, protocol.demand)
-    max_iters = protocol.max_iters
+
+    def send(kind: str, payload: dict[str, Any]) -> None:
+        if report is not None:
+            report(kind, payload)
+
+    def direct_hook(init: Any) -> None:
+        send(
+            "initial",
+            _initial_fields(init.query_s, init.rewards, h, False, init.reason),
+        )
 
     if alg in ("ibis", "sibis"):
         from rcmas.ibis import solve_ibis, solve_sibis
@@ -127,10 +192,12 @@ def _run_algorithm(
             territory=territory,
             num_agents=n,
             horizon=h,
-            max_iters=max_iters,
+            max_iters=protocol.max_iters,
+            initial=protocol.initial,
             symmetry=sym,
             timeout_ms=timeout_ms,
             demands=demands,
+            on_initial=direct_hook,
         )
         return {
             "tool_outcome": res.outcome,
@@ -139,19 +206,33 @@ def _run_algorithm(
             "rewards": list(res.payoff_by_agent) if res.payoff_by_agent else None,
             "iterations": res.iterations,
             "solver_checks": sum(it.checks for it in res.trace),
+            **_initial_fields(
+                res.initial_query_s,
+                res.initial_rewards,
+                h,
+                res.returned_initial,
+                _initial_status(res),
+            ),
         }
 
     if alg == "qibis":
         from rcmas.qibis import QibisConfig, solve_qibis
 
         cfg = QibisConfig(
-            max_iters=max_iters,
+            max_iters=protocol.max_iters,
+            initial=protocol.initial,
             symmetry=sym,
             timeout_ms=timeout_ms,
             demands=demands,
             seed=protocol.seed,
         )
-        qres = solve_qibis(territory=territory, num_agents=n, horizon=h, cfg=cfg)
+        qres = solve_qibis(
+            territory=territory,
+            num_agents=n,
+            horizon=h,
+            cfg=cfg,
+            on_initial=direct_hook,
+        )
         return {
             "tool_outcome": qres.outcome,
             "reason": qres.reason,
@@ -159,10 +240,33 @@ def _run_algorithm(
             "rewards": list(qres.payoff_by_agent) if qres.payoff_by_agent else None,
             "iterations": qres.iterations,
             "solver_checks": sum(it.checks for it in qres.trace),
+            **_initial_fields(
+                qres.initial_query_s,
+                qres.initial_rewards,
+                h,
+                qres.returned_initial,
+                _initial_status(qres),
+            ),
         }
 
     if alg in ("cegar-ibis", "cegar-qibis", "cegar-sibis"):
         from rcmas.cegar import solve_cegar
+
+        calls: list[dict[str, Any]] = []
+        first_status: list[str] = []
+
+        def cegar_hook(info: Any) -> None:
+            call = _cegar_call(info)
+            calls.append(call)
+            send("cegar_initial", call)
+            if info.iteration == 1:
+                send(
+                    "initial",
+                    _initial_fields(
+                        info.query_s, info.lifted_rewards, h, False, info.status
+                    ),
+                )
+                first_status.append(info.status)
 
         cres = solve_cegar(
             territory=territory,
@@ -170,11 +274,14 @@ def _run_algorithm(
             horizon=h,
             initial_partition=scenario.partition,
             synthesiser=alg.split("-", 1)[1],
-            max_iters=max_iters,
+            inner_max_iters=protocol.cegar_inner_max_iters,
+            discrete_max_iters=protocol.cegar_discrete_max_iters,
+            initial=protocol.initial,
             symmetry=sym,
             timeout_ms=timeout_ms,
             demands=demands,
             seed=protocol.seed,
+            on_initial=cegar_hook,
         )
         return {
             "tool_outcome": cres.outcome,
@@ -195,12 +302,53 @@ def _run_algorithm(
                     "inner_iterations": it.inner_iterations,
                     "refinement": it.refinement,
                     "time_s": round(it.time_s, 3),
+                    "initial_query_s": (
+                        None
+                        if it.initial_query_s is None
+                        else round(it.initial_query_s, 4)
+                    ),
+                    "initial_rewards": (
+                        None if it.initial_rewards is None else list(it.initial_rewards)
+                    ),
+                    "returned_initial": bool(it.returned_initial),
                 }
                 for it in cres.trace
             ],
+            "cegar_initial_queries": calls,
+            **_initial_fields(
+                cres.initial_query_s,
+                cres.initial_rewards,
+                h,
+                cres.returned_initial,
+                first_status[0] if first_status else None,
+            ),
         }
 
     raise ValueError(f"unknown algorithm: {alg}")
+
+
+def _initial_status(res: Any) -> str | None:
+    """The answer to the initial query of a direct run."""
+    if res.initial_query_s is None:
+        return None
+    if res.initial_play is not None:
+        return "sat"
+    return "unknown" if res.reason == "unknown" else "unsat"
+
+
+def _cegar_call(info: Any) -> dict[str, Any]:
+    """One entry of ``cegar_initial_queries``: the initial query of an inner call."""
+    return {
+        "iteration": int(info.iteration),
+        "blocks": int(info.blocks),
+        "status": info.status,
+        "initial_query_s": (
+            None if info.query_s is None else round(float(info.query_s), 4)
+        ),
+        "initial_rewards": (
+            None if info.abstract_rewards is None else list(info.abstract_rewards)
+        ),
+    }
 
 
 def _static_info(territory: Any) -> dict[str, Any]:
@@ -282,7 +430,7 @@ def _child_main(conn: Any, task: dict[str, Any]) -> None:
     """Entry point of a child process: one run, reported over *conn*."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _exit_when_orphaned(int(task.get("parent_pid") or os.getppid()))
-    protocol = Protocol(**task["protocol"])
+    protocol = Protocol(**task["protocol"])  # as_dict() of the parent's protocol
     scenario: Scenario = task["scenario"]
     if hasattr(signal, "alarm"):
         # Failsafe: SIGALRM terminates the child if the parent never kills it.
@@ -303,7 +451,11 @@ def _child_main(conn: Any, task: dict[str, Any]) -> None:
         conn.send(("started", static))
         t0 = time.perf_counter()
         raw = _run_algorithm(
-            territory, scenario, protocol, protocol.time_limit_s * 1000
+            territory,
+            scenario,
+            protocol,
+            protocol.time_limit_s * 1000,
+            report=lambda kind, payload: conn.send((kind, payload)),
         )
         elapsed = time.perf_counter() - t0
         conn.send(("result", raw, elapsed))
@@ -398,6 +550,9 @@ def _base_record(
         "run": run,
         "time_limit_s": protocol.time_limit_s,
         "max_iters": protocol.max_iters,
+        "initial": protocol.initial,
+        "cegar_inner_max_iters": protocol.cegar_inner_max_iters,
+        "cegar_discrete_max_iters": protocol.cegar_discrete_max_iters,
         "seed": protocol.seed,
     }
 
@@ -421,6 +576,13 @@ _RESULT_DEFAULTS: dict[str, Any] = {
     "cegar_at_discrete": None,
     "cegar_refinements": None,
     "cegar_trace": None,
+    "cegar_initial_queries": None,
+    "initial_query_s": None,
+    "initial_query_status": None,
+    "initial_rewards": None,
+    "initial_welfare": None,
+    "initial_all_m": None,
+    "initial_was_ne": False,
     "geo_group_order": None,
     "symmetry_group_order": None,
     "orbit_blocks": None,
@@ -440,11 +602,15 @@ def _finish_record(
     cert: dict[str, Any] | None,
     killed: bool = False,
     error: tuple[str, str] | None = None,
+    streamed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rec = dict(base)
     rec.update(_RESULT_DEFAULTS)
     if static:
         rec.update(static)
+    if streamed:
+        # Reported by the child while it ran: what a killed run still knows.
+        rec.update(streamed)
     limit = float(protocol.time_limit_s)
     if error is not None:
         rec["outcome"] = "error"
@@ -470,6 +636,8 @@ def _finish_record(
         if rec["rewards"] is not None:
             rec["welfare"] = sum(rec["rewards"])
     rec["found_ne"] = rec["outcome"] == "ne"
+    # The run returned its initial play only if it returned an equilibrium.
+    rec["initial_was_ne"] = bool(rec["found_ne"] and rec.get("initial_was_ne"))
     if rec["found_ne"] and cert is None:
         cert = {"status": "unchecked", "reason": "not certified in this session"}
     rec["certificate"] = cert
@@ -538,12 +706,38 @@ def _compat_key(header: dict[str, Any]) -> dict[str, Any]:
         "tool_diff_sha256": tool.get("diff_sha256"),
         "z3_version": header.get("z3_version"),
         "config_sha256": header.get("config_sha256"),
-        "protocol": header.get("protocol"),
+        "protocol": normalise_protocol(header.get("protocol")),
     }
+
+
+def _synthesis_protocol(header: dict[str, Any]) -> dict[str, Any] | None:
+    proto = normalise_protocol(header.get("protocol"))
+    if proto is None:
+        return None
+    return {k: proto.get(k) for k in SYNTHESIS_FIELDS}
+
+
+def describe_protocol(protocol: Protocol | dict[str, Any]) -> str:
+    """The synthesis protocol in one line, e.g. ``N = none, initial collective, ...``."""
+    d = protocol.as_dict() if isinstance(protocol, Protocol) else protocol
+    d = normalise_protocol(d) or {}
+    return (
+        f"N = {bound_text(d.get('max_iters'))}, initial {d.get('initial')}, "
+        f"CEGAR-NE inner N = {bound_text(d.get('cegar_inner_max_iters'))} "
+        f"(coarse) / {bound_text(d.get('cegar_discrete_max_iters'))} (discrete)"
+    )
 
 
 class MixedLogError(RuntimeError):
     """A resumed session differs from the sessions already in the log."""
+
+
+class ProtocolMismatchError(MixedLogError):
+    """A resumed session has another synthesis protocol than the log.
+
+    The iteration bounds and the initial query change what the synthesisers
+    compute, so a log never mixes two of them, even with ``allow_mixed``.
+    """
 
 
 def _check_compatible(
@@ -560,6 +754,94 @@ def _check_compatible(
                     f"this session {value!r}"
                 )
     return sorted(set(problems))
+
+
+def _protocol_mismatches(
+    previous: Sequence[dict[str, Any]], current: dict[str, Any]
+) -> list[str]:
+    cur = _synthesis_protocol(current)
+    out = []
+    for header in previous:
+        old = _synthesis_protocol(header)
+        if old != cur:
+            out.append(
+                f"session {header.get('session')} ran with "
+                f"{describe_protocol(header.get('protocol') or {})}, this session "
+                f"with {describe_protocol(current.get('protocol') or {})}"
+            )
+    return sorted(set(out))
+
+
+@dataclass(frozen=True)
+class ResumeCheck:
+    """Whether a session may resume a log (see :func:`check_resume`).
+
+    Attributes:
+        status: ``"new"`` (no log, or an empty one), ``"ok"``, ``"protocol"``
+            (the log has another synthesis protocol; never resumable) or
+            ``"mixed"`` (another commit, Z3 version, configuration or
+            protocol field; resumable only with ``allow_mixed``).
+        problems: one line per difference.
+    """
+
+    status: str
+    problems: tuple[str, ...] = ()
+
+
+def _session_header(
+    *,
+    protocol: Protocol,
+    config_path: str | Path | None,
+    argv: list[str] | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return collect(
+        config_path=config_path,
+        argv=argv,
+        extra={
+            "kind": "session",
+            "schema": SCHEMA,
+            "protocol": protocol.as_dict(),
+            **(extra or {}),
+        },
+    )
+
+
+def _resume_status(
+    sessions: Sequence[dict[str, Any]], header: dict[str, Any]
+) -> ResumeCheck:
+    wrong_protocol = _protocol_mismatches(sessions, header)
+    if wrong_protocol:
+        return ResumeCheck("protocol", tuple(wrong_protocol))
+    problems = _check_compatible(sessions, header)
+    return ResumeCheck("mixed" if problems else "ok", tuple(problems))
+
+
+def check_resume(
+    log_path: str | Path,
+    *,
+    protocol: Protocol,
+    config_path: str | Path | None = None,
+) -> ResumeCheck:
+    """Could a session with *protocol* resume *log_path*?  Nothing is run or written.
+
+    ``./reproduce.sh`` calls this before a sweep, so that it can tell the
+    author what to do with a log of another protocol before the runner
+    refuses it.
+    """
+    path = Path(log_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return ResumeCheck("new")
+    sessions, runs, _ = read_log(path)
+    if not sessions:
+        if runs:
+            return ResumeCheck(
+                "mixed",
+                (f"{path} has no session header (a log of the examined runner)",),
+            )
+        return ResumeCheck("new")
+    header = _session_header(protocol=protocol, config_path=config_path, argv=None)
+    return _resume_status(sessions, header)
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +993,10 @@ def _execute(
                     job.static = msg[1]
                     job.started = time.monotonic()
                     job.deadline = job.started + limit + GRACE_S
+                elif kind == "initial":
+                    job.extra.update(msg[1])
+                elif kind == "cegar_initial":
+                    job.extra.setdefault("cegar_initial_queries", []).append(msg[1])
                 elif kind == "result":
                     job.raw, job.elapsed = msg[1], msg[2]
                     job.phase = "certifying"
@@ -909,14 +1195,12 @@ def _run_session(
 ) -> list[dict[str, Any]]:
     """The body of :func:`run_batch`, run while this session holds the log."""
     session_id = uuid.uuid4().hex[:12]
-    header = collect(
+    header = _session_header(
+        protocol=protocol,
         config_path=config_path,
         argv=argv,
         extra={
-            "kind": "session",
-            "schema": SCHEMA,
             "session": session_id,
-            "protocol": protocol.as_dict(),
             "workers": workers,
             "certify": certify,
             "cert_timeout_s": cert_timeout_s,
@@ -928,12 +1212,19 @@ def _run_session(
     done_keys: set[tuple] = set()
     if out_path is not None and resume and out_path.exists():
         sessions, prior, valid = read_log(out_path)
-        problems = _check_compatible(sessions, header)
-        if problems and not allow_mixed:
+        check = _resume_status(sessions, header)
+        if check.status == "protocol":
+            raise ProtocolMismatchError(
+                f"{out_path} was written with another synthesis protocol (iteration "
+                "bounds or initial query); resume would mix two protocols in one log, "
+                "which --allow-mixed does not permit. Move the log away or use a new "
+                "output file.\n  " + "\n  ".join(check.problems)
+            )
+        if check.problems and not allow_mixed:
             raise MixedLogError(
                 f"{out_path} was written by a different setup; resume would mix "
                 "results. Use a new output file, or pass --allow-mixed.\n  "
-                + "\n  ".join(problems)
+                + "\n  ".join(check.problems)
             )
         if valid < out_path.stat().st_size:
             with open(out_path, "r+b") as f:
@@ -972,7 +1263,7 @@ def _run_session(
         )
         print(
             f"{len(work)} runs to do ({skipped} already in the log), {workers} workers, "
-            f"limit {protocol.time_limit_s} s, N = {protocol.max_iters}",
+            f"limit {protocol.time_limit_s} s, {describe_protocol(protocol)}",
             file=sys.stderr,
         )
         if tool["dirty"]:
@@ -1008,6 +1299,7 @@ def _run_session(
             cert=kw.get("cert"),
             killed=kw.get("killed", False),
             error=kw.get("error"),
+            streamed=job.extra,
         )
 
     interrupted = False

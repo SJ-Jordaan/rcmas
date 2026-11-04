@@ -1,0 +1,72 @@
+# Thesis evaluation, protocol of the first run (Chapter 7).
+#
+# The instances and configurations of experiments/thesis-eval.toml (70
+# instances, eight configurations, 560 runs), with the protocol of the first
+# run of the evaluation: every synthesiser has the iteration bound N = 30,
+# the inner S-IBIS of CEGAR-NE included at every partition, and takes its
+# initial play from smt(F).  The first run used experiments/thesis-eval.toml
+# at commit edd5733 (SHA-256 a9f3b1d7d28f7ccb70b117e2408360ff0c5075fd81c1c807
+# b0c8db1a18b022f3), which has the same instances and this protocol; its
+# logs are kept in results/first-run-n30/ (README, "Reproducing the thesis
+# experiments").
+#
+# Usage:
+#   ./reproduce.sh --config experiments/thesis-eval-n30.toml
+#   python -m experiments.run --config experiments/thesis-eval-n30.toml \
+#       --workers 7 --output results/thesis-eval-n30-900.jsonl --resume
+
+[suite]
+name = "thesis-eval-n30"
+
+[protocol]
+time_limit_s = 900               # wall-clock limit per run (Section 7.2)
+runs = 1                         # one run per (instance, configuration)
+max_iters = 30                   # iteration bound N of IBIS, S-IBIS, Q-IBIS
+initial = "satisfying"           # initial play from smt(F)
+cegar_inner_max_iters = 30       # inner S-IBIS of CEGAR-NE, coarse partition
+cegar_discrete_max_iters = 30    # inner S-IBIS of CEGAR-NE, discrete partition
+demand = 0                       # d(a) = 0 for every agent
+seed = 0                         # seed of the Q-IBIS learners
+
+[grids]
+symmetric = [
+    "3x2.txt",
+    "4x2.txt",
+    "3x3.txt",
+    "4x3.txt",
+    "5x3.txt",
+    "4x4.txt",
+    "6x3.txt",
+    "5x4.txt",
+    "6x4.txt",
+    "5x5.txt",
+    "6x5.txt"
+]
+local_symmetry = [
+    "L-4x4-2.txt",
+    "L-6x4-4.txt",
+    "L-5x5-4.txt",
+    "L-6x6-6.txt"
+]
+disconnected = [
+    "2x2-2x2.txt",
+    "3x2-2x1.txt",
+    "4x2-4x2.txt",
+    "3x3-3x3.txt",
+    "3x3-3x3-3x3.txt"
+]
+asymmetric = [
+    "5x5-13.txt",
+    "interesting.txt",
+    "6x6-21.txt",
+    "6x6-18.txt",
+    "6x6-15.txt",
+    "5x5-shaped.txt",
+    "8x8-34.txt"
+]
+
+[parameters]
+agents = [2, 3, 4, 5, 6]
+algorithms = ["ibis", "sibis", "qibis", "cegar-sibis"]
+partitions = ["orbit"]
+symmetry = [false, true]

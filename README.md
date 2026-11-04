@@ -36,10 +36,17 @@ Every command takes `--grid` and `--agents`. `--horizon` defaults to
 `m = floor(|T|/n)` of Definition 3.9.1, where `|T|` is the number of sectors
 and `n` the number of agents; the synthesis commands (`ibis`, `sibis`,
 `qibis`, `cegar`) accept no other horizon. `--max-iters` is the iteration
-bound `N` (the loop runs `i = 0..N`) and defaults to 30, as in Chapter 7; for
-`cegar` it is the bound of the inner synthesiser. A synthesis command prints
-its outcome (`ne`, `n/c`, `unk`, `uns`, or for CEGAR-NE also `fail`), the
-rewards and the play, with agents and sectors numbered from 1 as in the
+bound `N` (the loop runs `i = 0..N`) and defaults to 30; `--max-iters none`
+runs without a bound, and the run then stops at an equilibrium or at the
+first play that recurs, which always happens since a game has finitely many
+plays. For `cegar`, `--max-iters` is the bound of the inner synthesiser,
+and `--inner-max-iters` and `--discrete-max-iters` set it separately at a
+coarse and at the discrete partition. `--initial collective` takes the
+initial play from the collectively optimal query `smt(F, f)` of Definition
+4.6.1 instead of `smt(F)` (`--initial satisfying`, the default). A
+synthesis command prints its outcome (`ne`, `n/c`, `unk`, `uns`, or for
+CEGAR-NE also `fail`), the rewards, the time and rewards of the initial
+play, and the play, with agents and sectors numbered from 1 as in the
 thesis, and exits with 0 only for an equilibrium.
 
 ```bash
@@ -49,6 +56,9 @@ rcmas co --grid grids/symmetric/4x4.txt --agents 2 --render
 # IBIS (Algorithm 1) and S-IBIS (Algorithm 2) on a 12-sector territory, m = 6
 rcmas ibis  --grid grids/asymmetric/interesting.txt --agents 2 --progress
 rcmas sibis --grid grids/asymmetric/interesting.txt --agents 2 --symmetry
+
+# The protocol of Chapter 7: no iteration bound, initial play from smt(F, f)
+rcmas sibis --grid grids/symmetric/4x4.txt --agents 2 --max-iters none --initial collective
 
 # Demands d(a): agents 1 and 2 need 2 sectors, agents 3 and 4 need 3 (m = 4)
 rcmas sibis --grid grids/symmetric/4x4.txt --agents 4 --demands 2,2,3,3
@@ -61,6 +71,9 @@ rcmas qibis --grid grids/symmetric/3x3.txt --agents 3 --seed 0 --top-k 3
 # the orbit partition as the initial partition
 rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --progress
 rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --partition balanced --synthesiser ibis
+# ... with the inner bounds and the initial query of the Chapter 7 protocol
+rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --inner-max-iters 30 \
+    --discrete-max-iters none --initial collective
 
 # Q-learning self-play
 rcmas train --grid grids/symmetric/4x4.txt --agents 2
@@ -70,8 +83,9 @@ rcmas certify --results results/thesis-eval-900.jsonl
 ```
 
 `--symmetry` adds the symmetry-breaking constraints of Chapter 5 to the
-query for the initial play only; best-response and verification queries
-never contain them.
+query for the initial play only, satisfying or collectively optimal (the
+solution sets of both queries are closed under the symmetry group, Section
+5.4.5); best-response and verification queries never contain them.
 
 ## Grid format
 
@@ -125,11 +139,18 @@ It runs these stages, and stops at the first error:
    `experiments/thesis-eval.toml`. 70 instances (27 territories, every
    `n` in 2..6 that divides `|T|`), four algorithms (IBIS, S-IBIS, Q-IBIS, and
    CEGAR-NE with S-IBIS inside and the orbit partition), each without and
-   with symmetry reduction, demand 0, iteration bound 30, Q-IBIS seed 0, one
-   run per configuration with a wall-clock limit of 900 s: 560 runs. Each
-   run gets its own fresh process, and every equilibrium is checked by the
-   certifier as soon as it is returned; a run counts as solved only if the
-   certifier accepts it. Output: `results/thesis-eval-900.jsonl`.
+   with symmetry reduction, demand 0, Q-IBIS seed 0, one run per
+   configuration with a wall-clock limit of 900 s: 560 runs. The direct
+   runs of IBIS, S-IBIS and Q-IBIS have no iteration bound: a run stops at
+   an equilibrium, at the first play that recurs, or at the limit. Every
+   synthesis call takes its initial play from the collectively optimal
+   query `smt(F, f)`, with the symmetry-breaking constraints when symmetry
+   reduction is on. The inner S-IBIS of CEGAR-NE has the bound 30 at a
+   coarse partition, after which CEGAR-NE refines, and no bound at the
+   discrete partition. Each run gets its own fresh process, and every
+   equilibrium is checked by the certifier as soon as it is returned; a run
+   counts as solved only if the certifier accepts it. Output:
+   `results/thesis-eval-900.jsonl`.
 2. **certify**: `rcmas certify` re-checks every equilibrium of the log
    (`results/thesis-eval-900.cert.jsonl`).
 3. **encoding**: the time to build the formula F for each instance
@@ -147,12 +168,58 @@ It runs these stages, and stops at the first error:
    PhD repository, or in `--thesis-dir`) with its file and line, the current
    text, the new values and a proposed replacement. Where a marked sentence
    is qualitative, the report says so and gives the data that bear on it.
-   The script never edits the thesis.
+   It also reports the protocol of the log, the share of equilibria in
+   which every agent has reward `m`, the runs that returned their initial
+   play, the median time of the initial query per algorithm without and
+   with symmetry reduction, and the outcomes of the runs by the reason each
+   run stopped. The script never edits the thesis.
+
+**The first run and the revised protocol.** The first run of this
+protocol (on an Intel i7-10700K with 7 workers) bounded every synthesiser
+by `N = 30` iterations, the inner S-IBIS of CEGAR-NE included, and took the
+initial play from `smt(F)`. In it, 120 runs stopped at the bound or by
+recurrence, and 40 CEGAR-NE runs ended with Failure because the inner
+S-IBIS stopped at the bound at the discrete partition. The revised
+protocol above removes the bound of the direct runs and of the inner run at
+the discrete partition, and starts from `smt(F, f)`. Neither change affects
+soundness: Theorem 4.7.3 uses only that the initial play is the play of a
+model of `F`, which a collectively optimal model is, and an unbounded run
+still terminates. If every agent has reward `m` in the collectively optimal
+play, it is an equilibrium under any completion, and the run returns it in
+iteration 0. `experiments/thesis-eval-n30.toml` holds the protocol of the
+first run (`./reproduce.sh --config experiments/thesis-eval-n30.toml`
+reruns it into `results/thesis-eval-n30-900.jsonl`).
+
+The first run is kept for transparency. If `results/` holds its logs, the
+sweep cannot resume them, since the runner refuses to resume a log of
+another protocol, and `./reproduce.sh` stops with a message before it
+starts any run. Move them out of the way first:
+
+```bash
+./reproduce.sh --archive-previous --only none   # move the first run's outputs only
+./reproduce.sh                                  # then run the revised protocol
+```
+
+or `./reproduce.sh --archive-previous`, which moves them and then runs the
+pipeline. `--archive-previous` moves the logs of both sweeps, their
+certificates, `encoding-build.jsonl`, `thesis-assets/` and
+`thesis-numbers.md` (and `.json`) to `results/first-run-n30/`, with a
+`README.md` that records the sessions and the protocol; it refuses to
+overwrite an existing `results/first-run-n30/`. Commit that directory with
+the new results (step 1 of *Archiving on Zenodo*). The scripts still read
+its logs, for example
+
+```bash
+python -m experiments.thesis_numbers --results results/first-run-n30/thesis-eval-900.jsonl \
+    --certificates results/first-run-n30/thesis-eval-900.cert.jsonl \
+    --repeat results/first-run-n30/thesis-eval-300.jsonl --output first-run-numbers.md
+```
 
 `./reproduce.sh --only assets,numbers` reruns selected stages.
-`./reproduce.sh --smoke` runs the same pipeline on four small instances with
-a limit of 30 s (outputs in `results/smoke/`); it takes about two minutes
-and checks that everything works before the long run.
+`./reproduce.sh --smoke` runs the same pipeline, with the same protocol, on
+four small instances with a limit of 30 s (outputs in `results/smoke/`); it
+takes a few minutes and checks that everything works before the long run.
+Outputs of an earlier smoke run that cannot be resumed are deleted.
 
 **Resuming.** The sweeps append to their logs and skip the runs already
 there, so after an interruption (Ctrl-C, `kill`, a closed terminal, a
@@ -166,7 +233,11 @@ again from the beginning. A session holds a lock on its log, so a second
 running every run twice. The runner refuses to resume a log that was written
 by another commit of the tool or with other uncommitted changes, another Z3
 version, another configuration file or another protocol, so one log never
-mixes two setups; use a new `--results-dir` instead.
+mixes two setups; use a new `--results-dir` instead. The session header and
+every run record hold the protocol (`max_iters`, `initial`,
+`cegar_inner_max_iters`, `cegar_discrete_max_iters`; a bound of `null`
+means no bound), and a log of another synthesis protocol is refused even
+with `--allow-mixed`.
 
 **Hardware.** Each run is one Python process with one Z3 instance on one
 core. Chapter 7 compares times, so use at most the number of physical cores:
@@ -182,17 +253,22 @@ Keep the machine awake for the whole sweep: on macOS, start the pipeline as
 and keep the lid of a laptop open, since a Mac that sleeps suspends the
 sweep until it wakes.
 
-**Duration.** The examined sweep (`results/examined/thesis-eval-900.jsonl`)
-took 47 CPU-hours: 147 of its 560 runs (26%) reached the 900 s limit and
-account for 37 of those hours. The revised Q-IBIS adds a certification round
-and CEGAR-NE refines more often, so expect more timeouts. Plan for 50 to 80
-CPU-hours for the 900 s sweep and 25 to 45 CPU-hours for the 300 s repeat;
-140 and 47 CPU-hours are the bounds if every run reaches its limit. Divide
-by the number of workers for the time on the clock. With the 4 or 5 workers
-of an M3 Pro, that is about 10 to 20 hours for the sweep and 5 to 11 hours
-for the repeat, so 15 to 31 hours (up to 1.3 days) for the whole pipeline;
-`--no-repeat` skips the repeat. The certification and the other stages take
-minutes.
+**Duration.** The first run of the protocol (iteration bound 30, initial
+play from `smt(F)`) took 42 CPU-hours for the 900 s sweep, 6 hours on the
+clock with 7 workers on an Intel i7-10700K, and 19 CPU-hours (2.8 hours)
+for the 300 s repeat. 120 of its 560 runs reached the 900 s limit and
+account for 30 of those hours, and 160 runs stopped at the bound, by
+recurrence or with Failure, in 9 hours. Without the bound these 160 runs
+can run until they converge, recur or reach the limit, which adds at most
+40 CPU-hours to the 900 s sweep, while the collectively optimal initial
+play ends many runs in iteration 0. Plan for 40 to 80 CPU-hours for the
+900 s sweep and 20 to 35 CPU-hours for the 300 s repeat; 140 and 47
+CPU-hours are the bounds if every run reaches its limit. Divide by the
+number of workers for the time on the clock: with 7 workers that is about
+6 to 12 hours for the sweep and 3 to 5 hours for the repeat, and with the
+4 or 5 workers of an M3 Pro about 8 to 20 hours and 4 to 9 hours.
+`--no-repeat` skips the repeat. The certification and the other stages
+take minutes.
 
 **Provenance.** Every session of a log starts with a header record that
 holds the tool version, the git commit, whether the working tree had
@@ -200,7 +276,15 @@ uncommitted changes and, if so, the SHA-256 of `git diff HEAD`, the Python
 and z3-solver versions, the platform, the CPU model, the number of cores,
 the memory, the start time, the SHA-256 of the configuration and the command
 line. Every run record repeats the commit and the Z3 version and gives the
-grid path relative to the tool. Commit your changes before the sweep, so
+grid path relative to the tool. It also describes the initial play: the
+time and answer of the initial query (`initial_query_s`,
+`initial_query_status`; for CEGAR-NE those of the first inner call, with
+one entry per inner call in `cegar_initial_queries` and `cegar_trace`), the
+rewards in `M` of the initial play (`initial_rewards`, `initial_welfare`;
+for CEGAR-NE of the lift of the first inner call's initial play), whether
+every reward is `m` (`initial_all_m`) and whether the run returned the
+initial play (`initial_was_ne`). A run reports its initial query as soon as
+it is answered, so a run killed at the limit keeps these fields. Commit your changes before the sweep, so
 that the logs record `tool_dirty: false`.
 
 **Outputs.** Everything goes to `results/`; git ignores only

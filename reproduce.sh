@@ -2,6 +2,12 @@
 #
 # Reproduce the experiments of thesis Chapter 7 (and Appendix A).
 #
+# The protocol is that of experiments/thesis-eval.toml: no iteration bound
+# for IBIS, S-IBIS and Q-IBIS, the initial play from smt(F, f), and for the
+# inner S-IBIS of CEGAR-NE the bound 30 at a coarse and none at the discrete
+# partition.  experiments/thesis-eval-n30.toml (--config) holds the protocol
+# of the first run (N = 30 everywhere, initial play from smt(F)).
+#
 # Stages, in order (every stage can be rerun; the sweeps resume):
 #   sweep     560 runs (70 instances x 8 configurations), 900 s each, into
 #             results/thesis-eval-900.jsonl; every returned equilibrium is
@@ -21,6 +27,7 @@
 # Usage:
 #   ./reproduce.sh [--workers N] [--no-repeat] [--thesis-dir DIR]
 #                  [--only STAGE[,STAGE...]] [--results-dir DIR] [--archive]
+#                  [--archive-previous] [--config FILE]
 #   ./reproduce.sh --smoke          # 4 small instances, 30 s limit, minutes
 #
 # Options:
@@ -36,8 +43,18 @@
 #                     is taken relative to the current directory
 #   --archive         after the stages, pack the committed tool and the
 #                     committed results into dist/ for upload to Zenodo
+#   --archive-previous  if the results directory holds logs of another
+#                     protocol (the first run), move them, with their
+#                     certificates, encoding times, assets and numbers, to
+#                     results/first-run-n30/ before the stages; without it
+#                     the script stops and says what to do
+#   --config FILE     the benchmark configuration (default
+#                     experiments/thesis-eval.toml); its [suite] name and
+#                     limit name the logs
 #   --smoke           the smoke test: experiments/smoke.toml, 30 s limit,
-#                     repeat with 10 s, outputs in results/smoke/
+#                     repeat with 10 s, outputs in results/smoke/ (outputs
+#                     of an earlier smoke run that cannot be resumed are
+#                     deleted)
 #
 set -euo pipefail
 
@@ -52,6 +69,8 @@ THESIS_DIR=""
 ONLY=""
 RESULTS_DIR=""
 ARCHIVE=0
+ARCHIVE_PREVIOUS=0
+CONFIG_ARG=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -66,7 +85,10 @@ while [ $# -gt 0 ]; do
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --results-dir=*) RESULTS_DIR="${1#*=}"; shift ;;
         --archive) ARCHIVE=1; shift ;;
-        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+        --archive-previous) ARCHIVE_PREVIOUS=1; shift ;;
+        --config) CONFIG_ARG="$2"; shift 2 ;;
+        --config=*) CONFIG_ARG="${1#*=}"; shift ;;
+        -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see ./reproduce.sh --help)" >&2; exit 2 ;;
     esac
 done
@@ -81,6 +103,11 @@ from_caller() {
 }
 THESIS_DIR=$(from_caller "$THESIS_DIR")
 RESULTS_DIR=$(from_caller "$RESULTS_DIR")
+CONFIG_ARG=$(from_caller "$CONFIG_ARG")
+if [ -n "$CONFIG_ARG" ] && [ ! -f "$CONFIG_ARG" ]; then
+    echo "error: --config $CONFIG_ARG: no such file" >&2
+    exit 2
+fi
 if [ -n "$THESIS_DIR" ] && [ ! -f "$THESIS_DIR/chapters/experiment/main.tex" ]; then
     echo "error: --thesis-dir $THESIS_DIR is not a thesis checkout (no chapters/experiment/main.tex there)" >&2
     exit 2
@@ -96,9 +123,13 @@ if [ "$SMOKE" = "1" ]; then
         echo "error: --smoke never writes into a thesis checkout; drop --thesis-dir" >&2
         exit 2
     fi
+    if [ -n "$CONFIG_ARG" ] || [ "$ARCHIVE_PREVIOUS" = "1" ]; then
+        echo "error: --smoke takes neither --config nor --archive-previous" >&2
+        exit 2
+    fi
 else
-    CONFIG="experiments/thesis-eval.toml"
-    SUITE="thesis-eval"
+    CONFIG="${CONFIG_ARG:-experiments/thesis-eval.toml}"
+    SUITE=""   # the [suite] name of the configuration, read below
     REPEAT_LIMIT=300
     MARK_TIME=300
     RESULTS_DIR="${RESULTS_DIR:-results}"
@@ -159,8 +190,13 @@ fi
 export PYTHONHASHSEED=0
 export PYTHONPATH="$TOOL_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# The limit of the main sweep comes from the [protocol] table of the config.
+# The limit of the main sweep comes from the [protocol] table of the config,
+# the name of the logs from its [suite] table.
 LIMIT=$("$PY" -c 'import sys; from experiments.config import load_protocol; print(load_protocol(sys.argv[1]).time_limit_s)' "$CONFIG")
+if [ -z "$SUITE" ]; then
+    SUITE=$("$PY" -c 'import sys; from experiments.config import load_config; print(load_config(sys.argv[1])[0].suite)' "$CONFIG")
+fi
+PROTOCOL=$("$PY" -c 'import sys; from experiments.config import load_protocol; from experiments.runner import describe_protocol; print(describe_protocol(load_protocol(sys.argv[1])))' "$CONFIG")
 LOG="$RESULTS_DIR/$SUITE-$LIMIT.jsonl"
 CERTS="$RESULTS_DIR/$SUITE-$LIMIT.cert.jsonl"
 REPEAT_LOG="$RESULTS_DIR/$SUITE-$REPEAT_LIMIT.jsonl"
@@ -192,8 +228,40 @@ elif [ -f "$TOOL_DIR/.git-commit" ]; then
     COMMIT=$(cut -c1-7 "$TOOL_DIR/.git-commit")
 fi
 say "rcmas at $COMMIT, $("$PY" -V), z3-solver $Z3_FOUND, $WORKERS workers, config $CONFIG"
+echo "protocol: $PROTOCOL"
 
 STATUS=0
+
+# ── Outputs of an earlier sweep ─────────────────────────────────────
+# A sweep resumes its log, and the runner refuses a log of another protocol.
+# Logs of the first run (N = 30, initial play from smt(F)) are therefore moved
+# to results/first-run-n30/ with --archive-previous, or the script stops here
+# with instructions.  A smoke run that cannot be resumed is simply deleted.
+NEEDS_CHECK=0
+if run_stage sweep || { [ "$REPEAT" = "1" ] && run_stage repeat; } || [ "$ARCHIVE_PREVIOUS" = "1" ]; then
+    NEEDS_CHECK=1
+fi
+if [ "$NEEDS_CHECK" = "1" ]; then
+    PREV_ARGS=(--config "$CONFIG" --results-dir "$RESULTS_DIR" --log "$LOG"
+        --repeat-log "$REPEAT_LOG" --repeat-limit "$REPEAT_LIMIT"
+        --outputs "$CERTS" "$REPEAT_CERTS" "$ENCODING" "$ASSETS" "$NUMBERS" "$NUMBERS_JSON")
+    HINT=""
+    [ "$RESULTS_DIR" != "results" ] && HINT="--results-dir $RESULTS_DIR"
+    [ -n "$CONFIG_ARG" ] && HINT="${HINT:+$HINT }--config $CONFIG_ARG"
+    PREV_ARGS+=(--hint "$HINT")
+    if [ "$SMOKE" = "1" ]; then
+        PREV_ARGS+=(--discard)
+    elif [ "$ARCHIVE_PREVIOUS" = "1" ]; then
+        PREV_ARGS+=(--archive)
+    fi
+    set +e
+    run_py -m experiments.previous "${PREV_ARGS[@]}"
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+        exit $rc
+    fi
+fi
 
 # ── Stages ──────────────────────────────────────────────────────────
 if run_stage sweep; then

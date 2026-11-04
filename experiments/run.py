@@ -10,16 +10,31 @@ The thesis sweep (Chapter 7) is::
 cores minus one.)
 
 The ``[protocol]`` table of the configuration fixes the limit per run
-(900 s), the number of runs (1), the iteration bound (N = 30), the demand
-(0) and the Q-IBIS seed (0).  ``--timeout``, ``--runs``, ``--max-iters``,
-``--demand`` and ``--seed`` override it; the values used are recorded in the
-session header of the log.  ``./reproduce.sh`` runs the whole pipeline.
+(900 s), the number of runs (1), the iteration bound of the direct runs
+(none), the initial query (collective), the bounds of the inner synthesiser
+of CEGAR-NE (30 at a coarse partition, none at the discrete one), the demand
+(0) and the Q-IBIS seed (0); ``experiments/thesis-eval-n30.toml`` holds the
+protocol of the first run (N = 30 everywhere, satisfying initial query).
+``--timeout``, ``--runs``, ``--max-iters``, ``--initial``,
+``--cegar-inner-max-iters``, ``--cegar-discrete-max-iters``, ``--demand``
+and ``--seed`` override it; a bound is an integer or ``none``.
+``--max-iters`` also sets a CEGAR-NE bound that neither the configuration
+nor the command line sets.  The values used are recorded in the session
+header of the log and in every run record.  ``./reproduce.sh`` runs the
+whole pipeline.
 
 Other uses::
 
     python -m experiments.run --config experiments/thesis-eval.toml --list
+    python -m experiments.run --config experiments/thesis-eval.toml \\
+        --output results/thesis-eval-900.jsonl --check-resume
     python -m experiments.run --analyze results/thesis-eval-900.jsonl
     python -m experiments.run --suites E1 --runs 1 --timeout 60 --output e1.jsonl
+
+``--check-resume`` runs nothing: it says whether the sweep could resume the
+log given by ``--output`` and exits with 0 (no log, or a compatible one), 3
+(the log has another synthesis protocol, for example that of the first run)
+or 4 (another commit, Z3 version, configuration or protocol field).
 """
 
 from __future__ import annotations
@@ -28,9 +43,32 @@ import argparse
 import sys
 from dataclasses import replace
 
-from .config import Protocol, load_config, load_protocol
+from .config import (
+    INITIAL_QUERIES,
+    Protocol,
+    load_config,
+    load_protocol,
+    parse_bound,
+    protocol_table,
+)
 from .provenance import default_workers
-from .runner import LogInUseError, MixedLogError, SessionTerminated, run_batch
+from .runner import (
+    LogInUseError,
+    MixedLogError,
+    SessionTerminated,
+    check_resume,
+    describe_protocol,
+    run_batch,
+)
+
+CEGAR_BOUNDS = ("cegar_inner_max_iters", "cegar_discrete_max_iters")
+
+
+def _bound_arg(text: str) -> int | None:
+    try:
+        return parse_bound(text, "the bound")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
 
 
 def _summary(records: list[dict]) -> None:
@@ -84,9 +122,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-iters",
-        type=int,
+        type=_bound_arg,
+        default=...,
+        metavar="N",
+        help="Iteration bound N of IBIS, S-IBIS and Q-IBIS, an integer or 'none' "
+        "(default: config, else 30); also sets a CEGAR-NE bound that is not set "
+        "otherwise",
+    )
+    parser.add_argument(
+        "--initial",
+        choices=list(INITIAL_QUERIES),
         default=None,
-        help="Iteration bound N (default: config, else 30)",
+        help="Query for the initial play (default: config, else satisfying)",
+    )
+    parser.add_argument(
+        "--cegar-inner-max-iters",
+        type=_bound_arg,
+        default=...,
+        metavar="N",
+        help="Bound of the inner synthesiser of CEGAR-NE at a coarse partition "
+        "(default: config, else the bound of the direct runs)",
+    )
+    parser.add_argument(
+        "--cegar-discrete-max-iters",
+        type=_bound_arg,
+        default=...,
+        metavar="N",
+        help="Bound of the inner synthesiser of CEGAR-NE at the discrete "
+        "partition (default: config, else the bound of the direct runs)",
     )
     parser.add_argument(
         "--demand",
@@ -154,6 +217,12 @@ def main(argv: list[str] | None = None) -> int:
         "--list", action="store_true", help="List scenarios without running them"
     )
     parser.add_argument(
+        "--check-resume",
+        action="store_true",
+        help="Run nothing; say whether the sweep could resume --output (exit 0: "
+        "yes or no log, 3: another synthesis protocol, 4: another setup)",
+    )
+    parser.add_argument(
         "--no-progress", action="store_true", help="Suppress per-run progress output"
     )
 
@@ -182,16 +251,36 @@ def main(argv: list[str] | None = None) -> int:
             )
         protocol = Protocol()
 
-    overrides = {
-        "runs": args.runs,
-        "time_limit_s": args.timeout,
-        "max_iters": args.max_iters,
-        "demand": args.demand,
-        "seed": args.seed,
+    overrides: dict[str, object] = {
+        k: v
+        for k, v in {
+            "runs": args.runs,
+            "time_limit_s": args.timeout,
+            "demand": args.demand,
+            "seed": args.seed,
+            "initial": args.initial,
+        }.items()
+        if v is not None
     }
-    protocol = replace(
-        protocol, **{k: v for k, v in overrides.items() if v is not None}
-    )
+    table = protocol_table(args.config) if args.config else {}
+    for key in CEGAR_BOUNDS:
+        value = getattr(args, key)
+        if value is not ...:
+            overrides[key] = value
+        elif args.max_iters is not ... and key not in table:
+            overrides[key] = args.max_iters
+    if args.max_iters is not ...:
+        overrides["max_iters"] = args.max_iters
+    protocol = replace(protocol, **overrides)  # type: ignore[arg-type]
+
+    if args.check_resume:
+        if not args.output:
+            parser.error("--check-resume needs --output")
+        check = check_resume(args.output, protocol=protocol, config_path=args.config)
+        print(f"{check.status}: {args.output} ({describe_protocol(protocol)})")
+        for line in check.problems:
+            print(f"  {line}")
+        return {"new": 0, "ok": 0, "protocol": 3}.get(check.status, 4)
 
     if not scenarios:
         print("No scenarios matched.", file=sys.stderr)

@@ -34,11 +34,21 @@ runner uses them unless its command line overrides them, and records the
 values it used::
 
     [protocol]
-    time_limit_s = 900   # wall-clock limit per run
-    runs = 1             # runs per (instance, configuration)
-    max_iters = 30       # iteration bound N (also of the inner S-IBIS of CEGAR-NE)
-    demand = 0           # d(a) for every agent
-    seed = 0             # seed of the Q-IBIS learners
+    time_limit_s = 900               # wall-clock limit per run
+    runs = 1                         # runs per (instance, configuration)
+    max_iters = "none"               # bound N of IBIS, S-IBIS, Q-IBIS ("none": no bound)
+    initial = "collective"           # initial play: "satisfying" smt(F) or "collective" smt(F, f)
+    cegar_inner_max_iters = 30       # bound of the inner synthesiser of CEGAR-NE at a coarse partition
+    cegar_discrete_max_iters = "none"  # ... and at the discrete partition
+    demand = 0                       # d(a) for every agent
+    seed = 0                         # seed of the Q-IBIS learners
+
+An iteration bound is a non-negative integer or the string ``"none"`` (TOML
+has no null), which means no bound.  A missing CEGAR-NE bound takes the
+value of ``max_iters``, and a missing ``initial`` is ``"satisfying"``: a
+table without these keys gives the protocol of the first run of the thesis
+evaluation, in which every synthesiser, the inner one included, had the
+bound ``N = 30`` and started from ``smt(F)``.
 """
 
 from __future__ import annotations
@@ -48,6 +58,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from rcmas.smt_solve import INITIAL_QUERIES
+
 from .scenarios import GRIDS_DIR, Scenario
 
 try:
@@ -56,18 +68,115 @@ except ModuleNotFoundError:  # Python 3.10: tomli is a dependency there
     import tomli as tomllib  # type: ignore[no-redef]
 
 
+NO_BOUND = "none"
+"""The TOML spelling of an iteration bound that does not bound."""
+
+SYNTHESIS_FIELDS = (
+    "max_iters",
+    "initial",
+    "cegar_inner_max_iters",
+    "cegar_discrete_max_iters",
+)
+"""The fields of :class:`Protocol` that change what a synthesiser computes."""
+
+
 @dataclass(frozen=True, slots=True)
 class Protocol:
-    """Parameters shared by every run of a sweep (thesis Section 7.2)."""
+    """Parameters shared by every run of a sweep (thesis Section 7.2).
+
+    ``max_iters`` is the bound ``N`` of the direct runs of IBIS, S-IBIS and
+    Q-IBIS, and ``cegar_inner_max_iters`` and ``cegar_discrete_max_iters``
+    are the bounds of the inner synthesiser of CEGAR-NE at a coarse and at
+    the discrete partition; ``None`` means no bound.  ``initial`` is the
+    query for the initial play of every synthesis call.  The defaults are
+    the protocol of the first run (``N = 30`` everywhere, ``smt(F)``);
+    ``experiments/thesis-eval.toml`` sets the revised protocol.
+    """
 
     time_limit_s: int = 900
     runs: int = 1
-    max_iters: int = 30
+    max_iters: int | None = 30
     demand: int = 0
     seed: int = 0
+    initial: str = "satisfying"
+    cegar_inner_max_iters: int | None = 30
+    cegar_discrete_max_iters: int | None = 30
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def synthesis(self) -> dict[str, Any]:
+        """The fields that change what a synthesiser computes (:data:`SYNTHESIS_FIELDS`)."""
+        return {k: getattr(self, k) for k in SYNTHESIS_FIELDS}
+
+
+def bound_text(bound: int | None) -> str:
+    """An iteration bound as text: ``30`` or ``none``."""
+    return NO_BOUND if bound is None else str(bound)
+
+
+def parse_bound(value: Any, key: str = "bound") -> int | None:
+    """An iteration bound from TOML or a command line: an integer >= 0 or ``"none"``."""
+    if isinstance(value, str) and value.strip().lower() == NO_BOUND:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{key} must be an integer >= 0 or {NO_BOUND!r}, got {value!r}"
+        )
+    try:
+        bound = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{key} must be an integer >= 0 or {NO_BOUND!r}, got {value!r}"
+        ) from None
+    if bound < 0 or (isinstance(value, float) and value != bound):
+        raise ValueError(
+            f"{key} must be an integer >= 0 or {NO_BOUND!r}, got {value!r}"
+        )
+    return bound
+
+
+def normalise_protocol(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A recorded protocol with the fields that older logs do not record filled in.
+
+    Logs of the first run record only ``time_limit_s``, ``runs``,
+    ``max_iters``, ``demand`` and ``seed``.  Their runs started from
+    ``smt(F)``, and the inner synthesiser of CEGAR-NE had the bound
+    ``max_iters`` at every partition, so the missing fields take these
+    values.
+    """
+    if raw is None:
+        return None
+    out = dict(raw)
+    out.setdefault("initial", "satisfying")
+    out.setdefault("cegar_inner_max_iters", out.get("max_iters"))
+    out.setdefault("cegar_discrete_max_iters", out.get("max_iters"))
+    return out
+
+
+def protocol_from_table(raw: dict[str, Any], where: str = "[protocol]") -> Protocol:
+    """A :class:`Protocol` from a ``[protocol]`` table (see the module docstring)."""
+    known = set(Protocol.__dataclass_fields__)
+    unknown = set(raw) - known
+    if unknown:
+        raise ValueError(f"unknown [protocol] keys in {where}: {sorted(unknown)}")
+    vals = dict(raw)
+    for key in ("max_iters", "cegar_inner_max_iters", "cegar_discrete_max_iters"):
+        if key in vals:
+            vals[key] = parse_bound(vals[key], key)
+    # (With slots, Protocol.max_iters is a descriptor; read the declared default.)
+    vals.setdefault("max_iters", Protocol.__dataclass_fields__["max_iters"].default)
+    for key in ("cegar_inner_max_iters", "cegar_discrete_max_iters"):
+        vals.setdefault(key, vals["max_iters"])
+    proto = Protocol(**vals)
+    if proto.initial not in INITIAL_QUERIES:
+        raise ValueError(
+            f"invalid [protocol] in {where}: initial must be one of "
+            f"{INITIAL_QUERIES}, got {proto.initial!r}"
+        )
+    if proto.time_limit_s <= 0 or proto.runs < 1:
+        raise ValueError(f"invalid [protocol] in {where}: {proto}")
+    return proto
 
 
 def _resolve_grids(grids_section: dict[str, list[str]]) -> list[str]:
@@ -103,16 +212,13 @@ def _read(path: str | Path) -> dict[str, Any]:
 
 
 def load_protocol(path: str | Path) -> Protocol:
-    """The ``[protocol]`` table of a configuration (defaults: thesis Section 7.2)."""
-    raw = _read(path).get("protocol", {})
-    known = set(Protocol.__dataclass_fields__)
-    unknown = set(raw) - known
-    if unknown:
-        raise ValueError(f"unknown [protocol] keys in {path}: {sorted(unknown)}")
-    proto = Protocol(**raw)
-    if proto.time_limit_s <= 0 or proto.runs < 1 or proto.max_iters < 0:
-        raise ValueError(f"invalid [protocol] in {path}: {proto}")
-    return proto
+    """The ``[protocol]`` table of a configuration (defaults: :class:`Protocol`)."""
+    return protocol_from_table(protocol_table(path), str(path))
+
+
+def protocol_table(path: str | Path) -> dict[str, Any]:
+    """The raw ``[protocol]`` table of a configuration (``{}`` if it has none)."""
+    return dict(_read(path).get("protocol", {}))
 
 
 def _instances(cfg: dict[str, Any]) -> list[tuple[str, int, int]]:

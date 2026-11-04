@@ -102,6 +102,54 @@ class Run:
         """Every agent has reward ``m`` (the bound of Lemma 3.10.1)."""
         return self.rewards is not None and all(r == self.horizon for r in self.rewards)
 
+    # -- protocol and initial play (logs of the revised runner) ---------
+    @property
+    def protocol(self) -> dict[str, Any]:
+        """The synthesis protocol of the run (older records: that of the first run)."""
+        d = self.raw
+        n = d.get("max_iters", 30)
+        return {
+            "max_iters": n,
+            "initial": d.get("initial", "satisfying"),
+            "cegar_inner_max_iters": d.get("cegar_inner_max_iters", n),
+            "cegar_discrete_max_iters": d.get("cegar_discrete_max_iters", n),
+        }
+
+    @property
+    def has_initial_fields(self) -> bool:
+        """The record describes the initial play (``initial_*`` fields)."""
+        return "initial_was_ne" in self.raw
+
+    @property
+    def initial_query_s(self) -> float | None:
+        """Time of the initial query (of the first inner call for CEGAR-NE)."""
+        x = self.raw.get("initial_query_s")
+        return None if x is None else float(x)
+
+    @property
+    def initial_query_finished(self) -> bool:
+        """The initial query was answered sat or unsat (not unknown, not cut off)."""
+        status = self.raw.get("initial_query_status")
+        if status is not None:
+            return status in ("sat", "unsat")
+        return self.raw.get("initial_rewards") is not None
+
+    @property
+    def initial_rewards(self) -> tuple[int, ...] | None:
+        r = self.raw.get("initial_rewards")
+        return None if r is None else tuple(int(x) for x in r)
+
+    @property
+    def initial_all_m(self) -> bool | None:
+        """Every reward of the initial play is ``m`` (``None`` if not recorded)."""
+        r = self.initial_rewards
+        return None if r is None else all(x == self.horizon for x in r)
+
+    @property
+    def initial_was_ne(self) -> bool:
+        """The run returned its initial play as its equilibrium."""
+        return bool(self.raw.get("initial_was_ne")) and self.found_ne
+
 
 def _norm_grid_path(raw: str) -> str:
     text = str(raw).replace("\\", "/")
@@ -196,6 +244,40 @@ class Results:
     def time_limit_s(self) -> float:
         limits = {r.time_limit_s for r in self.runs}
         return max(limits) if limits else 900.0
+
+    @property
+    def protocols(self) -> list[dict[str, Any]]:
+        """The synthesis protocols of the runs (one, unless the log mixes them)."""
+        out: list[dict[str, Any]] = []
+        for r in self.runs:
+            if r.protocol not in out:
+                out.append(r.protocol)
+        return out
+
+    @property
+    def protocol(self) -> dict[str, Any]:
+        """The synthesis protocol of the log (that of the first run if it has none)."""
+        ps = self.protocols
+        return (
+            ps[0]
+            if ps
+            else {
+                "max_iters": 30,
+                "initial": "satisfying",
+                "cegar_inner_max_iters": 30,
+                "cegar_discrete_max_iters": 30,
+            }
+        )
+
+    @property
+    def max_iters(self) -> int | None:
+        """The iteration bound ``N`` of the direct runs (``None``: no bound)."""
+        return self.protocol["max_iters"]
+
+    @property
+    def has_initial_fields(self) -> bool:
+        """The runs describe their initial plays (logs of the revised runner)."""
+        return any(r.has_initial_fields for r in self.runs)
 
 
 def _read_certificates(path: str | Path) -> dict[tuple[str, int], dict[str, Any]]:
@@ -323,6 +405,14 @@ def load(
                 f"{run.name} r{run.run}: duplicate record, the last one is used"
             )
         by_key[key] = run
+    protocols: list[dict[str, Any]] = []
+    for run in by_key.values():
+        if run.protocol not in protocols:
+            protocols.append(run.protocol)
+    if len(protocols) > 1:
+        problems.append(
+            "the log mixes synthesis protocols: " + "; ".join(str(x) for x in protocols)
+        )
     return Results(
         runs=list(by_key.values()),
         sessions=sessions,
