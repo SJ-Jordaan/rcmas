@@ -601,7 +601,10 @@ def solve_cegar(
         :func:`~rcmas.abstraction.make_partition` (default ``"orbit"``).
     synthesiser
         ``"sibis"`` (default, as in Chapter 7), ``"ibis"``, ``"qibis"``, or
-        any :data:`SynthesiseFn`.
+        any :data:`SynthesiseFn`.  A callable receives only the game of
+        each call, so it cannot be combined with a non-default
+        *max_iters*, *inner_max_iters*, *discrete_max_iters*, *initial* or
+        *seed* (:class:`ValueError`).
     max_iters
         The iteration bound ``N`` of the inner synthesiser at every
         partition, the same bound as a direct run; ``None`` means no bound.
@@ -672,6 +675,26 @@ def solve_cegar(
             seed=seed,
         )
     else:
+        # A callable receives only the game of each call: the bounds, the
+        # initial query and the seed configure the named synthesisers, so a
+        # callable would silently ignore them.
+        ignored = [
+            name
+            for name, given in (
+                ("max_iters", max_iters != 30),
+                ("inner_max_iters", inner_max_iters is not SAME),
+                ("discrete_max_iters", discrete_max_iters is not SAME),
+                ("initial", initial != "satisfying"),
+                ("seed", seed != 0),
+            )
+            if given
+        ]
+        if ignored:
+            raise ValueError(
+                f"{', '.join(ignored)} configure the named synthesisers "
+                "('ibis', 'sibis', 'qibis'); a callable synthesiser receives "
+                "only the game of each call and must apply them itself"
+            )
         synth = synthesiser
 
     partition = make_partition(initial_partition, territory, n)

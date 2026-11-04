@@ -621,6 +621,28 @@ class TestLimitsAndParameters:
         with pytest.raises(ValueError):
             solve_cegar(territory=territory_2x2, num_agents=2, max_iters=-1)
 
+    def test_callable_synthesiser_takes_no_named_options(self, territory_2x2) -> None:
+        """Options of the named synthesisers are refused with a callable (review-9)."""
+        for kw in (
+            {"initial": "collective"},
+            {"discrete_max_iters": None},
+            {"inner_max_iters": 30},
+            {"max_iters": None},
+            {"seed": 1},
+        ):
+            with pytest.raises(ValueError, match="callable synthesiser") as e:
+                solve_cegar(
+                    territory=territory_2x2,
+                    num_agents=2,
+                    synthesiser=_default_play,
+                    **kw,
+                )
+            assert next(iter(kw)) in str(e.value)
+        # The refusal comes before any query.  (A callable without these
+        # options runs as before; the tests above use _default_play.  This
+        # test poses no Z3 query, since Z3's models depend on process-wide
+        # state and test_certify assumes the trajectory of a Q-IBIS run.)
+
     def test_horizon_none_selects_m(self, territory_2x1) -> None:
         res = solve_cegar(territory=territory_2x1, num_agents=2, horizon=None)
         assert res.found_ne and res.play.horizon == 1
