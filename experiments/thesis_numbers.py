@@ -317,6 +317,13 @@ def protocol_text(p: dict[str, Any]) -> str:
     )
 
 
+def repeat_protocol_differs(d: Results, repeat: Results) -> bool:
+    """The repeat log has a synthesis protocol that the main log does not have, or vice versa."""
+    main = d.protocols or [d.protocol]
+    rep = repeat.protocols or [repeat.protocol]
+    return any(p not in main for p in rep) or any(p not in rep for p in main)
+
+
 class Analysis:
     """The quantities behind the ``\\rerun`` markers, computed from the logs."""
 
@@ -328,6 +335,13 @@ class Analysis:
         encoding: list[dict[str, Any]] | None = None,
     ) -> None:
         self.d = d
+        # A repeat sweep of another synthesis protocol does not measure the
+        # variation between two runs of the same pair: it is set aside, and
+        # the rules that need it stay undecided (the report says why).
+        self.repeat_mismatch: list[dict[str, Any]] | None = None
+        if repeat is not None and repeat_protocol_differs(d, repeat):
+            self.repeat_mismatch = repeat.protocols or [repeat.protocol]
+            repeat = None
         self.repeat = repeat
         self.cert_counts = certificates
         self.encoding = encoding
@@ -463,6 +477,35 @@ class Analysis:
                 unfinished += 1
         med = statistics.median(xs) if xs else None
         return med, len(xs), unfinished
+
+    def cegar_initial_query_totals(
+        self, alg: str, sym: bool
+    ) -> tuple[float | None, int, int] | None:
+        """CEGAR-NE: median time of the initial queries of all inner calls of a run.
+
+        ``initial_query_times`` gives for CEGAR-NE the query of the first
+        inner call only, which is posed on the abstract game of the initial
+        partition and is often much cheaper than the queries of later calls
+        or of ``smt(F, f)`` on ``M``.  This sums the times of every inner
+        call of a run (``cegar_initial_queries``); a call that was not
+        answered contributes the time it ran.  Returns the median, the
+        number of runs and the number of runs with an unanswered call, or
+        ``None`` if the log does not record the inner calls.
+        """
+        if not alg.startswith("cegar"):
+            return None
+        xs: list[float] = []
+        unfinished = 0
+        for r in self.d.runs_of(alg, sym):
+            calls = r.raw.get("cegar_initial_queries")
+            if not calls:
+                continue
+            xs.append(sum(float(c.get("initial_query_s") or 0.0) for c in calls))
+            if any(c.get("status") not in ("sat", "unsat") for c in calls):
+                unfinished += 1
+        if not xs:
+            return None
+        return statistics.median(xs), len(xs), unfinished
 
     def outcomes_by_reason(self) -> dict[tuple[str, bool], dict[str, int]]:
         """For every configuration: ``"outcome (reason)" -> number of runs``."""
@@ -1685,6 +1728,12 @@ def _workers(a: Analysis, o: Occurrence) -> Finding:
 
 def _variation(a: Analysis, o: Occurrence) -> Finding:
     v, n = a.variation()
+    if a.repeat_mismatch is not None:
+        return Finding(
+            values=[("repeat sweep", "another synthesis protocol; not used")],
+            note="The repeat log was written under another synthesis protocol than the log; rerun the repeat sweep with the protocol of the log.",
+            computable=False,
+        )
     if v is None:
         return Finding(
             values=[("repeat sweep", "not given")],
@@ -1978,12 +2027,23 @@ def _initial_section(a: Analysis) -> list[str]:
             iq_s = f"{med_s} over {cnt} runs" + (
                 f", {unf} not answered within the limit" if unf else ""
             )
+            if alg.startswith("cegar"):
+                iq_s += " (first inner call, game of the initial partition)"
         lines.append(
             f"| {config_label(alg, sym)} | {kk} of {nn} | "
             f"{'--' if ret is None else len(ret)} | "
             f"{'--' if im is None else f'{im[0]} of {im[1]}'} | {iq_s} |"
         )
     lines.append("")
+    if any(alg.startswith("cegar") for alg in a.algs):
+        lines.append(
+            "For CEGAR-NE the initial query of a run is that of its first inner "
+            "call, posed on the game of the initial partition: the abstract game, "
+            "with weighted rewards, unless that partition is discrete. It is not "
+            "smt(F, f) of M, and every later inner call poses an initial query of "
+            "its own (the totals per run are below)."
+        )
+        lines.append("")
     lines.append(
         "Initial-query medians per algorithm, without / with symmetry reduction (s):"
     )
@@ -1998,7 +2058,29 @@ def _initial_section(a: Analysis) -> list[str]:
                 cells.append("> limit")
             else:
                 cells.append(f"{iq[0]:.2f}")
-        lines.append(f"- {PLAIN.get(alg, alg)}: {cells[0]} / {cells[1]}")
+        label = PLAIN.get(alg, alg)
+        if alg.startswith("cegar"):
+            label += " (first inner call, game of the initial partition)"
+        lines.append(f"- {label}: {cells[0]} / {cells[1]}")
+        if alg.startswith("cegar"):
+            tot = []
+            for sym in (False, True):
+                t = a.cegar_initial_query_totals(alg, sym)
+                if t is None or t[0] is None:
+                    tot.append("--")
+                else:
+                    tot.append(
+                        f"{t[0]:.2f}"
+                        + (
+                            f" ({t[2]} of {t[1]} runs with a call not answered)"
+                            if t[2]
+                            else ""
+                        )
+                    )
+            lines.append(
+                f"- {PLAIN.get(alg, alg)}, all inner calls of a run: "
+                f"{tot[0]} / {tot[1]}"
+            )
     lines.append("")
     lines.append("Outcomes by the reason each run stopped:")
     lines.append("")
@@ -2057,6 +2139,13 @@ def build_report(
         lines.append(
             "- **the log mixes synthesis protocols; its numbers are not comparable**"
         )
+    if a.repeat_mismatch is not None:
+        lines.append(
+            "- **the repeat log has another synthesis protocol ("
+            + "; ".join(protocol_text(p) for p in a.repeat_mismatch)
+            + "); it is not used, so the variation between runs and the rules "
+            "that need it are undecided**"
+        )
     lines.append("")
     lines.append("## Data checks")
     expected = a.N * len(a.d.configs)
@@ -2078,6 +2167,11 @@ def build_report(
         lines.append(
             f"- **{len(errors)} runs ended with an error of the tool**: "
             + ", ".join(f"{r.name} ({r.reason})" for r in errors[:10])
+        )
+    if a.repeat_mismatch is not None:
+        lines.append(
+            "- problem: the repeat log has another synthesis protocol than the "
+            "log; run the repeat sweep with the protocol of the log"
         )
     for p in a.d.problems[:50]:
         lines.append(f"- problem: {p}")
@@ -2189,6 +2283,7 @@ def facts(a: Analysis) -> dict[str, Any]:
         "only_with_symmetry": len(a.only(True)),
         "only_without_symmetry": len(a.only(False)),
         "variation": v,
+        "repeat_protocol_mismatch": a.repeat_mismatch,
         "variation_pairs": nv,
         "all_solved_up_to": p["all_solved_up_to"],
         "first_unsolved_size": p["first_unsolved_size"],
@@ -2231,6 +2326,11 @@ def facts(a: Analysis) -> dict[str, Any]:
         out[f"initial_query_median[{key}]"] = None if over else med
         out[f"initial_query_median_over_limit[{key}]"] = over
         out[f"initial_query_unfinished[{key}]"] = None if iq is None else iq[2]
+        if alg.startswith("cegar"):
+            tot = a.cegar_initial_query_totals(alg, sym)
+            out[f"cegar_initial_query_total_median[{key}]"] = (
+                None if tot is None else tot[0]
+            )
         k, n = a.all_m_share(a.d.runs_of(alg, sym))
         out[f"equilibria_all_m[{key}]"] = k
     return out

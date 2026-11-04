@@ -28,7 +28,7 @@
 #   ./reproduce.sh [--workers N] [--no-repeat] [--thesis-dir DIR]
 #                  [--only STAGE[,STAGE...]] [--results-dir DIR] [--archive]
 #                  [--archive-previous] [--config FILE]
-#   ./reproduce.sh --smoke          # 4 small instances, 30 s limit, minutes
+#   ./reproduce.sh --smoke          # 5 small instances, 30 s limit, minutes
 #
 # Options:
 #   --workers N       runs in parallel (default: physical cores minus one;
@@ -50,7 +50,12 @@
 #                     the script stops and says what to do
 #   --config FILE     the benchmark configuration (default
 #                     experiments/thesis-eval.toml); its [suite] name and
-#                     limit name the logs
+#                     limit name the logs, and a suite other than
+#                     thesis-eval also names the other outputs
+#                     (SUITE-encoding-build.jsonl, SUITE-assets/,
+#                     SUITE-numbers.md and .json), so that they do not
+#                     replace those of the thesis-eval sweep; such a
+#                     suite is refused with --thesis-dir
 #   --smoke           the smoke test: experiments/smoke.toml, 30 s limit,
 #                     repeat with 10 s, outputs in results/smoke/ (outputs
 #                     of an earlier smoke run that cannot be resumed are
@@ -88,7 +93,7 @@ while [ $# -gt 0 ]; do
         --archive-previous) ARCHIVE_PREVIOUS=1; shift ;;
         --config) CONFIG_ARG="$2"; shift 2 ;;
         --config=*) CONFIG_ARG="${1#*=}"; shift ;;
-        -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
+        -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see ./reproduce.sh --help)" >&2; exit 2 ;;
     esac
 done
@@ -201,10 +206,26 @@ LOG="$RESULTS_DIR/$SUITE-$LIMIT.jsonl"
 CERTS="$RESULTS_DIR/$SUITE-$LIMIT.cert.jsonl"
 REPEAT_LOG="$RESULTS_DIR/$SUITE-$REPEAT_LIMIT.jsonl"
 REPEAT_CERTS="$RESULTS_DIR/$SUITE-$REPEAT_LIMIT.cert.jsonl"
-ENCODING="$RESULTS_DIR/encoding-build.jsonl"
-ASSETS="$RESULTS_DIR/thesis-assets"
-NUMBERS="$RESULTS_DIR/thesis-numbers.md"
-NUMBERS_JSON="$RESULTS_DIR/thesis-numbers.json"
+# The outputs derived from the logs keep the names that the thesis and the
+# README use for the thesis-eval sweep (and for the smoke test, which has a
+# directory of its own).  Another suite, for example thesis-eval-n30, which
+# shares results/ with it, gets names of its own, so that it never replaces
+# the encoding times, assets or numbers of the thesis-eval sweep.
+if [ "$SMOKE" = "1" ] || [ "$SUITE" = "thesis-eval" ]; then
+    ENCODING="$RESULTS_DIR/encoding-build.jsonl"
+    ASSETS="$RESULTS_DIR/thesis-assets"
+    NUMBERS="$RESULTS_DIR/thesis-numbers.md"
+    NUMBERS_JSON="$RESULTS_DIR/thesis-numbers.json"
+else
+    if [ -n "$THESIS_DIR" ]; then
+        echo "error: --thesis-dir writes the tables and figures of the thesis, which come from the suite thesis-eval; $CONFIG has the suite $SUITE (drop --thesis-dir)" >&2
+        exit 2
+    fi
+    ENCODING="$RESULTS_DIR/$SUITE-encoding-build.jsonl"
+    ASSETS="$RESULTS_DIR/$SUITE-assets"
+    NUMBERS="$RESULTS_DIR/$SUITE-numbers.md"
+    NUMBERS_JSON="$RESULTS_DIR/$SUITE-numbers.json"
+fi
 mkdir -p "$RESULTS_DIR"
 
 if [ -z "$WORKERS" ]; then
@@ -242,9 +263,11 @@ if run_stage sweep || { [ "$REPEAT" = "1" ] && run_stage repeat; } || [ "$ARCHIV
     NEEDS_CHECK=1
 fi
 if [ "$NEEDS_CHECK" = "1" ]; then
-    PREV_ARGS=(--config "$CONFIG" --results-dir "$RESULTS_DIR" --log "$LOG"
-        --repeat-log "$REPEAT_LOG" --repeat-limit "$REPEAT_LIMIT"
-        --outputs "$CERTS" "$REPEAT_CERTS" "$ENCODING" "$ASSETS" "$NUMBERS" "$NUMBERS_JSON")
+    PREV_ARGS=(--config "$CONFIG" --results-dir "$RESULTS_DIR"
+        --log "$LOG" --certificates "$CERTS"
+        --repeat-log "$REPEAT_LOG" --repeat-certificates "$REPEAT_CERTS"
+        --repeat-limit "$REPEAT_LIMIT"
+        --outputs "$ENCODING" "$ASSETS" "$NUMBERS" "$NUMBERS_JSON")
     HINT=""
     [ "$RESULTS_DIR" != "results" ] && HINT="--results-dir $RESULTS_DIR"
     [ -n "$CONFIG_ARG" ] && HINT="${HINT:+$HINT }--config $CONFIG_ARG"
@@ -341,9 +364,17 @@ if [ "$ARCHIVE" = "1" ]; then
     # Only committed files go into the archive: the results that README step 1
     # commits are part of HEAD, and the smoke outputs and other untracked files
     # under results/ stay out.
-    for f in "$LOG" "$CERTS" "$REPEAT_LOG" "$REPEAT_CERTS" "$ENCODING" "$NUMBERS"; do
-        [ -f "$f" ] || continue
-        if ! git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 \
+    # The results of README step 1: the logs and certificates, the derived
+    # outputs, and the first run kept in results/first-run-n30/.
+    for f in "$LOG" "$CERTS" "$REPEAT_LOG" "$REPEAT_CERTS" "$ENCODING" \
+        "$NUMBERS" "$NUMBERS_JSON" "$ASSETS" "$RESULTS_DIR/first-run-n30"; do
+        [ -e "$f" ] || continue
+        if [ -d "$f" ]; then
+            # A directory: some file in it is untracked or differs from HEAD.
+            if [ -n "$(git status --porcelain --untracked-files=all -- "$f" 2>/dev/null)" ]; then
+                echo "WARNING: $f/ has untracked or uncommitted files, and the archive holds only what HEAD has of it; commit it first (README, Archiving on Zenodo)." >&2
+            fi
+        elif ! git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 \
             || ! git diff --quiet HEAD -- "$f" 2>/dev/null; then
             echo "WARNING: $f has uncommitted changes, and the archive holds only what HEAD has of it; commit it first (README, Archiving on Zenodo)." >&2
         fi
@@ -354,7 +385,7 @@ if [ "$ARCHIVE" = "1" ]; then
 fi
 
 say "outputs in $RESULTS_DIR/"
-for f in "$LOG" "$CERTS" "$REPEAT_LOG" "$REPEAT_CERTS" "$ENCODING" "$NUMBERS"; do
+for f in "$LOG" "$CERTS" "$REPEAT_LOG" "$REPEAT_CERTS" "$ENCODING" "$NUMBERS" "$NUMBERS_JSON"; do
     [ -f "$f" ] && echo "  $f"
 done
 [ -d "$ASSETS" ] && echo "  $ASSETS/"

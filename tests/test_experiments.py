@@ -113,8 +113,8 @@ class TestConfig:
 
     def test_instances_table_and_smoke(self, tmp_path: Path) -> None:
         smoke = load_config(ROOT / "experiments" / "smoke.toml")
-        assert len({(s.grid_path, s.num_agents) for s in smoke}) == 4
-        assert len(smoke) == 32
+        assert len({(s.grid_path, s.num_agents) for s in smoke}) == 5
+        assert len(smoke) == 40
         assert load_protocol(ROOT / "experiments" / "smoke.toml").time_limit_s == 30
         cfg = tmp_path / "c.toml"
         cfg.write_text(
@@ -840,6 +840,45 @@ class TestRevisedProtocol:
         assert "return to an earlier play" in (_iterations(a_new, occ).proposed or "")
         assert "no iteration bound" in (_qibis_bound(a_new, occ).proposed or "")
 
+    def test_repeat_of_another_protocol_is_set_aside(
+        self,
+        sweep: tuple[Path, list[dict]],
+        sweep_new: tuple[Path, list[dict]],
+    ) -> None:
+        """A repeat log of another synthesis protocol gives no variation (review-3)."""
+        new = load(sweep_new[0], run_number=None)
+        old = load(sweep[0], run_number=None)
+        same = Analysis(new, load(sweep_new[0], run_number=None))
+        assert same.repeat_mismatch is None and same.repeat is not None
+        a = Analysis(new, old)
+        assert a.repeat is None and a.variation() == (None, 0)
+        assert a.repeat_mismatch == [old.protocol]
+        report, _ = build_report(a, [], [], {"results": "new", "repeat sweep": "old"})
+        assert "**the repeat log has another synthesis protocol" in report
+        assert "problem: the repeat log has another synthesis protocol" in report
+        assert facts(a)["repeat_protocol_mismatch"] == [old.protocol]
+        assert facts(same)["repeat_protocol_mismatch"] is None
+        # The other way round: a first-run log with a repeat of the revised protocol.
+        assert Analysis(old, new).repeat_mismatch == [new.protocol]
+
+    def test_cegar_initial_query_is_labelled(
+        self, sweep_new: tuple[Path, list[dict]]
+    ) -> None:
+        """CEGAR-NE's initial-query time is that of its first inner call (review-7)."""
+        a = Analysis(load(sweep_new[0], run_number=None))
+        report, _ = build_report(a, [], [], {"results": "new"})
+        rows = [x for x in report.splitlines() if x.startswith("| CEGAR+sym |")]
+        assert any(
+            "(first inner call, game of the initial partition)" in x for x in rows
+        )
+        assert "- CEGAR-NE, all inner calls of a run: " in report
+        tot = a.cegar_initial_query_totals("cegar-sibis", True)
+        first = a.initial_query_times("cegar-sibis", True)
+        assert tot is not None and first is not None and tot[1] == 1
+        assert tot[0] is not None and first[0] is not None and tot[0] >= first[0]
+        assert a.cegar_initial_query_totals("sibis", False) is None
+        assert "cegar_initial_query_total_median[CEGAR+sym]" in facts(a)
+
     def test_n_c_caption_without_a_bound(self, tmp_path: Path) -> None:
         from experiments.thesis_assets import nc_text
 
@@ -935,6 +974,75 @@ class TestPreviousSweep:
         assert main(self._args(res) + ["--archive"]) == 2
         assert "exists" in capsys.readouterr().err
         assert (res / "smoke-30.jsonl").exists()
+
+    def _resumable(self, sweep_new: tuple[Path, list[dict]], path: Path) -> Path:
+        """A log that a session with the smoke configuration can resume ("ok")."""
+        from experiments.runner import _session_header, check_resume
+
+        cfg = ROOT / "experiments" / "smoke.toml"
+        proto = load_protocol(cfg)
+        header = _session_header(protocol=proto, config_path=cfg, argv=None)
+        runs = sweep_new[0].read_text().splitlines()[1:]
+        path.write_text("\n".join([json.dumps(header), *runs]) + "\n")
+        assert check_resume(path, protocol=proto, config_path=cfg).status == "ok"
+        return path
+
+    def test_archive_moves_only_the_logs_of_another_protocol(
+        self,
+        sweep: tuple[Path, list[dict]],
+        sweep_new: tuple[Path, list[dict]],
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A resumable log and its certificates stay; the other log moves alone."""
+        from experiments.previous import main
+
+        # The main log can be resumed, the repeat log is of the first run.
+        res = self._results(sweep, tmp_path / "a")
+        main_log = self._resumable(sweep_new, res / "smoke-30.jsonl")
+        main_text = main_log.read_text()
+        (res / "smoke-10.jsonl").write_text(sweep[0].read_text())
+        (res / "smoke-10.cert.jsonl").write_text("{}\n")
+        assert main(self._args(res)) == 2
+        err = capsys.readouterr().err
+        assert "smoke-10.jsonl holds runs of another protocol" in err
+        assert "smoke-30.jsonl holds" not in err
+        assert "smoke-30.jsonl would stay in place (it can be resumed)" in err
+        assert main(self._args(res) + ["--archive"]) == 0
+        assert "Left " in capsys.readouterr().err
+        dest = res / "first-run-n30"
+        assert {p.name for p in dest.iterdir()} == {
+            "README.md",
+            "smoke-10.jsonl",
+            "smoke-10.cert.jsonl",
+        }
+        assert main_log.read_text() == main_text  # the sweep resumes it
+        for name in ("smoke-30.cert.jsonl", "thesis-assets", "thesis-numbers.md"):
+            assert (res / name).exists(), name
+        readme = (dest / "README.md").read_text()
+        assert "smoke-10.jsonl" in readme and "smoke-30.jsonl" not in readme
+        assert "N = none" not in readme  # only the first-run session is listed
+
+        # The main log is of the first run, the repeat log can be resumed:
+        # the main log moves with its certificates and the derived outputs.
+        res = self._results(sweep, tmp_path / "b")
+        rep = self._resumable(sweep_new, res / "smoke-10.jsonl")
+        (res / "smoke-10.cert.jsonl").write_text("{}\n")
+        assert main(self._args(res) + ["--archive"]) == 0
+        dest = res / "first-run-n30"
+        assert {p.name for p in dest.iterdir()} == {
+            "README.md",
+            "smoke-30.jsonl",
+            "smoke-30.cert.jsonl",
+            "thesis-assets",
+            "thesis-numbers.md",
+        }
+        assert sorted(p.name for p in res.iterdir()) == [
+            "first-run-n30",
+            "smoke-10.cert.jsonl",
+            "smoke-10.jsonl",
+        ]
+        assert rep.exists()
 
     def test_discard_for_the_smoke_test(
         self, sweep: tuple[Path, list[dict]], tmp_path: Path
@@ -1194,6 +1302,8 @@ def test_archive_holds_only_committed_files(tmp_path: Path) -> None:
     (clone / "results" / "smoke" / "smoke-30.jsonl").write_text("{}\n")
     (clone / "results" / "notes.txt").write_text("untracked\n")
     (clone / "results" / "thesis-eval-900.jsonl").write_text('{"kind": "run"}\n')
+    (clone / "results" / "first-run-n30").mkdir()
+    (clone / "results" / "first-run-n30" / "README.md").write_text("first run\n")
     out = subprocess.run(
         ["bash", "reproduce.sh", "--only", "none", "--archive"],
         cwd=clone,
@@ -1203,6 +1313,8 @@ def test_archive_holds_only_committed_files(tmp_path: Path) -> None:
     )
     assert out.returncode == 0, out.stderr
     assert "thesis-eval-900.jsonl has uncommitted changes" in out.stderr
+    # The first run kept for transparency is a result of README step 1 too.
+    assert "first-run-n30/ has untracked or uncommitted files" in out.stderr
     (archive,) = (clone / "dist").glob("*.tar.gz")
     with tarfile.open(archive) as tar:
         names = [n.split("/", 1)[1] for n in tar.getnames() if "/" in n]
@@ -1216,6 +1328,7 @@ def test_archive_holds_only_committed_files(tmp_path: Path) -> None:
     assert not any(n.startswith("results/smoke") for n in names)
     assert "results/notes.txt" not in names
     assert "results/thesis-eval-900.jsonl" not in names
+    assert not any(n.startswith("results/first-run-n30") for n in names)
 
 
 # ---------------------------------------------------------------------------
@@ -1353,6 +1466,62 @@ class TestThesisDir:
         text = (tmp_path / "res" / "thesis-numbers.md").read_text()
         assert "## Markers (1 occurrences)" in text
         assert stray_before or not stray.exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="bash script")
+    def test_reproduce_sh_another_suite_keeps_the_thesis_outputs(
+        self, tmp_path: Path
+    ) -> None:
+        """--config of another suite names its outputs after the suite (review-1)."""
+        import shutil
+        import subprocess
+
+        if not (ROOT / ".venv" / "bin" / "python").exists():
+            pytest.skip("reproduce.sh needs the .venv of setup.sh")
+        res = tmp_path / "res"
+        res.mkdir()
+        shutil.copy(EXAMINED_900, res / "thesis-eval-n30-900.jsonl")
+        (res / "thesis-numbers.md").write_text("numbers of the revised run\n")
+        (res / "encoding-build.jsonl").write_text("{}\n")
+        n30 = str(ROOT / "experiments" / "thesis-eval-n30.toml")
+        chapter = tmp_path / "thesis" / "chapters" / "experiment"
+        chapter.mkdir(parents=True)
+        (chapter / "main.tex").write_text("\\gls{sibis} solves \\rerun{57} of 70.\n")
+
+        def run(*args: str) -> Any:
+            return subprocess.run(
+                ["bash", str(ROOT / "reproduce.sh"), "--config", n30, *args],
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        bad = run("--only", "assets", "--results-dir", "res", "--thesis-dir", "thesis")
+        assert bad.returncode == 2 and "suite thesis-eval-n30" in bad.stderr
+        assert not (res / "thesis-eval-n30-assets").exists()
+        assert not (res / "thesis-assets").exists()
+        ok = run("--only", "numbers", "--no-repeat", "--results-dir", "res")
+        assert ok.returncode == 0, ok.stderr
+        assert "/thesis-eval-n30-numbers.md" in ok.stdout
+        assert (res / "thesis-eval-n30-numbers.md").exists()
+        assert (res / "thesis-eval-n30-numbers.json").exists()
+        assert (res / "thesis-numbers.md").read_text() == "numbers of the revised run\n"
+        assert not (res / "thesis-numbers.json").exists()
+        assert (res / "encoding-build.jsonl").read_text() == "{}\n"
+
+    @pytest.mark.skipif(os.name != "posix", reason="bash script")
+    def test_reproduce_sh_help_is_the_header(self) -> None:
+        import subprocess
+
+        out = subprocess.run(
+            ["bash", str(ROOT / "reproduce.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        lines = out.splitlines()
+        assert lines and all(line.startswith("#") for line in lines), lines[-3:]
+        assert "--smoke" in out and "set -euo" not in out
 
 
 class TestAssets:

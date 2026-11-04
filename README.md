@@ -177,18 +177,37 @@ It runs these stages, and stops at the first error:
 **The first run and the revised protocol.** The first run of this
 protocol (on an Intel i7-10700K with 7 workers) bounded every synthesiser
 by `N = 30` iterations, the inner S-IBIS of CEGAR-NE included, and took the
-initial play from `smt(F)`. In it, 120 runs stopped at the bound or by
-recurrence, and 40 CEGAR-NE runs ended with Failure because the inner
-S-IBIS stopped at the bound at the discrete partition. The revised
-protocol above removes the bound of the direct runs and of the inner run at
-the discrete partition, and starts from `smt(F, f)`. Neither change affects
-soundness: Theorem 4.7.3 uses only that the initial play is the play of a
-model of `F`, which a collectively optimal model is, and an unbounded run
-still terminates. If every agent has reward `m` in the collectively optimal
-play, it is an equilibrium under any completion, and the run returns it in
-iteration 0. `experiments/thesis-eval-n30.toml` holds the protocol of the
-first run (`./reproduce.sh --config experiments/thesis-eval-n30.toml`
-reruns it into `results/thesis-eval-n30-900.jsonl`).
+initial play from `smt(F)`. In it, 120 runs stopped at the bound (103) or
+by recurrence (17), and 40 CEGAR-NE runs ended with Failure because the
+inner S-IBIS returned `n/c` at the discrete partition (37 at the bound, 3
+by recurrence). The revised protocol above removes the bound of the direct
+runs and of the inner run at the discrete partition, and starts from
+`smt(F, f)`. Neither change affects soundness: Theorem 4.7.3 uses only that
+the initial play is the play of a model of `F`, which a collectively
+optimal model is, and an unbounded run still terminates. If every agent has
+reward `m` in the collectively optimal play, it is an equilibrium under any
+completion, and the run returns it in iteration 0. S-IBIS then returns at
+once, since its feasibility filter `reward_a > m` is refuted immediately by
+the implied bound `reward_a <= m`. IBIS and Q-IBIS still pose one
+optimisation query `smt(G_a(pi), reward_a)` per agent in that iteration,
+which has to construct a deviation with reward `m`: on `6x4` with 3 agents
+one such query took 296 s, against 0.11 s for each check of S-IBIS, so such
+runs of IBIS and Q-IBIS can still reach the limit. In CEGAR-NE the initial
+query of an inner call at a coarse partition is the collectively optimal
+query of the weighted abstract game, which can be much harder than
+`smt(F, f)` on `M`: at the orbit partition of `5x5-shaped` with 2 agents
+and of `8x8-34` with 2 and 3 agents it was not answered within 900 s, with
+or without symmetry reduction, while `smt(F, f)` on `M` takes 6 to 7 s
+there. CEGAR-NE therefore reaches the limit on these instances; in the
+first run it solved `8x8-34` with 2 agents in 426 s (570 s with symmetry
+reduction).
+`experiments/thesis-eval-n30.toml` holds the protocol of the first run:
+`./reproduce.sh --config experiments/thesis-eval-n30.toml` reruns it into
+`results/thesis-eval-n30-900.jsonl`, and its other outputs are named after
+its suite (`thesis-eval-n30-encoding-build.jsonl`,
+`thesis-eval-n30-assets/`, `thesis-eval-n30-numbers.md`), so that they do
+not replace those of the revised run. It refuses `--thesis-dir`, which
+writes the tables of the thesis.
 
 The first run is kept for transparency. If `results/` holds its logs, the
 sweep cannot resume them, since the runner refuses to resume a log of
@@ -201,11 +220,13 @@ starts any run. Move them out of the way first:
 ```
 
 or `./reproduce.sh --archive-previous`, which moves them and then runs the
-pipeline. `--archive-previous` moves the logs of both sweeps, their
-certificates, `encoding-build.jsonl`, `thesis-assets/` and
-`thesis-numbers.md` (and `.json`) to `results/first-run-n30/`, with a
-`README.md` that records the sessions and the protocol; it refuses to
-overwrite an existing `results/first-run-n30/`. Commit that directory with
+pipeline. `--archive-previous` moves every log of another protocol, with
+its certificates, to `results/first-run-n30/`, and with the main 900 s log
+also `encoding-build.jsonl`, `thesis-assets/` and `thesis-numbers.md` (and
+`.json`), which are derived from it. A log of the revised protocol stays
+where it is, so its sweep resumes. The directory gets a `README.md` that
+records the sessions and the protocol of the moved logs, and an existing
+`results/first-run-n30/` is never overwritten. Commit that directory with
 the new results (step 1 of *Archiving on Zenodo*). The scripts still read
 its logs, for example
 
@@ -217,7 +238,7 @@ python -m experiments.thesis_numbers --results results/first-run-n30/thesis-eval
 
 `./reproduce.sh --only assets,numbers` reruns selected stages.
 `./reproduce.sh --smoke` runs the same pipeline, with the same protocol, on
-four small instances with a limit of 30 s (outputs in `results/smoke/`); it
+five small instances with a limit of 30 s (outputs in `results/smoke/`); it
 takes a few minutes and checks that everything works before the long run.
 Outputs of an earlier smoke run that cannot be resumed are deleted.
 
@@ -258,17 +279,18 @@ play from `smt(F)`) took 42 CPU-hours for the 900 s sweep, 6 hours on the
 clock with 7 workers on an Intel i7-10700K, and 19 CPU-hours (2.8 hours)
 for the 300 s repeat. 120 of its 560 runs reached the 900 s limit and
 account for 30 of those hours, and 160 runs stopped at the bound, by
-recurrence or with Failure, in 9 hours. Without the bound these 160 runs
-can run until they converge, recur or reach the limit, which adds at most
-40 CPU-hours to the 900 s sweep, while the collectively optimal initial
-play ends many runs in iteration 0. Plan for 40 to 80 CPU-hours for the
-900 s sweep and 20 to 35 CPU-hours for the 300 s repeat; 140 and 47
-CPU-hours are the bounds if every run reaches its limit. Divide by the
-number of workers for the time on the clock: with 7 workers that is about
-6 to 12 hours for the sweep and 3 to 5 hours for the repeat, and with the
-4 or 5 workers of an M3 Pro about 8 to 20 hours and 4 to 9 hours.
-`--no-repeat` skips the repeat. The certification and the other stages
-take minutes.
+recurrence or with Failure, in 9 hours. A pilot of the revised protocol ran
+all eight configurations at a limit of 120 s on the 37 instances where the
+first run stopped at the bound or that no configuration solved, and took
+the times of the other runs from the first run plus the measured cost of
+`smt(F, f)`. It estimates 32 to 43 CPU-hours for the 900 s sweep and 14 to
+16 CPU-hours for the 300 s repeat, about as long as the first run, because
+the runs that reach the limit dominate either way: with 7 workers about 4.5
+to 6 hours for the sweep and 2 to 2.5 hours for the repeat, and with the 4
+or 5 workers of an M3 Pro, on cores as fast as those of the i7, about 6.5
+to 11 hours and 3 to 4 hours. 140 and 47 CPU-hours are the bounds if every
+run reaches its limit. `--no-repeat` skips the repeat. The certification
+and the other stages take minutes.
 
 **Provenance.** Every session of a log starts with a header record that
 holds the tool version, the git commit, whether the working tree had
@@ -316,12 +338,16 @@ After the sweep:
    ```bash
    git add results/thesis-eval-900.jsonl results/thesis-eval-900.cert.jsonl \
        results/thesis-eval-300.jsonl results/thesis-eval-300.cert.jsonl \
-       results/encoding-build.jsonl results/thesis-assets results/thesis-numbers.md
+       results/encoding-build.jsonl results/thesis-assets \
+       results/thesis-numbers.md results/thesis-numbers.json \
+       results/first-run-n30
    git commit -m "Add the result logs of the thesis evaluation"
    ```
 
    The logs record the commit that produced them, which is the parent of
-   this one.
+   this one. `results/first-run-n30` holds the first run (see *The first
+   run and the revised protocol*); leave it out of the command if you have
+   none.
 2. Either enable the GitHub integration on zenodo.org (Account, GitHub, switch
    on `rcmas`), then tag and publish a GitHub release:
 
@@ -336,7 +362,8 @@ After the sweep:
    `dist/rcmas-<version>-<commit>.tar.gz`, and upload that file as a new
    Zenodo record of type Software. Uncommitted and untracked files, such as
    `results/smoke/`, are not in the archive; the script warns about a result
-   file that has uncommitted changes.
+   file of step 1, `results/first-run-n30/` included, that has uncommitted
+   changes or is not committed.
 3. Cite the version DOI, not the concept DOI: put the version and the DOI in
    the `note` field of `rcmas2026zenodo` in `thesis/thesis.bib` (the `plain`
    bibliography style does not print a `doi` field), and add the DOI to

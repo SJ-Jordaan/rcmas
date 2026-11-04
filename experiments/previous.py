@@ -10,10 +10,13 @@ revised one.  Before the sweep, ``reproduce.sh`` calls this module, which
 * does nothing if no log of the results directory has another protocol;
 * otherwise prints which logs differ and how to keep them, and exits with
   2, unless ``--archive`` is given;
-* with ``--archive`` moves the logs, their certificates, the encoding
-  times, the assets and the numbers report into a subdirectory
-  (``first-run-n30`` for a log of the first protocol), writes a README
-  there, and exits with 0; the first run is kept for transparency;
+* with ``--archive`` moves each log of another protocol and its
+  certificates into a subdirectory (``first-run-n30`` for a log of the
+  first protocol), writes a README there, and exits with 0; the first run
+  is kept for transparency.  The encoding times, the assets and the numbers
+  report (``--outputs``) are derived from the main log and move with it.
+  A log that can be resumed, or that differs only in its setup, stays in
+  place with its certificates, so that its sweep resumes;
 * with ``--discard`` (the smoke test, whose outputs mean nothing) deletes
   the outputs of an earlier smoke run that the sweep could not resume.
 
@@ -22,7 +25,10 @@ Usage::
     python -m experiments.previous --config experiments/thesis-eval.toml \\
         --results-dir results --log results/thesis-eval-900.jsonl \\
         --repeat-log results/thesis-eval-300.jsonl --repeat-limit 300 \\
-        --outputs results/thesis-eval-900.cert.jsonl ... [--archive | --discard]
+        --outputs results/encoding-build.jsonl ... [--archive | --discard]
+
+``--certificates`` and ``--repeat-certificates`` default to the log name
+with ``.cert.jsonl`` for ``.jsonl``, the names that ``reproduce.sh`` uses.
 """
 
 from __future__ import annotations
@@ -51,6 +57,12 @@ def is_first_protocol(protocol: dict[str, Any] | None) -> bool:
         and p.get("cegar_inner_max_iters") == 30
         and p.get("cegar_discrete_max_iters") == 30
     )
+
+
+def certificates_of(log: Path) -> Path:
+    """The certificates that ``reproduce.sh`` writes for *log*: ``X.jsonl`` -> ``X.cert.jsonl``."""
+    name = log.name[: -len(".jsonl")] if log.name.endswith(".jsonl") else log.name
+    return log.with_name(name + ".cert.jsonl")
 
 
 def log_protocols(log: Path) -> list[dict[str, Any]]:
@@ -164,14 +176,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--log", required=True, help="Log of the main sweep")
+    ap.add_argument(
+        "--certificates",
+        default=None,
+        help="Certificates of the main log (default: the log name with .cert.jsonl)",
+    )
     ap.add_argument("--repeat-log", default=None, help="Log of the repeat sweep")
+    ap.add_argument(
+        "--repeat-certificates",
+        default=None,
+        help="Certificates of the repeat log (default: its name with .cert.jsonl)",
+    )
     ap.add_argument("--repeat-limit", type=int, default=None)
     ap.add_argument(
         "--outputs",
         nargs="*",
         default=[],
-        help="Files and directories derived from the logs (certificates, encoding "
-        "times, assets, numbers report)",
+        help="Files and directories derived from the main log (encoding times, "
+        "assets, numbers report); they move only with it",
     )
     ap.add_argument(
         "--hint",
@@ -193,22 +215,32 @@ def main(argv: list[str] | None = None) -> int:
 
     results_dir = Path(args.results_dir)
     protocol = load_protocol(args.config)
-    pairs: list[tuple[Path, Any]] = [(Path(args.log), protocol)]
+    main_log = Path(args.log)
+    sweeps: list[tuple[Path, Any, Path]] = [
+        (main_log, protocol, Path(args.certificates or certificates_of(main_log)))
+    ]
     if args.repeat_log:
         rep = protocol
         if args.repeat_limit is not None:
             rep = replace(protocol, time_limit_s=args.repeat_limit)
-        pairs.append((Path(args.repeat_log), rep))
+        repeat_log = Path(args.repeat_log)
+        sweeps.append(
+            (
+                repeat_log,
+                rep,
+                Path(args.repeat_certificates or certificates_of(repeat_log)),
+            )
+        )
 
-    checks: list[tuple[Path, ResumeCheck]] = [
-        (log, check_resume(log, protocol=proto, config_path=args.config))
-        for log, proto in pairs
+    checks: list[tuple[Path, ResumeCheck, Path]] = [
+        (log, check_resume(log, protocol=proto, config_path=args.config), certs)
+        for log, proto, certs in sweeps
     ]
-    other = [(log, c) for log, c in checks if c.status == "protocol"]
+    other = [(log, c, certs) for log, c, certs in checks if c.status == "protocol"]
     outputs = [Path(p) for p in args.outputs]
 
     if args.discard:
-        stale = [(log, c) for log, c in checks if c.status in ("protocol", "mixed")]
+        stale = [(log, c) for log, c, _ in checks if c.status in ("protocol", "mixed")]
         if stale:
             for log, c in stale:
                 print(
@@ -218,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for line in c.problems:
                     print(f"  {line}", file=sys.stderr)
-            for p in [log for log, _ in checks] + outputs:
+            for p in [x for log, _, certs in checks for x in (log, certs)] + outputs:
                 if p.is_dir():
                     shutil.rmtree(p)
                 elif p.exists():
@@ -234,24 +266,35 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
-    logs = [log for log, _ in checks if log.exists() and log.stat().st_size]
-    name = archive_name([log for log, _ in other])
+    # Only the logs of another protocol move, each with its certificates; the
+    # encoding times, assets and numbers are derived from the main log and
+    # move only with it.  A log of this protocol stays, so its sweep resumes.
+    logs = [log for log, _, _ in other]
+    derived = [certs for _, _, certs in other]
+    if any(log == main_log for log in logs):
+        derived += outputs
+    kept = [(log, c) for log, c, _ in checks if c.status not in ("protocol", "new")]
+    name = archive_name(logs)
     if args.archive:
         try:
             dest = archive(
-                results_dir, logs, outputs, config=args.config, dest_name=name
+                results_dir, logs, derived, config=args.config, dest_name=name
             )
         except FileExistsError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         print(
-            f"Moved the outputs of the earlier sweep to {dest}/ (see its README.md).",
+            f"Moved {', '.join(str(p) for p in logs)} and the files derived from "
+            f"{'them' if len(logs) > 1 else 'it'} to {dest}/ (see its README.md).",
             file=sys.stderr,
         )
+        for log, c in kept:
+            state = "it can be resumed" if c.status == "ok" else "its setup differs"
+            print(f"Left {log} in place ({state}).", file=sys.stderr)
         return 0
 
     print("", file=sys.stderr)
-    for log, c in other:
+    for log, c, _ in other:
         print(f"{log} holds runs of another protocol:", file=sys.stderr)
         for line in c.problems:
             print(f"  {line}", file=sys.stderr)
@@ -271,6 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         f"{'them' if len(logs) > 1 else 'it'} yourself, or use another --results-dir.",
         file=sys.stderr,
     )
+    for log, c in kept:
+        state = "it can be resumed" if c.status == "ok" else "its setup differs"
+        print(f"{log} would stay in place ({state}).", file=sys.stderr)
     return 2
 
 

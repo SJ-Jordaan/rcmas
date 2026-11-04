@@ -44,12 +44,12 @@ results depend on the solver version.
 | `qibis.py` | Alg 3 (Sec 4.9) | Q-IBIS: restricted queries plus a certification round; `QibisConfig` holds the RL hyperparameters and seed |
 | `symmetry.py` | Ch5 (Defs 5.1.1-5.2.3, Thm 5.3.2) | `H_geo` (geometric subgroup, not Aut(T)), orbits/Reps, local `BP(H_R)`, component copy classes and group H, `SymmetryBreaking` plan (`symmetry_breaking_plan`, `.admits`) |
 | `abstraction.py` | Defs 6.1.1-6.3.3, Sec 6.5 | `Partition`, `orbit_partition` (orbits of the group the Ch5 constraints use), `AbstractRCMAS` (block weights/adjacency, `rewards_of`), weighted-graph symmetry, `lift_play`, deviation set, `refine_partition`, `bfs_bisect` |
-| `cegar.py` | Alg 4 (Ch6) | CEGAR-NE: SynthesiseNE (bounds `inner_max_iters` at a coarse, `discrete_max_iters` at the discrete partition; `...` = `max_iters`, `None` = no bound), lift, satisfaction check, `verify_ne` (one query per agent, no symmetry), refine |
+| `cegar.py` | Alg 4 (Ch6) | CEGAR-NE: SynthesiseNE (bounds `inner_max_iters` at a coarse, `discrete_max_iters` at the discrete partition; `...` = `max_iters`, `None` = no bound; a callable synthesiser refuses these, `initial` and `seed`), lift, satisfaction check, `verify_ne` (one query per agent, no symmetry), refine |
 | `certify.py` | Sec 7.5 | Independent pure-Python certifier (own replay, phi_sat, rewards and canonical completion, memoised BR search); `rcmas certify --results` |
 | `cli.py` | Sec 7.1 | CLI: co, ibis, sibis, qibis, cegar, train, certify |
 | `experiments/config.py` | Sec 7.2 | TOML configs; `Protocol` (`max_iters`, `initial`, `cegar_inner_max_iters`, `cegar_discrete_max_iters`; bound `"none"` in TOML = `None`) |
 | `experiments/runner.py` | Sec 7.2 | One fresh spawned process per run, wall-clock limit enforced by the parent, inline certification, provenance header, resumable JSONL; records protocol and `initial_*` fields; refuses to resume across synthesis protocols (`check_resume`) |
-| `experiments/previous.py` | Sec 7.2 | `reproduce.sh` helper: logs of another protocol -> message, `--archive` to `results/first-run-n30/`, `--discard` for smoke |
+| `experiments/previous.py` | Sec 7.2 | `reproduce.sh` helper: logs of another protocol -> message, `--archive` moves only those logs (with their certificates; encoding/assets/numbers only with the main log) to `results/first-run-n30/`, `--discard` for smoke |
 | `experiments/thesis_assets.py` | Table 7.1, Figs 7.2-7.3, Table A.1 | Generates the `.tex` files the thesis inputs |
 | `experiments/thesis_numbers.py` | Ch7 | Report with new values for every `\rerun{...}` marker of the thesis |
 
@@ -118,7 +118,8 @@ satisfying) picks smt(F) or smt(F, f) for the initial play. Exit code 0 only for
 
 Benchmark: `experiments/thesis-eval.toml` (revised protocol: `max_iters = "none"`, `initial = "collective"`,
 CEGAR-NE inner bound 30 coarse / none discrete); `experiments/thesis-eval-n30.toml` = protocol of the first run
-(N = 30 everywhere, smt(F)). Logs of the examined thesis: `results/examined/` (no plays, so
+(N = 30 everywhere, smt(F)); with `--config` of a suite other than thesis-eval, reproduce.sh names the derived outputs
+`SUITE-encoding-build.jsonl`, `SUITE-assets/`, `SUITE-numbers.md` and refuses `--thesis-dir`. Logs of the examined thesis: `results/examined/` (no plays, so
 not certifiable; read with `--no-certificate-required`); older pre-revision logs in `results/examined/legacy/`.
 
 ## Grid format
