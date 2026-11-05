@@ -1,36 +1,133 @@
-"""IBIS and S-IBIS: Improvement-Based Iterative Synthesis.
+"""IBIS and S-IBIS (thesis Algorithms 1 and 2, Sections 4.7 and 4.8).
 
-IBIS (Algorithm 1, NFM2026) uses Z3 Optimize for best-response computation.
-S-IBIS replaces Optimize with binary search over satisfiability checks,
-which is typically much faster on large grids.
+Both run the loop of Algorithm 1 on a single play.  The initial play
+``pi^0`` is the play of a model of ``smt(F)`` or, with
+``initial="collective"``, of the collectively optimal query ``smt(F, f)``
+(Definition 4.6.1); with symmetry on, the symmetry-breaking constraints of
+Chapter 5 are added to this query and to no other.  A model of either query
+is a model of ``F``, which is all that Theorem 4.7.3 uses of ``pi^0``.  In
+iteration ``i`` the run stops if ``pi^i`` occurred before (outcome
+``"n/c"``).  Otherwise every agent ``a`` gets a best response ``beta_a``
+against the canonical completion of ``pi^i`` (Definition 4.4.2), and its
+improvement potential is
 
-Both share the same iterative improvement loop via :func:`_ibis_core`.
+    IP^i(a) = r_a(pi_{beta_a}) - r_a(pi^i),
+
+with both rewards evaluated on final states (Definition 3.9.2, Remark
+4.3.2).  If every potential is 0, the canonical completion of ``pi^i`` is a
+demand-constrained Nash equilibrium (Theorem 4.7.3) and the run returns it.
+Otherwise the agent with the largest potential, the smallest index on ties,
+replaces the play by its best-response play, and all strategies are
+completed again from the new play.  The loop runs for ``i = 0, ..., N``, or
+without a bound if ``N`` is ``None``.  An unbounded loop also ends: a game
+has finitely many plays, and every iteration either returns or moves to a
+play that has not occurred before.
+
+IBIS computes each best response with the optimisation query
+``smt(G_a(pi^i), reward_a)``; S-IBIS uses the feasibility filter and binary
+search of Algorithm 2, which give the same potentials (Theorem 4.8.1).
+Neither poses a query for an agent whose reward is already ``R_max``
+(``m``, or the largest total weight of ``m`` sectors in an abstract game):
+``F`` implies ``reward_a <= R_max``, so its potential is 0
+(:func:`at_reward_bound`).  From an initial play in which every agent has
+reward ``m`` a run returns in iteration 0 without a best-response query.
+When Z3 answers a query with unknown, the initial query included, the run
+stops with outcome ``"unk"`` (Section 7.1).
+
+Outcomes: ``"ne"`` (equilibrium), ``"n/c"`` (play recurs, ``reason="cycle"``,
+or the iteration bound is reached, ``reason="max_iters"``, which cannot
+happen without a bound), ``"unk"`` (``reason="unknown"``) and ``"uns"``
+(the initial query is unsatisfiable, so no satisfying strategy exists;
+``reason="unsat"``).
 """
 
 from __future__ import annotations
 
+import itertools
 import sys
 import time
-from dataclasses import dataclass
-from functools import partial
-from typing import Callable
+from dataclasses import dataclass, replace
+from typing import Callable, Iterable, TypeVar
 
 from .model import Coord, Territory
 from .smt_solve import (
+    INITIAL_QUERIES,
     BaseEncoding,
+    ExtraConstraints,
     SmtSolution,
+    best_response_binsearch_from_base,
+    best_response_from_base,
     build_base_encoding,
-    find_feasible_from_base,
+    initial_from_base,
 )
-from .strategy import Policy, StateKey, freeze_profile, policy_from_solution
+from .strategy import CanonicalCompletion, Play, StateKey, canonical_completion
+
+ResultT = TypeVar("ResultT")
+
+OUTCOME_BY_REASON = {
+    "ne": "ne",
+    "cycle": "n/c",
+    "max_iters": "n/c",
+    "unknown": "unk",
+    "unsat": "uns",
+}
 
 
 # ---------------------------------------------------------------------------
-# Result type (shared by IBIS and S-IBIS)
+# Result types
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class IbisIteration:
+    """One iteration of the loop of Algorithm 1.
+
+    Attributes:
+        index: the iteration ``i``.
+        rewards: ``r_a(pi^i)`` for every agent.
+        improvement: ``IP^i(a)`` for every agent (empty if the iteration
+            stopped before the potentials were computed).
+        chosen: ``a*``, or ``None`` if the iteration did not update the play.
+        checks: number of solver checks posed in the iteration.
+    """
+
+    index: int
+    rewards: tuple[int, ...]
+    improvement: tuple[int, ...]
+    chosen: int | None
+    checks: int
+
 
 @dataclass(frozen=True, slots=True)
 class IbisResult:
+    """Result of IBIS or S-IBIS.
+
+    Attributes:
+        is_sat: a satisfying play was found (``play`` is set).
+        reason: ``"ne"``, ``"cycle"``, ``"max_iters"``, ``"unknown"`` or ``"unsat"``.
+        found_ne: the canonical completion of ``play`` is an equilibrium.
+        iterations: index ``i`` of the last iteration that ran, which is the
+            number of play updates before it.  If the bound was reached it is
+            ``N``, and ``play`` is the play produced by the update in iteration
+            ``N``.
+        strategy: the profiles of ``play`` as coordinates.
+        payoff_by_agent: ``r_a(play)``, evaluated on the final state.
+        final_solution: the SMT model whose play is ``play``.
+        play: the final play ``pi^i`` (tool sector indices).
+        outcome: ``"ne"``, ``"n/c"``, ``"unk"`` or ``"uns"``.
+        trace: one :class:`IbisIteration` per iteration.
+        initial: the initial query, ``"satisfying"`` or ``"collective"``
+            (``"given"`` if the caller passed the initial play).
+        initial_query_s: wall-clock time of the initial query (``None`` for
+            a given initial play).
+        initial_play: ``pi^0``, if the initial query had a model.
+        initial_rewards: ``r_a(pi^0)``, evaluated on the final state.
+
+    The returned joint strategy is ``completion()``, the canonical
+    completion of ``play`` (Definition 4.4.2) under the sector enumeration
+    of the territory (Remark 3.1.1).
+    """
+
     is_sat: bool
     reason: str
     found_ne: bool
@@ -38,24 +135,432 @@ class IbisResult:
     strategy: tuple[tuple[Coord | None, ...], ...] | None
     payoff_by_agent: tuple[int, ...] | None
     final_solution: SmtSolution | None
+    play: Play | None = None
+    outcome: str = ""
+    trace: tuple[IbisIteration, ...] = ()
+    initial: str = "satisfying"
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
+
+    @property
+    def rewards(self) -> tuple[int, ...] | None:
+        """``r_a(play)`` (alias of ``payoff_by_agent``)."""
+        return self.payoff_by_agent
+
+    @property
+    def returned_initial(self) -> bool:
+        """The run returned the initial play ``pi^0`` (an equilibrium in iteration 0)."""
+        return self.found_ne and self.iterations == 0
+
+    def completion(self) -> CanonicalCompletion | None:
+        """The canonical completion of the final play, or ``None``."""
+        return None if self.play is None else canonical_completion(self.play)
 
 
-# Type alias for pluggable best-response functions.
-BestResponseResult = tuple[int | None, float, int, Policy | None, int]
-BestResponseFn = Callable[..., BestResponseResult]
+@dataclass(frozen=True, slots=True)
+class BestResponse:
+    """A best response of one agent against the canonical completion of a play.
+
+    Attributes:
+        status: ``"ok"`` or ``"unknown"`` (Z3 answered unknown).
+        reward: ``r_a(pi_beta)`` on the final state; the current reward if
+            the agent cannot improve and no model is returned.
+        play: ``pi_beta``, or ``None`` if no model is returned.
+        solution: the SMT model, if any.
+        checks: number of solver checks posed.
+    """
+
+    status: str
+    reward: int
+    play: Play | None
+    solution: SmtSolution | None
+    checks: int
+
+
+BestResponseFn = Callable[[Play, int, tuple[int, ...]], BestResponse]
+"""``(pi, a, rewards of pi) -> best response of a against the completion of pi``."""
+
+
+# ---------------------------------------------------------------------------
+# The loop of Algorithm 1
+# ---------------------------------------------------------------------------
+
+
+def run_ibis_loop(
+    *,
+    initial_play: Play,
+    initial_solution: SmtSolution | None,
+    best_response: BestResponseFn,
+    rewards_of: Callable[[StateKey], tuple[int, ...]],
+    max_iters: int | None,
+    territory: Territory | None = None,
+    log: Callable[[str], None] | None = None,
+) -> IbisResult:
+    """Run lines 5-20 of Algorithm 1 from *initial_play*.
+
+    *best_response* computes ``beta_a`` for an agent; *rewards_of* evaluates
+    ``r_a`` on a final control vector.  The loop runs for ``i = 0, ...,
+    max_iters`` (``max_iters`` is the bound ``N``), or until it returns if
+    *max_iters* is ``None``.  *territory* is used only to report the play
+    as coordinates.
+    """
+
+    def _log(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
+    def _result(
+        reason: str, play: Play, sol: SmtSolution | None, iterations: int
+    ) -> IbisResult:
+        coords = play.to_coords(territory) if territory is not None else None
+        return IbisResult(
+            is_sat=True,
+            reason=reason,
+            found_ne=reason == "ne",
+            iterations=iterations,
+            strategy=coords,
+            payoff_by_agent=rewards_of(play.final_state),
+            final_solution=sol,
+            play=play,
+            outcome=OUTCOME_BY_REASON[reason],
+            trace=tuple(trace),
+        )
+
+    play = initial_play
+    solution = initial_solution
+    seen: set[Play] = set()
+    trace: list[IbisIteration] = []
+
+    for i in iteration_indices(max_iters):
+        current = rewards_of(play.final_state)
+        if play in seen:
+            _log(f"iter={i} play recurs")
+            trace.append(IbisIteration(i, current, (), None, 0))
+            return _result("cycle", play, solution, i)
+        seen.add(play)
+
+        potentials: list[int] = []
+        responses: list[BestResponse] = []
+        checks = 0
+        for a in range(play.num_agents):
+            br = best_response(play, a, current)
+            checks += br.checks
+            if br.status == "unknown":
+                _log(f"iter={i} agent={a} best response: solver answered unknown")
+                trace.append(IbisIteration(i, current, tuple(potentials), None, checks))
+                return _result("unknown", play, solution, i)
+            ip = br.reward - current[a]
+            if ip < 0:
+                raise RuntimeError(
+                    f"negative improvement potential for agent {a} (Lemma 4.7.2(3) violated)"
+                )
+            potentials.append(ip)
+            responses.append(br)
+            _log(
+                f"iter={i} agent={a} reward={current[a]} best_response={br.reward} ip={ip}"
+            )
+
+        if all(ip == 0 for ip in potentials):
+            trace.append(IbisIteration(i, current, tuple(potentials), None, checks))
+            _log(f"iter={i} rewards={current} equilibrium")
+            return _result("ne", play, solution, i)
+
+        chosen = max(range(len(potentials)), key=lambda a: (potentials[a], -a))
+        trace.append(IbisIteration(i, current, tuple(potentials), chosen, checks))
+        new_play = responses[chosen].play
+        assert new_play is not None
+        _log(f"iter={i} rewards={current} ip={tuple(potentials)} update agent={chosen}")
+        play = new_play
+        solution = responses[chosen].solution
+
+    assert max_iters is not None  # an unbounded loop returns inside
+    return _result("max_iters", play, solution, max_iters)
+
+
+def iteration_indices(max_iters: int | None) -> Iterable[int]:
+    """``0, ..., N`` for the bound ``N = max_iters``, or ``0, 1, ...`` without a bound.
+
+    Raises :class:`ValueError` for a negative bound.  A loop over the
+    unbounded range ends because it stops at the first recurring play.
+    """
+    if max_iters is None:
+        return itertools.count()
+    if max_iters < 0:
+        raise ValueError("max_iters must be >= 0 or None")
+    return range(max_iters + 1)
+
+
+# ---------------------------------------------------------------------------
+# Best responses over the SMT encoding
+# ---------------------------------------------------------------------------
+
+
+def at_reward_bound(base: BaseEncoding, current: tuple[int, ...], agent: int) -> bool:
+    """``r_a(pi) = R_max``: *agent* cannot improve, so no query is needed.
+
+    ``F`` implies ``reward_a <= R_max`` (every agent controls exactly ``m``
+    sectors of a collision-free final state, Lemma 3.10.1, and the witness
+    region lies among them, Lemma 4.3.1), so ``BR_a(pi) <= R_max`` and the
+    improvement potential of an agent at the bound is 0.  An agent with
+    potential 0 is never the one updated, so the skip changes no potential
+    and no choice: given the same answers to the queries it poses, a run
+    takes the same path with fewer queries.  Z3's models depend on the
+    queries posed before in the process, so a later query with several
+    optimal models may return another one than without the skip.
+    """
+    return current[agent] >= base.max_reward
+
+
+def smt_best_response(
+    base: BaseEncoding, timeout_ms: int | None = None
+) -> BestResponseFn:
+    """IBIS best response: the optimisation query ``smt(G_a(pi), reward_a)`` (line 9)."""
+
+    def br(play: Play, agent: int, current: tuple[int, ...]) -> BestResponse:
+        if at_reward_bound(base, current, agent):
+            return BestResponse("ok", current[agent], None, None, 0)
+        sol = best_response_from_base(base, play, agent, timeout_ms=timeout_ms)
+        if sol.reason == "unknown":
+            return BestResponse("unknown", current[agent], None, None, 1)
+        if not sol.is_sat:
+            raise RuntimeError(
+                "best-response query unsatisfiable for a satisfying play (Lemma 4.7.2(3) violated)"
+            )
+        assert sol.play is not None and sol.payoff_by_agent is not None
+        return BestResponse("ok", sol.payoff_by_agent[agent], sol.play, sol, 1)
+
+    return br
+
+
+def binsearch_best_response(
+    base: BaseEncoding, timeout_ms: int | None = None
+) -> BestResponseFn:
+    """S-IBIS best response: feasibility filter and binary search (lines 11-24 of Algorithm 2)."""
+
+    def br(play: Play, agent: int, current: tuple[int, ...]) -> BestResponse:
+        if at_reward_bound(base, current, agent):
+            return BestResponse("ok", current[agent], None, None, 0)
+        res = best_response_binsearch_from_base(
+            base, play, agent, current_reward=current[agent], timeout_ms=timeout_ms
+        )
+        if res.reason == "unknown":
+            return BestResponse("unknown", current[agent], None, None, res.checks)
+        if res.reason == "no_improvement":
+            return BestResponse("ok", current[agent], None, None, res.checks)
+        sol = res.solution
+        assert (
+            sol is not None and sol.play is not None and sol.payoff_by_agent is not None
+        )
+        return BestResponse("ok", sol.payoff_by_agent[agent], sol.play, sol, res.checks)
+
+    return br
 
 
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
+
+def _validate(
+    territory: Territory,
+    num_agents: int,
+    horizon: int | None,
+    max_iters: int | None,
+    initial: str = "satisfying",
+) -> int:
+    if num_agents <= 0:
+        raise ValueError("num_agents must be >= 1")
+    m = len(territory) // num_agents
+    if horizon is None:
+        horizon = m
+    if horizon != m:
+        raise ValueError(
+            f"horizon must be m = floor(|T|/|Agt|) = {m} (Definition 3.9.1), got {horizon}"
+        )
+    if max_iters is not None and max_iters < 0:
+        raise ValueError("max_iters must be >= 0 or None")
+    if initial not in INITIAL_QUERIES:
+        raise ValueError(f"initial must be one of {INITIAL_QUERIES}, got {initial!r}")
+    return horizon
+
+
+@dataclass(frozen=True, slots=True)
+class InitialPlay:
+    """The outcome of the initial query of a run (lines 1-4 of Algorithm 1).
+
+    Attributes:
+        reason: ``"sat"``, ``"unsat"``, ``"unknown"`` or ``"given"`` (the
+            caller passed the initial play).
+        play: ``pi^0``, if any.
+        solution: the model whose play is ``pi^0``, if any.
+        rewards: ``r_a(pi^0)``, if any.
+        query_s: wall-clock time of the query (``None`` for a given play).
+        initial: ``"satisfying"``, ``"collective"`` or ``"given"``.
+    """
+
+    reason: str
+    play: Play | None
+    solution: SmtSolution | None
+    rewards: tuple[int, ...] | None
+    query_s: float | None
+    initial: str
+
+
+InitialHook = Callable[[InitialPlay], None]
+"""Called with the outcome of the initial query as soon as it is known."""
+
+
+def initial_play_of(
+    base: BaseEncoding,
+    *,
+    initial: str,
+    symmetry: bool,
+    extra_constraints: ExtraConstraints | None,
+    timeout_ms: int | None,
+    given: Play | None = None,
+) -> InitialPlay:
+    """Pose the initial query of IBIS, S-IBIS or Q-IBIS, or take the *given* play.
+
+    *initial* selects ``smt(F)`` (``"satisfying"``) or ``smt(F, f)``
+    (``"collective"``, Definition 4.6.1); *symmetry* adds the
+    symmetry-breaking constraints of the territory and *extra_constraints*
+    further constraints, both to this query only.
+    """
+    if given is not None:
+        if given.num_agents != base.num_agents or given.horizon != base.horizon:
+            raise ValueError("initial_play does not match the game")
+        return InitialPlay(
+            "given", given, None, base.rewards_of(given.final_state), None, "given"
+        )
+    t0 = time.perf_counter()
+    sol = initial_from_base(
+        base,
+        initial=initial,
+        symmetry=symmetry,
+        extra_constraints=extra_constraints,
+        timeout_ms=timeout_ms,
+    )
+    elapsed = time.perf_counter() - t0
+    if not sol.is_sat:
+        return InitialPlay(sol.reason, None, None, None, elapsed, initial)
+    assert sol.play is not None and sol.payoff_by_agent is not None
+    return InitialPlay("sat", sol.play, sol, sol.payoff_by_agent, elapsed, initial)
+
+
+def _ibis_core(
+    *,
+    territory: Territory,
+    num_agents: int,
+    horizon: int | None,
+    max_iters: int | None,
+    initial: str,
+    progress: bool,
+    timing: bool,
+    timeout_ms: int | None,
+    symmetry: bool,
+    weights: tuple[int, ...] | None,
+    custom_neighbors: dict[int, list[int]] | None,
+    weight_balance_target: int | None,
+    demands: tuple[int, ...] | None,
+    initial_constraints: ExtraConstraints | None,
+    initial_play: Play | None,
+    make_best_response: Callable[[BaseEncoding, int | None], BestResponseFn],
+    on_initial: InitialHook | None = None,
+) -> IbisResult:
+    h = _validate(territory, num_agents, horizon, max_iters, initial)
+    t0 = time.perf_counter()
+
+    def _log(msg: str) -> None:
+        if progress:
+            if timing:
+                msg = f"{msg} t={time.perf_counter() - t0:.3f}s"
+            print(msg, file=sys.stderr, flush=True)
+
+    base = build_base_encoding(
+        territory=territory,
+        num_agents=num_agents,
+        horizon=h,
+        demands=demands,
+        weights=weights,
+        custom_neighbors=custom_neighbors,
+        weight_balance_target=weight_balance_target,
+    )
+
+    abstract = weights is not None or custom_neighbors is not None
+    if initial_play is None and symmetry and abstract and initial_constraints is None:
+        _log(
+            "symmetry: no grid symmetry for an abstract game; pass initial_constraints"
+        )
+    init = initial_play_of(
+        base,
+        initial=initial,
+        symmetry=symmetry and not abstract,
+        extra_constraints=initial_constraints,
+        timeout_ms=timeout_ms,
+        given=initial_play,
+    )
+    if on_initial is not None:
+        on_initial(init)
+    if init.reason == "unknown":
+        _log(f"initial query ({initial}): solver answered unknown")
+        return failed_initial(IbisResult, init)
+    if init.play is None:
+        _log("initial query unsatisfiable: no satisfying strategy exists")
+        return failed_initial(IbisResult, init)
+    if init.query_s is not None:
+        _log(
+            f"initial query ({initial}): rewards={init.rewards} in {init.query_s:.3f}s"
+        )
+
+    res = run_ibis_loop(
+        initial_play=init.play,
+        initial_solution=init.solution,
+        best_response=make_best_response(base, timeout_ms),
+        rewards_of=base.rewards_of,
+        max_iters=max_iters,
+        territory=territory,
+        log=_log if progress else None,
+    )
+    return with_initial(res, init)
+
+
+def failed_initial(cls: Callable[..., ResultT], init: InitialPlay) -> ResultT:
+    """The result of a run whose initial query had no model (``unk`` or ``uns``)."""
+    reason = "unknown" if init.reason == "unknown" else "unsat"
+    return cls(
+        False,
+        reason,
+        False,
+        0,
+        None,
+        None,
+        None,
+        outcome=OUTCOME_BY_REASON[reason],
+        initial=init.initial,
+        initial_query_s=init.query_s,
+    )
+
+
+def with_initial(res: ResultT, init: InitialPlay) -> ResultT:
+    """*res* with the fields that describe its initial play."""
+    return replace(  # type: ignore[type-var]
+        res,
+        initial=init.initial,
+        initial_query_s=init.query_s,
+        initial_play=init.play,
+        initial_rewards=init.rewards,
+    )
+
+
 def solve_ibis(
     *,
     territory: Territory,
     num_agents: int,
-    horizon: int,
+    horizon: int | None = None,
     seed: int = 0,
-    max_iters: int = 25,
+    max_iters: int | None = 30,
+    initial: str = "satisfying",
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -64,27 +569,45 @@ def solve_ibis(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
-    require_victory: bool = True,
+    require_victory: bool = False,
+    initial_constraints: ExtraConstraints | None = None,
+    initial_play: Play | None = None,
+    on_initial: InitialHook | None = None,
 ) -> IbisResult:
-    """Run IBIS: iterative best-response NE search via SMT (Alg 1).
+    """Run IBIS (Algorithm 1) with the iteration bound ``N = max_iters``.
 
-    Uses Z3 Optimize for best-response computation.
+    *max_iters* ``None`` runs the loop without a bound: it stops at an
+    equilibrium or at the first recurring play.  *initial* selects the
+    query for the initial play, ``"satisfying"`` (``smt(F)``, the default)
+    or ``"collective"`` (``smt(F, f)``, Definition 4.6.1).  *horizon* must
+    be ``m = floor(|T|/|Agt|)`` (``None`` selects it).  *symmetry* adds the
+    symmetry-breaking constraints of the territory to the initial query
+    only; for an abstract game (*weights* or *custom_neighbors* given) pass
+    its constraints as *initial_constraints*.  *initial_play* replaces the
+    initial query.  *on_initial* is called with the outcome of the initial
+    query (an :class:`InitialPlay`) as soon as it is known.  *seed* and
+    *require_victory* are accepted for backward compatibility and have no
+    effect.
     """
-    if num_agents <= 0:
-        raise ValueError("num_agents must be >= 1")
-    if horizon <= 0:
-        raise ValueError("horizon must be >= 1")
-    if max_iters <= 0:
-        raise ValueError("max_iters must be >= 1")
-
+    _ = (seed, require_victory)
     return _ibis_core(
-        territory=territory, num_agents=num_agents, horizon=horizon,
-        seed=seed, max_iters=max_iters, progress=progress, timing=timing,
-        timeout_ms=timeout_ms, symmetry=symmetry,
-        weights=weights, custom_neighbors=custom_neighbors,
-        weight_balance_target=weight_balance_target, demands=demands,
-        require_victory=require_victory,
-        find_best_improvement_fn=_find_best_improvement,
+        territory=territory,
+        num_agents=num_agents,
+        horizon=horizon,
+        max_iters=max_iters,
+        initial=initial,
+        progress=progress,
+        timing=timing,
+        timeout_ms=timeout_ms,
+        symmetry=symmetry,
+        weights=weights,
+        custom_neighbors=custom_neighbors,
+        weight_balance_target=weight_balance_target,
+        demands=demands,
+        initial_constraints=initial_constraints,
+        initial_play=initial_play,
+        make_best_response=smt_best_response,
+        on_initial=on_initial,
     )
 
 
@@ -92,9 +615,10 @@ def solve_sibis(
     *,
     territory: Territory,
     num_agents: int,
-    horizon: int,
+    horizon: int | None = None,
     seed: int = 0,
-    max_iters: int = 25,
+    max_iters: int | None = 30,
+    initial: str = "satisfying",
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -103,530 +627,33 @@ def solve_sibis(
     custom_neighbors: dict[int, list[int]] | None = None,
     weight_balance_target: int | None = None,
     demands: tuple[int, ...] | None = None,
-    require_victory: bool = True,
+    require_victory: bool = False,
+    initial_constraints: ExtraConstraints | None = None,
+    initial_play: Play | None = None,
+    on_initial: InitialHook | None = None,
 ) -> IbisResult:
-    """Run S-IBIS: SAT-based iterative best-response NE search.
+    """Run S-IBIS (Algorithm 2): the loop of IBIS with binary-search best responses.
 
-    Same algorithm structure as IBIS (Alg 1) but replaces Optimize-based
-    best-response with binary search over satisfiability checks (Solver),
-    which is typically much faster for large grids.
+    ``R_max`` is ``m``, or the largest total weight of ``m`` sectors in a
+    weighted (abstract) game.  The parameters are those of :func:`solve_ibis`.
     """
-    if num_agents <= 0:
-        raise ValueError("num_agents must be >= 1")
-    if horizon <= 0:
-        raise ValueError("horizon must be >= 1")
-    if max_iters <= 0:
-        raise ValueError("max_iters must be >= 1")
-
-    # Upper bound for binary search: max payoff any single agent can achieve.
-    if weights is not None:
-        max_payoff = sum(weights)
-    else:
-        max_payoff = len(territory) // num_agents
-
-    br_fn = partial(_find_best_improvement_binsearch, max_payoff=max_payoff)
-
+    _ = (seed, require_victory)
     return _ibis_core(
-        territory=territory, num_agents=num_agents, horizon=horizon,
-        seed=seed, max_iters=max_iters, progress=progress, timing=timing,
-        timeout_ms=timeout_ms, symmetry=symmetry,
-        weights=weights, custom_neighbors=custom_neighbors,
-        weight_balance_target=weight_balance_target, demands=demands,
-        require_victory=require_victory,
-        find_best_improvement_fn=br_fn,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Implies-only policy model (replaces deterministic fallback everywhere)
-# ---------------------------------------------------------------------------
-
-def _add_implies_policy_for_agent(opt, v, territory: Territory, policy: Policy, agent: int) -> None:
-    """Add Implies-only constraints for one agent's mapped-state policy.
-
-    For each mapped state, adds ``Implies(state_match, action == chosen)``
-    at every time step.  Unmapped states are unconstrained — no
-    deterministic fallback.  Also adds state-only consistency (same
-    state → same action) for the agent.
-    """
-    from z3 import And, Implies
-
-    S, T = v.S, v.T
-
-    if policy:
-        for state, chosen_coord in policy.items():
-            if chosen_coord is None:
-                chosen_idx = -1
-            else:
-                sidx = territory.index_of(chosen_coord)
-                if sidx is None:
-                    continue
-                chosen_idx = sidx
-
-            for t in range(T):
-                match_state = And([v.owner[s][t] == state[s] for s in range(S)])
-                opt.add(Implies(match_state, v.action[agent][t] == chosen_idx))
-
-    # State-only consistency.
-    for t1 in range(T):
-        for t2 in range(t1 + 1, T):
-            same_state = And([v.owner[s][t1] == v.owner[s][t2] for s in range(S)])
-            opt.add(Implies(same_state, v.action[agent][t1] == v.action[agent][t2]))
-
-
-def _add_payoff_floor_constraints(
-    opt,
-    v,
-    territory: Territory,
-    policies: list[Policy],
-    deviating_agent: int,
-    payoff_floors: tuple[int, ...],
-) -> None:
-    """Constrain opponents with payoff-floor model for the BR deviation check.
-
-    Opponents follow their learned policy in mapped states (Implies only),
-    are unconstrained in unmapped states, and must maintain at least their
-    current payoff (preventing cooperation).  The deviating agent has
-    state-only consistency but is otherwise free.
-    """
-    A = v.A
-
-    for opp in range(A):
-        if opp == deviating_agent:
-            continue
-        _add_implies_policy_for_agent(opt, v, territory, policies[opp], opp)
-        opt.add(v.payoff[opp] >= payoff_floors[opp])
-
-    # Deviating agent: state-only consistency only (free to deviate from policy).
-    from z3 import And, Implies
-    S, T = v.S, v.T
-    for t1 in range(T):
-        for t2 in range(t1 + 1, T):
-            same_state = And([v.owner[s][t1] == v.owner[s][t2] for s in range(S)])
-            opt.add(Implies(same_state, v.action[deviating_agent][t1] == v.action[deviating_agent][t2]))
-
-
-def _eval_joint_strategy(
-    base_enc: BaseEncoding,
-    policies: list[Policy],
-    territory: Territory,
-    timeout_ms: int | None = None,
-) -> SmtSolution:
-    """Evaluate the current joint strategy under the Implies-only model.
-
-    All agents follow their learned policies in mapped states, are
-    unconstrained in unmapped states, and have state-only consistency.
-    The objective maximizes the sum of all agents' payoffs (cooperative
-    outcome consistent with current policies).
-    """
-    from .smt_solve import _extract_solution
-
-    try:
-        from z3 import Optimize, Sum, is_true, sat
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("z3-solver is required") from e
-
-    v = base_enc.variables
-
-    opt = Optimize()
-    if timeout_ms is not None:
-        opt.set(timeout=timeout_ms)
-    opt.add(*base_enc.constraints)
-
-    for a in range(v.A):
-        _add_implies_policy_for_agent(opt, v, territory, policies[a], a)
-
-    opt.maximize(Sum([v.payoff[a] for a in range(v.A)]))
-
-    check_res = opt.check()
-    if check_res != sat:
-        return SmtSolution(False, "unsat", None, None)
-
-    model = opt.model()
-    return _extract_solution(model, v, territory, v.A, v.T, True, is_true)
-
-
-# ---------------------------------------------------------------------------
-# Core loop (shared by IBIS and S-IBIS)
-# ---------------------------------------------------------------------------
-
-def _ibis_core(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    seed: int = 0,
-    max_iters: int = 25,
-    progress: bool = False,
-    timing: bool = False,
-    timeout_ms: int | None = None,
-    symmetry: bool = False,
-    weights: tuple[int, ...] | None = None,
-    custom_neighbors: dict[int, list[int]] | None = None,
-    weight_balance_target: int | None = None,
-    demands: tuple[int, ...] | None = None,
-    require_victory: bool = True,
-    find_best_improvement_fn: BestResponseFn,
-) -> IbisResult:
-    """Iterative best-response loop with pluggable BR strategy."""
-
-    def _log(msg: str) -> None:
-        if progress:
-            print(msg, file=sys.stderr, flush=True)
-
-    _ = seed  # reserved for future perturbations
-
-    policies: list[Policy] = [{} for _ in range(num_agents)]
-    seen: set[tuple[tuple[tuple[StateKey, tuple[int, int] | None], ...], ...]] = set()
-    t0 = time.perf_counter()
-
-    # Build base encoding once — caches expensive constraint expressions (O(S³))
-    # For concrete games (no weights), prune cr variables for sector pairs
-    # whose BFS distance exceeds the demand (max_region_size = S // A).
-    mrs = None if weights is not None else len(territory) // num_agents
-    base_enc = build_base_encoding(
-        territory=territory, num_agents=num_agents, horizon=horizon,
-        require_victory=require_victory, symmetry_breaking=symmetry,
-        weights=weights, custom_neighbors=custom_neighbors,
+        territory=territory,
+        num_agents=num_agents,
+        horizon=horizon,
+        max_iters=max_iters,
+        initial=initial,
+        progress=progress,
+        timing=timing,
+        timeout_ms=timeout_ms,
+        symmetry=symmetry,
+        weights=weights,
+        custom_neighbors=custom_neighbors,
         weight_balance_target=weight_balance_target,
         demands=demands,
-        max_region_size=mrs,
+        initial_constraints=initial_constraints,
+        initial_play=initial_play,
+        make_best_response=binsearch_best_response,
+        on_initial=on_initial,
     )
-
-    for it in range(1, max_iters + 1):
-        iter_t0 = time.perf_counter()
-        profile_key = freeze_profile(policies)
-        if profile_key in seen:
-            _log(f"iter={it} cycle_detected")
-            base = _eval_joint_strategy(base_enc, policies, territory, timeout_ms)
-            if timing:
-                _log(f"iter={it} final_eval_time_s={time.perf_counter() - iter_t0:.3f}")
-            return IbisResult(base.is_sat, "cycle", False, it - 1, base.actions_by_round, base.payoff_by_agent, base)
-        seen.add(profile_key)
-
-        base_t0 = time.perf_counter()
-        all_empty = all(not p for p in policies)
-        if all_empty:
-            # First iteration: no policies fixed — use Solver (SAT) instead of
-            # Optimize to find ANY feasible strategy quickly.  IBIS will
-            # iteratively improve from whatever starting point we get.
-            _log("using feasible-only solver (no optimisation)")
-            base = find_feasible_from_base(
-                base_enc,
-                fixed_policy_by_agent=tuple(None for _ in policies),
-                debug=True, timeout_ms=timeout_ms,
-            )
-        else:
-            # Implies-only model: agents follow learned policies in mapped
-            # states, are unconstrained in unmapped states.  Maximize sum
-            # to get the cooperative baseline payoffs.
-            base = _eval_joint_strategy(base_enc, policies, territory, timeout_ms)
-        base_dt = time.perf_counter() - base_t0
-        if not base.is_sat:
-            return IbisResult(False, base.reason, False, it - 1, base.actions_by_round, None, base)
-        if base.payoff_by_agent is None:
-            return IbisResult(False, "missing_debug_payoff", False, it - 1, base.actions_by_round, None, base)
-
-        base_payoff = base.payoff_by_agent
-        if timing:
-            _log(f"iter={it} base_payoff={base_payoff} base_solve_time_s={base_dt:.3f}")
-        else:
-            _log(f"iter={it} base_payoff={base_payoff}")
-
-        if base.owner_by_round is not None and base.actions_by_round is not None:
-            for a in range(num_agents):
-                if not policies[a]:
-                    policies[a] = policy_from_solution(
-                        base.owner_by_round, base.actions_by_round, a,
-                    )
-
-        best_agent, best_ratio, best_delta, best_learned, best_learned_states = find_best_improvement_fn(
-            territory=territory, num_agents=num_agents, horizon=horizon,
-            policies=policies, base_payoff=base_payoff, timeout_ms=timeout_ms,
-            it=it, _log=_log, timing=timing, symmetry=symmetry,
-            weights=weights, custom_neighbors=custom_neighbors, weight_balance_target=weight_balance_target,
-            demands=demands,
-            base_encoding=base_enc,
-        )
-
-        if best_agent is None or best_learned is None:
-            # No agent can improve under the payoff-floor opponent model.
-            # Convergence under this model implies a verified NE — no
-            # separate verification step is needed.
-            if timing:
-                _log(f"iter={it} converged_time_s={time.perf_counter() - iter_t0:.3f}")
-                _log(f"done reason=ne iterations={it} total_time_s={time.perf_counter() - t0:.3f}")
-            return IbisResult(True, "ne", True, it, base.actions_by_round, base_payoff, base)
-
-        updated = dict(policies[best_agent])
-        updated.update(best_learned)
-        policies = [dict(p) for p in policies]
-        policies[best_agent] = updated
-
-        _log(f"iter={it} picked_agent={best_agent} picked_delta={best_delta} picked_ratio={best_ratio:.3f} picked_learned_states={best_learned_states}")
-        if timing:
-            _log(f"iter={it} updated_profile_states={[len(p) for p in policies]} iter_time_s={time.perf_counter() - iter_t0:.3f}")
-        else:
-            _log(f"iter={it} updated_profile_states={[len(p) for p in policies]}")
-
-    final = _eval_joint_strategy(base_enc, policies, territory, timeout_ms)
-    if timing:
-        _log(f"done reason=max_iters iterations={max_iters} total_time_s={time.perf_counter() - t0:.3f}")
-
-    return IbisResult(final.is_sat, "max_iters", False, max_iters, final.actions_by_round, final.payoff_by_agent, final)
-
-
-# ---------------------------------------------------------------------------
-# Best-response: Optimize (IBIS)
-# ---------------------------------------------------------------------------
-
-def _find_best_improvement(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    policies: list[Policy],
-    base_payoff: tuple[int, ...],
-    timeout_ms: int | None,
-    it: int,
-    _log,
-    timing: bool,
-    symmetry: bool = False,
-    weights: tuple[int, ...] | None = None,
-    custom_neighbors: dict[int, list[int]] | None = None,
-    weight_balance_target: int | None = None,
-    demands: tuple[int, ...] | None = None,
-    base_encoding: BaseEncoding | None = None,
-) -> tuple[int | None, float, int, Policy | None, int]:
-    """Find the single agent with the best unilateral improvement.
-
-    Uses Z3 Optimize to find each agent's optimal best-response under the
-    payoff-floor opponent model: opponents follow learned policies in
-    mapped states, are unconstrained in unmapped states, and must maintain
-    at least their current payoff (preventing cooperation).
-    """
-    if base_encoding is None:
-        raise ValueError("IBIS requires base_encoding")
-
-    from .smt_solve import _extract_solution
-
-    try:
-        from z3 import Optimize, is_true, sat
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("z3-solver is required") from e
-
-    v = base_encoding.variables
-
-    best_agent: int | None = None
-    best_ratio: float = 1.0
-    best_delta: int = 0
-    best_learned: Policy | None = None
-    best_learned_states: int = 0
-
-    for a in range(num_agents):
-        opt = Optimize()
-        if timeout_ms is not None:
-            opt.set(timeout=timeout_ms)
-        opt.add(*base_encoding.constraints)
-        _add_payoff_floor_constraints(opt, v, territory, policies, a, base_payoff)
-        opt.maximize(v.payoff[a])
-
-        br_t0 = time.perf_counter()
-        check_res = opt.check()
-        br_dt = time.perf_counter() - br_t0
-
-        if check_res != sat:
-            if timing:
-                _log(f"iter={it} agent={a} br=unsat time_s={br_dt:.3f}")
-            else:
-                _log(f"iter={it} agent={a} br=unsat")
-            continue
-
-        model = opt.model()
-        br = _extract_solution(model, v, territory, v.A, v.T, True, is_true)
-        if br.actions_by_round is None or br.payoff_by_agent is None:
-            if timing:
-                _log(f"iter={it} agent={a} br=unsat time_s={br_dt:.3f}")
-            else:
-                _log(f"iter={it} agent={a} br=unsat")
-            continue
-
-        new_payoff = br.payoff_by_agent[a]
-        if timing:
-            _log(f"iter={it} agent={a} br_payoff={new_payoff} time_s={br_dt:.3f}")
-        else:
-            _log(f"iter={it} agent={a} br_payoff={new_payoff}")
-
-        if new_payoff > base_payoff[a]:
-            assert br.owner_by_round is not None
-            learned = policy_from_solution(br.owner_by_round, br.actions_by_round, a)
-            delta = int(new_payoff - base_payoff[a])
-            ratio = float(new_payoff) / float(base_payoff[a])
-            learned_states = len(learned)
-
-            is_better = (
-                best_agent is None
-                or ratio > best_ratio
-                or (ratio == best_ratio and delta > best_delta)
-                or (ratio == best_ratio and delta == best_delta and learned_states < best_learned_states)
-            )
-            if is_better:
-                best_agent, best_ratio, best_delta, best_learned, best_learned_states = (
-                    a, ratio, delta, learned, learned_states
-                )
-            _log(f"iter={it} agent={a} improved delta={delta} ratio={ratio:.3f} learned_states={learned_states}")
-
-    return best_agent, best_ratio, best_delta, best_learned, best_learned_states
-
-
-# ---------------------------------------------------------------------------
-# Best-response: Binary search over SAT (S-IBIS)
-# ---------------------------------------------------------------------------
-
-def _find_best_improvement_binsearch(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    policies: list[Policy],
-    base_payoff: tuple[int, ...],
-    timeout_ms: int | None,
-    it: int,
-    _log,
-    timing: bool,
-    symmetry: bool = False,
-    weights: tuple[int, ...] | None = None,
-    custom_neighbors: dict[int, list[int]] | None = None,
-    weight_balance_target: int | None = None,
-    demands: tuple[int, ...] | None = None,
-    base_encoding: BaseEncoding | None = None,
-    max_payoff: int = 0,
-) -> tuple[int | None, float, int, Policy | None, int]:
-    """Find the single agent with the best unilateral improvement.
-
-    Uses **incremental** binary search over Z3 Solver with push/pop instead
-    of Z3 Optimize.  For each agent, one Solver is built with base constraints
-    + payoff-floor opponent constraints, then the threshold constraint is
-    pushed/popped for each binary-search probe.  Z3 retains learned conflict
-    clauses across probes, making the 2nd+ probes dramatically faster.
-
-    1. Quick SAT filter: can the agent beat their current payoff?
-       If UNSAT, skip immediately (costs seconds, not minutes).
-    2. Binary search over [witness_payoff, max_payoff] to find the exact
-       optimal best-response payoff in ~log2(max_payoff) SAT calls.
-    """
-    if base_encoding is None:
-        raise ValueError("S-IBIS requires base_encoding (cannot use solve_smt_game fallback)")
-
-    from .smt_solve import _extract_solution
-
-    try:
-        from z3 import Solver, is_true, sat, unknown
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("z3-solver is required for SMT solving") from e
-
-    v = base_encoding.variables
-
-    best_agent: int | None = None
-    best_ratio: float = 1.0
-    best_delta: int = 0
-    best_learned: Policy | None = None
-    best_learned_states: int = 0
-
-    for a in range(num_agents):
-        # Build ONE solver per agent — reused across all probes
-        solver = Solver()
-        if timeout_ms is not None:
-            solver.set(timeout=timeout_ms)
-        solver.add(*base_encoding.constraints)
-        _add_payoff_floor_constraints(solver, v, territory, policies, a, base_payoff)
-
-        br_t0 = time.perf_counter()
-
-        # --- Phase 1: Can this agent improve at all? ---
-        solver.push()
-        solver.add(v.payoff[a] > base_payoff[a])
-        check_res = solver.check()
-
-        if check_res != sat:
-            solver.pop()
-            br_dt = time.perf_counter() - br_t0
-            if timing:
-                _log(f"iter={it} agent={a} br=no_improvement time_s={br_dt:.3f}")
-            else:
-                _log(f"iter={it} agent={a} br=no_improvement")
-            continue
-
-        # Extract witness from initial check
-        model = solver.model()
-        check = _extract_solution(model, v, territory, v.A, v.T, True, is_true)
-        solver.pop()
-
-        if check.payoff_by_agent is None:
-            br_dt = time.perf_counter() - br_t0
-            if timing:
-                _log(f"iter={it} agent={a} br=no_improvement time_s={br_dt:.3f}")
-            else:
-                _log(f"iter={it} agent={a} br=no_improvement")
-            continue
-
-        # --- Phase 2: Incremental binary search for optimal payoff ---
-        best_sol = check
-        lo = check.payoff_by_agent[a]  # Known achievable (from SAT witness)
-        hi = max_payoff
-
-        search_calls = 0
-        while lo < hi:
-            mid = (lo + hi + 1) // 2  # Ceiling to avoid infinite loop
-            solver.push()
-            solver.add(v.payoff[a] > mid - 1)  # payoff > mid-1 ⟺ payoff >= mid
-            probe_res = solver.check()
-            search_calls += 1
-
-            if probe_res == sat:
-                probe_model = solver.model()
-                probe = _extract_solution(probe_model, v, territory, v.A, v.T, True, is_true)
-                solver.pop()  # Pop BEFORE using the result
-
-                if probe.payoff_by_agent is not None:
-                    actual = probe.payoff_by_agent[a]
-                    lo = actual  # Skip ahead using witness payoff
-                    best_sol = probe
-                    if actual >= hi:
-                        break
-                else:
-                    hi = mid - 1
-            else:
-                solver.pop()
-                hi = mid - 1
-
-        # lo = optimal payoff, best_sol has the corresponding model
-        new_payoff = lo
-        br_dt = time.perf_counter() - br_t0
-
-        if timing:
-            _log(f"iter={it} agent={a} br_payoff={new_payoff} search_calls={search_calls} time_s={br_dt:.3f}")
-        else:
-            _log(f"iter={it} agent={a} br_payoff={new_payoff} search_calls={search_calls}")
-
-        if new_payoff > base_payoff[a]:
-            assert best_sol.owner_by_round is not None
-            assert best_sol.actions_by_round is not None
-            learned = policy_from_solution(best_sol.owner_by_round, best_sol.actions_by_round, a)
-            delta = int(new_payoff - base_payoff[a])
-            ratio = float(new_payoff) / float(base_payoff[a]) if base_payoff[a] > 0 else float("inf")
-            learned_states = len(learned)
-
-            is_better = (
-                best_agent is None
-                or ratio > best_ratio
-                or (ratio == best_ratio and delta > best_delta)
-                or (ratio == best_ratio and delta == best_delta and learned_states < best_learned_states)
-            )
-            if is_better:
-                best_agent, best_ratio, best_delta, best_learned, best_learned_states = (
-                    a, ratio, delta, learned, learned_states
-                )
-            _log(f"iter={it} agent={a} improved delta={delta} ratio={ratio:.3f} learned_states={learned_states}")
-
-    return best_agent, best_ratio, best_delta, best_learned, best_learned_states

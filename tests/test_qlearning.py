@@ -1,32 +1,47 @@
-"""Tests for qlearning.py (Section 5.2)."""
+"""Tests for qlearning.py (thesis Sections 2.4 and 4.9)."""
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import pytest
 
-from rcmas.model import Coord, State, Territory, evolve, largest_region_size, scores
+import rcmas.qlearning as qlearning
+from rcmas.model import Coord, State, Territory
 from rcmas.qlearning import (
+    LearningGame,
+    LearningParams,
     QTable,
     TrainConfig,
     TrainingArtifacts,
     action_key,
     best_q_action,
+    collides,
+    collision_reward,
     compute_shaped_reward,
     compute_truncation_reward,
     decode_action,
     detect_collisions,
+    epsilon_greedy_action,
     epsilon_schedule,
+    greedy_action,
+    max_q,
+    q_update,
+    run_episode,
+    shaped_reward,
     state_key,
+    top_k,
     top_k_actions,
+    train_q,
     train_self_play,
 )
-
+from rcmas.strategy import CanonicalCompletion, Play, is_live
 
 # ===================================================================
 # State / action encoding
 # ===================================================================
+
 
 class TestStateKey:
     def test_deterministic(self):
@@ -72,6 +87,7 @@ class TestActionKey:
 # QTable
 # ===================================================================
 
+
 class TestQTable:
     def test_get_set(self):
         qt = QTable.empty()
@@ -116,6 +132,7 @@ class TestQTable:
 # Q-value helpers
 # ===================================================================
 
+
 class TestQValueHelpers:
     def test_best_q_action(self):
         q: dict[str, dict[str, float]] = {"s": {"a0": 1.0, "a1": 5.0}}
@@ -143,6 +160,7 @@ class TestQValueHelpers:
 # ===================================================================
 # compute_shaped_reward
 # ===================================================================
+
 
 class TestComputeShapedReward:
     """Tests for compute_shaped_reward with manual State construction."""
@@ -297,6 +315,7 @@ class TestComputeShapedReward:
 # compute_truncation_reward
 # ===================================================================
 
+
 class TestComputeTruncationReward:
     """Tests for compute_truncation_reward."""
 
@@ -309,8 +328,11 @@ class TestComputeTruncationReward:
             owner_by_index=(0, 0, 1, -1),
         )
         r = compute_truncation_reward(
-            state, agent_id=0, territory_size=4,
-            terminal_reward=5.0, normalize=True,
+            state,
+            agent_id=0,
+            territory_size=4,
+            terminal_reward=5.0,
+            normalize=True,
         )
         # 5.0 * 2 / 4 = 2.5
         assert r == pytest.approx(2.5)
@@ -319,8 +341,11 @@ class TestComputeTruncationReward:
         """Agent owns nothing -> 0.0."""
         state = State.initial(territory_2x2, num_agents=2)
         r = compute_truncation_reward(
-            state, agent_id=0, territory_size=4,
-            terminal_reward=5.0, normalize=True,
+            state,
+            agent_id=0,
+            territory_size=4,
+            terminal_reward=5.0,
+            normalize=True,
         )
         assert r == 0.0
 
@@ -328,6 +353,7 @@ class TestComputeTruncationReward:
 # ===================================================================
 # detect_collisions
 # ===================================================================
+
 
 class TestDetectCollisions:
     """Tests for detect_collisions."""
@@ -364,6 +390,7 @@ class TestDetectCollisions:
 # epsilon_schedule
 # ===================================================================
 
+
 class TestEpsilonSchedule:
     """Tests for linear epsilon decay."""
 
@@ -395,11 +422,14 @@ class TestEpsilonSchedule:
 # Self-play training
 # ===================================================================
 
+
 class TestTrainSelfPlay:
     def test_runs_and_produces_artifacts(self, tmp_path: Path):
         territory = Territory.from_ascii(["..", ".."])
         cfg = TrainConfig(episodes=5, max_rounds=2)
-        artifacts = train_self_play(territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path
+        )
         assert artifacts.directory.exists()
         assert len(artifacts.qtables) == 2
         assert (tmp_path / "agent_0.json").exists()
@@ -409,14 +439,18 @@ class TestTrainSelfPlay:
         """Single agent self-play should work."""
         territory = Territory.from_ascii([".."])
         cfg = TrainConfig(episodes=3, max_rounds=2)
-        artifacts = train_self_play(territory, num_agents=1, cfg=cfg, seed=0, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=1, cfg=cfg, seed=0, out_dir=tmp_path
+        )
         assert len(artifacts.qtables) == 1
 
     def test_qtables_have_entries(self, tmp_path: Path):
         """After training, Q-tables should have some entries."""
         territory = Territory.from_ascii(["..", ".."])
         cfg = TrainConfig(episodes=20, max_rounds=2)
-        artifacts = train_self_play(territory, num_agents=2, cfg=cfg, seed=42, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=2, cfg=cfg, seed=42, out_dir=tmp_path
+        )
         for qt in artifacts.qtables:
             assert len(qt.q) > 0
 
@@ -425,6 +459,7 @@ class TestTrainSelfPlay:
 # Self-play convergence
 # ===================================================================
 
+
 class TestTrainSelfPlayConvergence:
     """Tests for convergence monitoring fields in TrainingArtifacts."""
 
@@ -432,7 +467,9 @@ class TestTrainSelfPlayConvergence:
         """After training, converged/final_mean_td_error/episodes_completed are set."""
         territory = Territory.from_ascii(["..", ".."])
         cfg = TrainConfig(episodes=10, max_rounds=2)
-        artifacts = train_self_play(territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path
+        )
         assert isinstance(artifacts.converged, bool)
         assert isinstance(artifacts.final_mean_td_error, float)
         assert artifacts.final_mean_td_error >= 0.0
@@ -447,9 +484,11 @@ class TestTrainSelfPlayConvergence:
             episodes=500,
             max_rounds=4,
             convergence_threshold=100.0,  # very generous threshold
-            convergence_window=3,         # short window to converge quickly
+            convergence_window=3,  # short window to converge quickly
         )
-        artifacts = train_self_play(territory, num_agents=1, cfg=cfg, seed=0, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=1, cfg=cfg, seed=0, out_dir=tmp_path
+        )
         # With such a generous threshold on a tiny grid, early stopping should trigger
         assert artifacts.episodes_completed < cfg.episodes
 
@@ -458,6 +497,7 @@ class TestTrainSelfPlayConvergence:
 # Self-play with symmetry
 # ===================================================================
 
+
 class TestTrainSelfPlaySymmetry:
     """Tests for symmetry-aware Q-learning training."""
 
@@ -465,7 +505,9 @@ class TestTrainSelfPlaySymmetry:
         """use_symmetry=True on a 2x2 grid produces valid artifacts."""
         territory = Territory.from_ascii(["..", ".."])
         cfg = TrainConfig(episodes=10, max_rounds=2, use_symmetry=True)
-        artifacts = train_self_play(territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path)
+        artifacts = train_self_play(
+            territory, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path
+        )
         assert artifacts.directory.exists()
         assert len(artifacts.qtables) == 2
         for qt in artifacts.qtables:
@@ -477,13 +519,19 @@ class TestTrainSelfPlaySymmetry:
 
         cfg_no_sym = TrainConfig(episodes=30, max_rounds=4, use_symmetry=False)
         art_no_sym = train_self_play(
-            territory, num_agents=2, cfg=cfg_no_sym, seed=42,
+            territory,
+            num_agents=2,
+            cfg=cfg_no_sym,
+            seed=42,
             out_dir=tmp_path / "no_sym",
         )
 
         cfg_sym = TrainConfig(episodes=30, max_rounds=4, use_symmetry=True)
         art_sym = train_self_play(
-            territory, num_agents=2, cfg=cfg_sym, seed=42,
+            territory,
+            num_agents=2,
+            cfg=cfg_sym,
+            seed=42,
             out_dir=tmp_path / "sym",
         )
 
@@ -500,3 +548,280 @@ class TestTrainSelfPlaySymmetry:
         # Symmetry canonicalization maps equivalent states together,
         # so the symmetry-aware version should have fewer or equal unique keys
         assert states_sym <= states_no_sym
+
+
+# ===================================================================
+# Self-play: episodes end at states that are not live
+# ===================================================================
+
+
+class TestSelfPlayLiveness:
+    def test_terminal_term_at_non_live_state(self):
+        """1x3 with 2 agents: one free sector is left, so the state is terminal."""
+        t = Territory.from_ascii(["..."])
+        prev = State.initial(t, num_agents=2)
+        nxt = State(territory=t, num_agents=2, owner_by_index=(0, 1, -1))
+        assert not nxt.is_terminal()
+        r = compute_shaped_reward(
+            prev_state=prev,
+            next_state=nxt,
+            agent_id=0,
+            agent_acted=True,
+            defeated=False,
+            is_collider=False,
+            territory_size=3,
+            collision_penalty=10.0,
+            step_reward=0.1,
+            region_growth_reward=1.0,
+            terminal_reward=5.0,
+            normalize=True,
+        )
+        assert r == pytest.approx(0.1 + 1 / 3 + 5 / 3)
+
+    def test_episode_stops_when_fewer_free_sectors_than_agents(self, tmp_path: Path):
+        """No round is played in the state with one free sector (no forced collision)."""
+        t = Territory.from_ascii(["..."])
+        cfg = TrainConfig(episodes=30, convergence_threshold=0.0)
+        art = train_self_play(t, num_agents=2, cfg=cfg, seed=0, out_dir=tmp_path)
+        s0 = state_key((-1, -1, -1))
+        for qt in art.qtables:
+            assert set(qt.q) == {s0}
+
+
+# ===================================================================
+# The learner of Q-IBIS (Section 4.9)
+# ===================================================================
+
+P = LearningParams()
+
+
+def _game_2x2(num_agents: int = 2) -> LearningGame:
+    # Sectors 0 1 (top row) and 2 3 (bottom row) in the tool's numbering:
+    # 0-1, 0-2, 1-3 and 2-3 are adjacent.
+    return LearningGame.from_territory(Territory.from_ascii(["..", ".."]), num_agents)
+
+
+class TestLearningGame:
+    def test_states_and_options(self):
+        g = _game_2x2()
+        assert g.initial_state == (-1, -1, -1, -1)
+        assert g.options((0, -1, 1, -1)) == (1, 3)
+        assert g.is_live((0, -1, 1, -1)) and not g.is_live((0, 0, 1, -1))
+
+    def test_rewards_unit_and_weighted(self):
+        g = _game_2x2()
+        assert g.reward((0, -1, 0, -1), 0) == 2
+        assert g.reward((0, 1, 1, 0), 0) == 1
+        t = Territory.from_ascii(["...", ""])
+        w = LearningGame.from_territory(
+            t, 2, weights=(3, 1, 2), custom_neighbors={0: [2], 1: [], 2: [0]}
+        )
+        assert w.reward((0, 0, 0), 0) == 5  # blocks 0 and 2 adjacent, 1 isolated
+        assert w.reward((0, 0, -1), 0) == 3
+
+    def test_weights_must_match(self):
+        with pytest.raises(ValueError, match="weights"):
+            LearningGame.from_territory(Territory.from_ascii([".."]), 1, weights=(1,))
+
+
+class TestShapedRewardSection49:
+    def test_round_without_collision(self):
+        g = _game_2x2()
+        s1 = (0, 1, -1, -1)
+        assert shaped_reward(g, g.initial_state, s1, 0, P) == pytest.approx(0.1 + 1 / 4)
+
+    def test_terminal_round(self):
+        g = _game_2x2()
+        s1, s2 = (0, 1, -1, -1), (0, 1, 0, 1)
+        expected = 0.1 + (2 - 1) / 4 + 5 * 2 / 4
+        assert shaped_reward(g, s1, s2, 0, P) == pytest.approx(expected)
+
+    def test_terminal_when_n_does_not_divide(self):
+        g = LearningGame.from_territory(Territory.from_ascii(["..."]), 2)
+        r = shaped_reward(g, g.initial_state, (0, 1, -1), 0, P)
+        assert r == pytest.approx(0.1 + 1 / 3 + 5 / 3)
+
+    def test_without_normalisation(self):
+        g = _game_2x2()
+        r = shaped_reward(
+            g, (0, 1, -1, -1), (0, 1, 0, 1), 0, LearningParams(normalize=False)
+        )
+        assert r == pytest.approx(0.1 + 1 + 10)
+
+    def test_collision(self):
+        assert collides((0, 0, 1)) and not collides((0, 1, 2))
+        assert collision_reward((0, 0, 1), 0, P) == -10.0
+        assert collision_reward((0, 0, 1), 1, P) == -10.0
+        assert collision_reward((0, 0, 1), 2, P) == 0.0
+
+
+class TestActionSelection:
+    def test_greedy_ties_go_to_smallest_index(self):
+        s = (-1,) * 12
+        assert greedy_action({}, s, (2, 3, 10)) == 2
+        assert greedy_action({s: {3: 1.0, 10: 1.0}}, s, (2, 3, 10)) == 3
+
+    def test_top_k_definition_2_4_4(self):
+        s = (-1,) * 12
+        q = {s: {10: 1.0, 3: 0.5, 2: 0.5}}
+        assert top_k(q, s, (2, 3, 10, 11), 3) == (10, 2, 3)
+        assert top_k({}, s, (11, 2, 10), 2) == (2, 10)  # ties by sector index
+        assert top_k(q, s, (2, 3), 5) == (2, 3)
+        assert top_k(q, s, (2, 3), 0) == ()
+
+    def test_epsilon_greedy(self):
+        s = (-1,) * 4
+        q = {s: {3: 1.0}}
+        rng = random.Random(0)
+        assert {
+            epsilon_greedy_action(q, s, (0, 1, 2, 3), 0.0, rng) for _ in range(20)
+        } == {3}
+        assert {
+            epsilon_greedy_action(q, s, (0, 1, 2, 3), 1.0, rng) for _ in range(200)
+        } == {
+            0,
+            1,
+            2,
+            3,
+        }
+
+
+class TestQUpdate:
+    def test_equation_2_1(self):
+        g = _game_2x2()
+        s0, s1 = g.initial_state, (0, 1, -1, -1)
+        q = {s1: {2: 2.0, 3: -1.0}}
+        new = q_update(q, g, s0, 0, 1.0, s1, P)
+        assert new == pytest.approx(0.1 * (1.0 + 0.99 * 2.0))
+        assert max_q(q, s1, (2, 3)) == 2.0
+        again = q_update(q, g, s0, 0, 1.0, s1, P)
+        assert again == pytest.approx(0.9 * new + 0.1 * (1.0 + 0.99 * 2.0))
+
+    def test_terminal_and_failure_have_value_zero(self):
+        g = _game_2x2()
+        s1, s2 = (0, 1, -1, -1), (0, 1, 0, 1)
+        q = {s2: {0: 100.0}}
+        assert q_update(q, g, s1, 2, 1.0, s2, P) == pytest.approx(0.1)
+        assert q_update(q, g, s1, 3, -10.0, None, P) == pytest.approx(-1.0)
+
+    def test_parameters_are_validated(self):
+        with pytest.raises(ValueError, match="learning_rate"):
+            LearningParams(learning_rate=0.0)
+        with pytest.raises(ValueError, match="epsilon"):
+            LearningParams(epsilon_start=1.5)
+
+
+class TestEpisodes:
+    def _play_3x3(self) -> tuple[LearningGame, Play]:
+        g = LearningGame.from_territory(Territory.from_ascii(["...", "...", "..."]), 2)
+        play = Play.from_actions(9, 2, [[0, 1], [2, 3], [4, 5], [6, 7]])
+        return g, play
+
+    def test_online_opponents_follow_the_completion(self):
+        g, play = self._play_3x3()
+        comp = CanonicalCompletion(play)
+        rng = random.Random(1)
+        q: dict = {}
+        lengths = set()
+        for _ in range(50):
+            ep = run_episode(
+                q, g, 1, opponents=comp.action, epsilon=0.7, params=P, rng=rng
+            )
+            state = g.initial_state
+            for k, tr in enumerate(ep):
+                assert tr.state == state and is_live(state, 2)
+                assert tr.profile[0] == comp.action(state, 0)
+                if tr.next_state is None:
+                    assert k == len(ep) - 1 and tr.reward == -10.0
+                    break
+                assert tr.reward == pytest.approx(
+                    shaped_reward(g, state, tr.next_state, 1, P)
+                )
+                state = tr.next_state
+            else:
+                assert not g.is_live(state)
+            lengths.add(len(ep))
+        assert 4 in lengths  # some episodes reach the horizon m = 4
+
+    def test_offline_opponents_are_random(self):
+        g = LearningGame.from_territory(Territory.from_ascii(["...", "..."]), 3)
+        rng = random.Random(2)
+        q: dict = {}
+        first = set()
+        bystander = False
+        for _ in range(200):
+            ep = run_episode(q, g, 0, opponents=None, epsilon=0.0, params=P, rng=rng)
+            first.add(ep[0].profile[1:])
+            last = ep[-1]
+            if (
+                last.next_state is None
+                and last.profile[1] == last.profile[2] != last.profile[0]
+            ):
+                bystander = True
+                assert last.reward == 0.0
+        assert len(first) > 10
+        assert bystander, "two random opponents collide while the learner does not"
+
+    def test_collision_updates_the_q_value(self):
+        g = LearningGame.from_territory(Territory.from_ascii([".."]), 2)
+        q: dict = {}
+        ep = run_episode(
+            q,
+            g,
+            0,
+            opponents=lambda s, b: 0,
+            epsilon=0.0,
+            params=P,
+            rng=random.Random(0),
+        )
+        assert len(ep) == 1 and ep[0].next_state is None and ep[0].profile == (0, 0)
+        assert q[g.initial_state][0] == pytest.approx(-1.0)
+
+    def test_opponent_must_claim_a_free_sector(self):
+        g = _game_2x2()
+        with pytest.raises(ValueError, match="occupied"):
+            run_episode(
+                {},
+                g,
+                0,
+                opponents=lambda s, b: 0 if s[0] != -1 else 1,
+                epsilon=0.0,
+                params=P,
+                rng=random.Random(0),
+            )
+
+
+class TestTrainQ:
+    def test_linear_epsilon_over_each_run(self, monkeypatch):
+        seen = []
+
+        def fake(q, game, agent, *, opponents, epsilon, params, rng):
+            seen.append(epsilon)
+            return ()
+
+        monkeypatch.setattr(qlearning, "run_episode", fake)
+        train_q(
+            {},
+            _game_2x2(),
+            0,
+            opponents=None,
+            episodes=5,
+            params=P,
+            rng=random.Random(0),
+        )
+        assert seen == pytest.approx([0.7, 0.5375, 0.375, 0.2125, 0.05])
+
+    def test_visited_states_are_live_and_reproducible(self):
+        g = LearningGame.from_territory(Territory.from_ascii(["...", "...", "..."]), 2)
+        q1: dict = {}
+        q2: dict = {}
+        v1 = train_q(
+            q1, g, 0, opponents=None, episodes=40, params=P, rng=random.Random(3)
+        )
+        v2 = train_q(
+            q2, g, 0, opponents=None, episodes=40, params=P, rng=random.Random(3)
+        )
+        assert v1 == v2 and q1 == q2
+        assert g.initial_state in v1
+        assert all(is_live(s, 2) for s in v1)
+        assert set(q1) == v1

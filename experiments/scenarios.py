@@ -43,26 +43,38 @@ def _grid(category: str, name: str) -> str:
 
 
 def _feasible_horizons(S: int, n: int) -> int:
-    """Horizon = S / n.  Requires S divisible by n (for require_victory)."""
+    """Horizon ``m = S / n``; these suites use only n that divide S."""
     if S % n != 0:
         raise ValueError(f"S={S} not divisible by n={n}")
     return S // n
 
 
 def _sibis(
-    suite: str, grid_file: str, path: str, n: int, h: int, sym: bool, desc: str,
+    suite: str,
+    grid_file: str,
+    path: str,
+    n: int,
+    h: int,
+    sym: bool,
+    desc: str,
 ) -> Scenario:
     label = f"{grid_file[:-4]}_n{n}_sym{sym}"
     return Scenario(
-        suite=suite, name=label, grid_path=path,
-        num_agents=n, horizon=h, algorithm="sibis",
-        symmetry=sym, description=desc,
+        suite=suite,
+        name=label,
+        grid_path=path,
+        num_agents=n,
+        horizon=h,
+        algorithm="sibis",
+        symmetry=sym,
+        description=desc,
     )
 
 
 # ---------------------------------------------------------------------------
 # E1: Global symmetry breaking
 # ---------------------------------------------------------------------------
+
 
 def e1_global_symmetry() -> list[Scenario]:
     """Rectangular grids with D4/D2 automorphisms. Compare sym on/off.
@@ -93,16 +105,24 @@ def e1_global_symmetry() -> list[Scenario]:
         for n in agent_counts:
             h = _feasible_horizons(S, n)
             for sym in [False, True]:
-                scenarios.append(_sibis(
-                    "E1", grid_file, path, n, h, sym,
-                    f"Global symmetry: {grid_file} with {n} agents, sym={sym}",
-                ))
+                scenarios.append(
+                    _sibis(
+                        "E1",
+                        grid_file,
+                        path,
+                        n,
+                        h,
+                        sym,
+                        f"Global symmetry: {grid_file} with {n} agents, sym={sym}",
+                    )
+                )
     return scenarios
 
 
 # ---------------------------------------------------------------------------
 # E2: Local symmetry breaking
 # ---------------------------------------------------------------------------
+
 
 def e2_local_symmetry() -> list[Scenario]:
     """L-shaped/irregular grids with trivial global Aut but non-trivial local
@@ -132,16 +152,24 @@ def e2_local_symmetry() -> list[Scenario]:
             if h < 1:
                 continue
             for sym in [False, True]:
-                scenarios.append(_sibis(
-                    "E2", grid_file, path, n, h, sym,
-                    f"Local symmetry: {grid_file} with {n} agents, sym={sym}",
-                ))
+                scenarios.append(
+                    _sibis(
+                        "E2",
+                        grid_file,
+                        path,
+                        n,
+                        h,
+                        sym,
+                        f"Local symmetry: {grid_file} with {n} agents, sym={sym}",
+                    )
+                )
     return scenarios
 
 
 # ---------------------------------------------------------------------------
 # E3: Disconnected territory handling
 # ---------------------------------------------------------------------------
+
 
 def e3_disconnected() -> list[Scenario]:
     """Disconnected grids — multiple connected components.
@@ -168,16 +196,24 @@ def e3_disconnected() -> list[Scenario]:
             if h < 1:
                 continue
             for sym in [False, True]:
-                scenarios.append(_sibis(
-                    "E3", grid_file, path, n, h, sym,
-                    f"Disconnected ({iso_type}): {grid_file}, n={n}, sym={sym}",
-                ))
+                scenarios.append(
+                    _sibis(
+                        "E3",
+                        grid_file,
+                        path,
+                        n,
+                        h,
+                        sym,
+                        f"Disconnected ({iso_type}): {grid_file}, n={n}, sym={sym}",
+                    )
+                )
     return scenarios
 
 
 # ---------------------------------------------------------------------------
 # E4: Asymmetric control (overhead measurement)
 # ---------------------------------------------------------------------------
+
 
 def e4_asymmetric_control() -> list[Scenario]:
     """Asymmetric grids with |Aut(T)| = 1. Compare sym on/off.
@@ -204,16 +240,24 @@ def e4_asymmetric_control() -> list[Scenario]:
         for n in agent_counts:
             h = _feasible_horizons(S, n)
             for sym in [False, True]:
-                scenarios.append(_sibis(
-                    "E4", grid_file, path, n, h, sym,
-                    f"Asymmetric control: {grid_file}, n={n}, sym={sym}",
-                ))
+                scenarios.append(
+                    _sibis(
+                        "E4",
+                        grid_file,
+                        path,
+                        n,
+                        h,
+                        sym,
+                        f"Asymmetric control: {grid_file}, n={n}, sym={sym}",
+                    )
+                )
     return scenarios
 
 
 # ---------------------------------------------------------------------------
 # E5: Scalability
 # ---------------------------------------------------------------------------
+
 
 def e5_scalability() -> list[Scenario]:
     """Increasing grid sizes to find the scalability limits.
@@ -228,22 +272,49 @@ def e5_scalability() -> list[Scenario]:
     scenarios: list[Scenario] = []
     tracks = [
         # (n, [(grid_file, S), ...])
-        (2, [
-            ("3x2.txt", 6), ("4x2.txt", 8), ("5x2.txt", 10),
-            ("4x3.txt", 12), ("7x2.txt", 14), ("4x4.txt", 16),
-            ("5x4.txt", 20), ("6x4.txt", 24), ("7x4.txt", 28),
-            ("8x4.txt", 32), ("6x6.txt", 36),
-        ]),
-        (3, [
-            ("3x3.txt", 9), ("4x3.txt", 12), ("5x3.txt", 15),
-            ("6x3.txt", 18), ("7x3.txt", 21), ("6x4.txt", 24),
-            ("9x3.txt", 27), ("6x5.txt", 30), ("6x6.txt", 36),
-        ]),
-        (4, [
-            ("4x2.txt", 8), ("4x3.txt", 12), ("4x4.txt", 16),
-            ("5x4.txt", 20), ("6x4.txt", 24), ("7x4.txt", 28),
-            ("8x4.txt", 32), ("6x6.txt", 36),
-        ]),
+        (
+            2,
+            [
+                ("3x2.txt", 6),
+                ("4x2.txt", 8),
+                ("5x2.txt", 10),
+                ("4x3.txt", 12),
+                ("7x2.txt", 14),
+                ("4x4.txt", 16),
+                ("5x4.txt", 20),
+                ("6x4.txt", 24),
+                ("7x4.txt", 28),
+                ("8x4.txt", 32),
+                ("6x6.txt", 36),
+            ],
+        ),
+        (
+            3,
+            [
+                ("3x3.txt", 9),
+                ("4x3.txt", 12),
+                ("5x3.txt", 15),
+                ("6x3.txt", 18),
+                ("7x3.txt", 21),
+                ("6x4.txt", 24),
+                ("9x3.txt", 27),
+                ("6x5.txt", 30),
+                ("6x6.txt", 36),
+            ],
+        ),
+        (
+            4,
+            [
+                ("4x2.txt", 8),
+                ("4x3.txt", 12),
+                ("4x4.txt", 16),
+                ("5x4.txt", 20),
+                ("6x4.txt", 24),
+                ("7x4.txt", 28),
+                ("8x4.txt", 32),
+                ("6x6.txt", 36),
+            ],
+        ),
     ]
 
     for n, grids in tracks:
@@ -251,16 +322,24 @@ def e5_scalability() -> list[Scenario]:
             path = _grid("symmetric", grid_file)
             h = _feasible_horizons(S, n)
             for sym in [False, True]:
-                scenarios.append(_sibis(
-                    "E5", grid_file, path, n, h, sym,
-                    f"Scalability: {grid_file}, n={n}, sym={sym}",
-                ))
+                scenarios.append(
+                    _sibis(
+                        "E5",
+                        grid_file,
+                        path,
+                        n,
+                        h,
+                        sym,
+                        f"Scalability: {grid_file}, n={n}, sym={sym}",
+                    )
+                )
     return scenarios
 
 
 # ---------------------------------------------------------------------------
 # All scenarios
 # ---------------------------------------------------------------------------
+
 
 def all_scenarios(
     suites: list[str] | None = None,

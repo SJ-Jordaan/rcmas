@@ -1,0 +1,56 @@
+# Smoke test of the reproduction pipeline (./reproduce.sh --smoke).
+#
+# Five small instances from three benchmark families, with the eight
+# configurations and the protocol of the thesis evaluation
+# (experiments/thesis-eval.toml) and a limit of 30 s.  On the 4x4 grid
+# CEGAR-NE refines for longer than the limit, so the timeout path is used
+# too.  On four of the instances the collectively optimal initial play
+# gives every agent reward m, so the direct runs return it in iteration 0;
+# on 5x5-13 with 2 agents it does not (welfare 11 < 12), and without
+# symmetry reduction IBIS, S-IBIS and Q-IBIS improve it for a few
+# iterations (2 to 6 so far), so the improvement loop and the
+# certification of a play other than the initial one are exercised as well.
+# The orbit partition of 4x4 is coarse, so CEGAR-NE's inner calls start
+# from smt(F) of the abstract game there; that of 5x5-13 is discrete, so
+# its only inner call starts from smt(F, f) of M.  It exercises the
+# sweep, the certifier, the assets and the numbers report in a few
+# minutes; its numbers mean nothing.
+
+[suite]
+name = "smoke"
+
+[protocol]
+time_limit_s = 30
+runs = 1
+max_iters = "none"
+initial = "collective"
+cegar_inner_max_iters = 30
+cegar_discrete_max_iters = "none"
+cegar_inner_initial = "satisfying"
+demand = 0
+seed = 0
+
+[[instances]]
+grid = "symmetric/3x2.txt"
+agents = [2]
+
+[[instances]]
+grid = "symmetric/4x4.txt"   # some configurations time out at 30 s
+agents = [2]
+
+[[instances]]
+grid = "disconnected/2x2-2x2.txt"
+agents = [2]
+
+[[instances]]
+grid = "asymmetric/interesting.txt"
+agents = [6]
+
+[[instances]]
+grid = "asymmetric/5x5-13.txt"   # initial play not an equilibrium without symmetry
+agents = [2]
+
+[parameters]
+algorithms = ["ibis", "sibis", "qibis", "cegar-sibis"]
+partitions = ["orbit"]
+symmetry = [false, true]

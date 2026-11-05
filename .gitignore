@@ -55,8 +55,11 @@ docs/_build/
 docs/_static/
 docs/_templates/
 
-# Results and outputs
-results/
+# Results and outputs.  The logs, certificates and generated assets of the
+# thesis sweep under results/ are meant to be committed for the tagged
+# release (README, "Reproducing the thesis experiments"); smoke runs are not.
+/results/smoke/
+/results/*.tmp
 outputs/
 *.log
 

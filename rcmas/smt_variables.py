@@ -1,34 +1,34 @@
-"""Definition 15: SMT variable construction.
+"""SMT variables of the encoding of Chapter 4 (Sections 4.2, 4.3 and 4.7).
 
-Creates the Z3 integer and boolean variables that encode the RCMAS game
-dynamics over a given territory, agent count, and time horizon.
+Creates the Z3 variables of the formula ``F`` and of the opponent
+constraint ``[Fix^a_pi]``.  The tool numbers sectors ``0..|T|-1`` (the
+enumeration of Remark 3.1.1) and agents ``0..n-1``, so thesis variables map
+to tool variables as follows:
+
+=======================  =======================================  ==============================
+thesis                   tool                                     values
+=======================  =======================================  ==============================
+``sec^i_t``              ``owner[i-1][t]``                        ``-1`` for 0, ``a-1`` for ``a``
+``act^a_t``              ``action[a-1][t]``                       ``i-1`` for sector ``i``
+``in_{i,a}``             ``member[a-1][i-1]``                     Boolean
+``root_{i,a}``           ``root[a-1][i-1]``                       Boolean
+``pre_{i,a}``            ``prefix[a-1][i-1]``                     Boolean
+``lv_{i,a}``             ``level[a-1][i-1]``                      integer
+``reward_a``             ``reward[a-1]``                          integer
+``unocc^i_t``            ``unocc[t][i-1]``                        integer (Definition 4.7.1)
+=======================  =======================================  ==============================
+
+The same variables encode the abstract RCMAS of Definition 6.1.2: its blocks
+take the place of the sectors, ``custom_neighbors`` gives the block adjacency
+and ``weights`` the block weights.
 """
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from .model import Coord, Territory, neighbors4
-
-
-def _bfs_distances(S: int, neighbors: dict[int, frozenset[int]]) -> list[list[int]]:
-    """Compute all-pairs shortest-path distances via BFS on the sector graph."""
-    INF = S + 1
-    dist = [[INF] * S for _ in range(S)]
-    for src in range(S):
-        d = dist[src]
-        d[src] = 0
-        queue = deque([src])
-        while queue:
-            u = queue.popleft()
-            nd = d[u] + 1
-            for w in neighbors.get(u, frozenset()):
-                if nd < d[w]:
-                    d[w] = nd
-                    queue.append(w)
-    return dist
+from .model import Coord, Territory
 
 
 @dataclass(slots=True)
@@ -36,39 +36,42 @@ class SmtVariables:
     """All Z3 variables for a single SMT encoding instance.
 
     Attributes:
-        S: number of sectors
-        A: number of agents
-        T: time horizon (number of rounds)
+        S: number of sectors ``|T|``
+        A: number of agents ``|Agt|``
+        T: horizon ``m`` (number of rounds)
         sectors: ordered sector coordinates
-        owner: ``owner[s][t]`` -- ownership of sector *s* at time *t*
-        action: ``action[a][t]`` -- action of agent *a* at time *t*
-        adj: ``adj[(i,j,a)]`` -- adjacency indicator for sectors *i < j* owned by *a*
-        cr: ``cr[(i,j,a)]``  -- reachability (connected-region) indicator
-        size: ``size[i][a]`` -- region size rooted at sector *i* for agent *a*
-        payoff: ``payoff[a]`` -- largest-region payoff for agent *a*
-        neighbors: physical adjacency map (sector index -> frozenset of neighbour indices)
+        owner: ``owner[i][t]`` -- control of sector *i* at step *t* (``sec``)
+        action: ``action[a][t]`` -- sector claimed by agent *a* at step *t* (``act``)
+        member, root, prefix, level: witness variables of Definition 4.3.1
+        reward: ``reward[a]`` -- weight of the witness region of agent *a* (Definition 4.3.2)
+        unocc: ``unocc[t][i]`` -- number of unoccupied sectors before *i* at step *t*
+        neighbors: adjacency map (sector index -> frozenset of neighbour indices)
+        weights: sector weights (``None`` for unit weights)
     """
 
     S: int
     A: int
     T: int
     sectors: tuple[Coord, ...]
-    owner: list[list[Any]]      # [S][T+1]
-    action: list[list[Any]]     # [A][T]
-    adj: dict[tuple[int, int, int], Any]
-    cr: dict[tuple[int, int, int], Any]
-    size: list[list[Any]]       # [S][A]
-    payoff: list[Any]           # [A]
+    owner: list[list[Any]]  # [S][T+1]
+    action: list[list[Any]]  # [A][T]
+    member: list[list[Any]]  # [A][S]
+    root: list[list[Any]]  # [A][S]
+    prefix: list[list[Any]]  # [A][S]
+    level: list[list[Any]]  # [A][S]
+    reward: list[Any]  # [A]
+    unocc: list[list[Any]]  # [T][S]
     neighbors: dict[int, frozenset[int]]
     weights: tuple[int, ...] | None
 
-    def get_adj(self, i: int, j: int, a: int) -> Any:
-        lo, hi = (i, j) if i < j else (j, i)
-        return self.adj.get((lo, hi, a), False)
+    @property
+    def payoff(self) -> list[Any]:
+        """Deprecated alias of :attr:`reward`."""
+        return self.reward
 
-    def get_cr(self, i: int, j: int, a: int) -> Any:
-        lo, hi = (i, j) if i < j else (j, i)
-        return self.cr.get((lo, hi, a), False)
+    def weight(self, i: int) -> int:
+        """Weight of sector *i* (1 for a concrete territory)."""
+        return 1 if self.weights is None else self.weights[i]
 
     def is_phys_adj(self, i: int, j: int) -> bool:
         return j in self.neighbors[i]
@@ -83,83 +86,53 @@ def create_variables(
     custom_neighbors: dict[int, list[int]] | None = None,
     max_region_size: int | None = None,
 ) -> SmtVariables:
-    """Construct all Z3 variables for the RCMAS SMT encoding (Def 15).
+    """Construct the Z3 variables of the encoding.
 
-    When *weights* is provided, ``SmtVariables.weights`` is set and the
-    size constraint uses weighted sector contributions.
-
-    When *custom_neighbors* is provided, it replaces the default
-    ``neighbors4``-based adjacency.  This is used by the abstract RCMAS
-    encoding where sectors are synthetic coordinates and adjacency is
-    derived from the concrete territory.
-
-    When *max_region_size* is provided, ``cr`` variables are pruned for
-    sector pairs whose BFS shortest path exceeds ``max_region_size - 1``
-    (since they can never belong to the same connected region).  For
-    concrete RCMAS games, ``max_region_size = S // A`` (the demand).
+    *custom_neighbors* replaces the four-connected adjacency of the
+    territory, and *weights* gives each sector a weight; both are used for
+    the abstract RCMAS of Definition 6.1.2.  *max_region_size* is accepted
+    for backward compatibility and has no effect: the witness encoding
+    needs no pruning.
     """
     from z3 import Bool, Int
 
+    _ = max_region_size
     sectors = territory.ordered_sectors()
     S = len(sectors)
     A = num_agents
     T = horizon
+    if weights is not None and len(weights) != S:
+        raise ValueError("weights must have one entry per sector")
 
     owner = [[Int(f"owner_{s}_{t}") for t in range(T + 1)] for s in range(S)]
     action = [[Int(f"action_{a}_{t}") for t in range(T)] for a in range(A)]
 
-    # Physical neighbour map (frozenset for O(1) membership tests)
     if custom_neighbors is not None:
-        neighbors: dict[int, frozenset[int]] = {
-            k: frozenset(v) for k, v in custom_neighbors.items()
-        }
+        neighbors: dict[int, frozenset[int]] = {i: frozenset() for i in range(S)}
+        neighbors.update({k: frozenset(v) for k, v in custom_neighbors.items()})
     else:
-        index_by_coord = {c: i for i, c in enumerate(sectors)}
-        nb_lists: dict[int, list[int]] = {i: [] for i in range(S)}
-        for i, c in enumerate(sectors):
-            for nb in neighbors4(c):
-                j = index_by_coord.get(nb)
-                if j is not None:
-                    nb_lists[i].append(j)
-        neighbors = {k: frozenset(v) for k, v in nb_lists.items()}
+        neighbors = territory.neighbor_map()
 
-    # Adjacency booleans — only for physically adjacent sector pairs
-    adj: dict[tuple[int, int, int], Any] = {}
-    for a in range(A):
-        for i in range(S):
-            for j in neighbors.get(i, frozenset()):
-                if j > i:
-                    adj[(i, j, a)] = Bool(f"adj_{i}_{j}_{a}")
-
-    # Reachability booleans — prune pairs too far apart when max_region_size
-    # is known (BFS distance + 1 > max_region_size => unreachable).
-    cr: dict[tuple[int, int, int], Any] = {}
-    if max_region_size is not None and max_region_size > 0:
-        dist = _bfs_distances(S, neighbors)
-        for a in range(A):
-            for i in range(S):
-                for j in range(i + 1, S):
-                    if dist[i][j] + 1 <= max_region_size:
-                        cr[(i, j, a)] = Bool(f"cr_{i}_{j}_{a}")
-    else:
-        for a in range(A):
-            for i in range(S):
-                for j in range(i + 1, S):
-                    cr[(i, j, a)] = Bool(f"cr_{i}_{j}_{a}")
-
-    # Size and payoff
-    size = [[Int(f"size_{i}_{a}") for a in range(A)] for i in range(S)]
-    payoff = [Int(f"payoff_{a}") for a in range(A)]
+    member = [[Bool(f"in_{i}_{a}") for i in range(S)] for a in range(A)]
+    root = [[Bool(f"root_{i}_{a}") for i in range(S)] for a in range(A)]
+    prefix = [[Bool(f"pre_{i}_{a}") for i in range(S)] for a in range(A)]
+    level = [[Int(f"lv_{i}_{a}") for i in range(S)] for a in range(A)]
+    reward = [Int(f"reward_{a}") for a in range(A)]
+    unocc = [[Int(f"unocc_{i}_{t}") for i in range(S)] for t in range(T)]
 
     return SmtVariables(
-        S=S, A=A, T=T,
+        S=S,
+        A=A,
+        T=T,
         sectors=sectors,
         owner=owner,
         action=action,
-        adj=adj,
-        cr=cr,
-        size=size,
-        payoff=payoff,
+        member=member,
+        root=root,
+        prefix=prefix,
+        level=level,
+        reward=reward,
+        unocc=unocc,
         neighbors=neighbors,
         weights=weights,
     )

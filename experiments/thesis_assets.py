@@ -1,129 +1,209 @@
-"""Generate the LaTeX assets of the thesis evaluation chapter.
+"""Generate the LaTeX assets of thesis Chapter 7 and Appendix A.
 
-Reads the thesis-eval result files (JSONL, one record per run) and writes
-the summary table, the cactus plot, the paired scatter plots, and the full
-per-instance appendix table as standalone .tex files that the thesis inputs.
+Reads a result log of :mod:`experiments.runner` (and, optionally, the
+re-certification file of ``rcmas certify --output``) and writes the files
+that the thesis inputs, at the paths the thesis inputs them from:
 
-Usage:
-    python -m experiments.thesis_assets \
-        --primary experiments/thesis-eval-900.jsonl \
-        --secondary experiments/thesis-eval-300.jsonl \
-        --chapter-dir ../../thesis/chapters/experiment \
-        --appendix-dir ../../thesis/appendices/experiment
+====================================================  ===================
+file                                                   thesis element
+====================================================  ===================
+``chapters/experiment/tab-summary.tex``                Table 7.1
+``chapters/experiment/fig-cactus.tex``                 Figure 7.2
+``chapters/experiment/fig-scatter-sym.tex``            Figure 7.3(a)
+``chapters/experiment/fig-scatter-cegar.tex``          Figure 7.3(b)
+``appendices/experiment/tab-full.tex``                 Table A.1
+====================================================  ===================
 
-Only run-1 records are used from either file; the secondary (300 s) file
-contributes the budget-sensitivity numbers printed to stdout and nothing
-else.
+A run counts as solved only if the certifier accepted its equilibrium
+(:mod:`experiments.results`).  Usage::
+
+    python -m experiments.thesis_assets \\
+        --results results/thesis-eval-900.jsonl \\
+        --certificates results/thesis-eval-900.cert.jsonl \\
+        --out-dir results/thesis-assets \\
+        [--thesis-dir ../../thesis]
+
+``--out-dir`` receives the files under the relative paths above;
+``--thesis-dir`` also writes them into a thesis checkout and checks that the
+thesis inputs exactly these files.  ``--chapter-dir`` and
+``--appendix-dir`` (the interface of the examined version) write the
+chapter and appendix files into two given directories.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import math
 import os
-import statistics
+import re
+import sys
 from collections import defaultdict
+from pathlib import Path
 
-ALGS = ["ibis", "sibis", "qibis", "cegar-sibis"]
-ALG_LABEL = {
-    "ibis": "IBIS",
-    "sibis": "S-IBIS",
-    "qibis": "Q-IBIS",
-    "cegar-sibis": "CEGAR",
+from .results import (
+    ALG_LABEL,
+    ALGS,
+    FAMILIES,
+    FAMILY_LABEL,
+    THESIS_MARKER,
+    Results,
+    Run,
+    is_thesis_checkout,
+    load,
+)
+
+CHAPTER = "chapters/experiment"
+APPENDIX = "appendices/experiment"
+ASSETS = {
+    "tab-summary": CHAPTER,
+    "fig-cactus": CHAPTER,
+    "fig-scatter-sym": CHAPTER,
+    "fig-scatter-cegar": CHAPTER,
+    "tab-full": APPENDIX,
 }
+"""Asset name -> directory of the thesis that inputs it."""
+
 ALG_COLOR = {
     "ibis": "blue!70!black",
     "sibis": "green!55!black",
     "qibis": "orange!90!black",
     "cegar-sibis": "violet",
 }
-FAMILIES = ["symmetric", "local_symmetry", "disconnected", "asymmetric"]
 FAM_STYLE = {
     "symmetric": ("blue!70!black", "o"),
     "local_symmetry": ("green!55!black", "triangle*"),
     "disconnected": ("red!75!black", "square*"),
     "asymmetric": ("violet", "diamond*"),
 }
-FAM_LABEL = {
-    "symmetric": "symmetric",
-    "local_symmetry": "L-shaped",
-    "disconnected": "disconnected",
-    "asymmetric": "random",
+
+CELL_MARK = {
+    "t/o": "t/o",
+    "n/c": "n/c",
+    "unk": "unk",
+    "fail": "fail",
+    "uns": "uns",
+    "error": "err",
 }
+"""Appendix-table marker of every unsolved outcome."""
+
+MARK_TEXT = {
+    "t/o": "a timeout",
+    "n/c": "a run that reached the iteration bound or returned to an earlier play",
+    "unk": "a run in which Z3 answered a query with unknown",
+    "fail": r"a CEGAR-NE run that ended with \textsc{Failure}",
+    "uns": "a run whose initial query had no satisfying play",
+    "err": "a run that stopped with an error of the tool",
+    "rej": "an equilibrium that the certifier rejected",
+    "unc": "an equilibrium that the certifier could not check in time",
+    "--": "a run missing from the log",
+}
+"""What each marker of the appendix table stands for (caption text)."""
+MARK_ORDER = ("t/o", "n/c", "unk", "fail", "uns", "err", "rej", "unc", "--")
 
 
-def load(path: str) -> list[dict]:
-    rows = [json.loads(line) for line in open(path)]
-    return [r for r in rows if r["run"] == 1]
+def _algs(d: Results) -> list[str]:
+    present = d.algorithms
+    return [a for a in ALGS if a in present] + [a for a in present if a not in ALGS]
 
 
-def gridname(r: dict) -> str:
-    return os.path.basename(r["grid_path"]).replace(".txt", "")
-
-
-def family(r: dict) -> str:
-    return r["grid_path"].split("/grids/")[1].split("/")[0]
-
-
-def cell(r: dict) -> str:
+def cell(r: Run | None) -> str:
     """Appendix-table cell for one run."""
-    if r["status"] == "timeout":
-        return "t/o"
-    if r["reason"] == "unsat":
-        return "uns"
-    if r["reason"] == "max_iters":
-        return "n/c"
-    return f"{r['time_s']:.1f}"
+    if r is None:
+        return "--"
+    if r.solved:
+        return f"{r.time_s:.1f}"
+    if r.found_ne:
+        return "rej" if r.certificate == "rejected" else "unc"
+    return CELL_MARK.get(r.outcome, r.outcome)
 
 
-def write_summary(d: list[dict], outdir: str) -> None:
+def _fmt_count(x: float) -> str:
+    """A number for a pgfplots option, without exponent notation for 0.001 <= x < 1e6."""
+    return f"{x:.6g}"
+
+
+# ---------------------------------------------------------------------------
+# Table 7.1
+# ---------------------------------------------------------------------------
+
+
+def summary_table(d: Results) -> str:
+    total = len(d.instances)
     lines = [
         r"\begin{tabular}{llrrrl}",
         r"\toprule",
-        r"Algorithm & Symmetry & NE found & Timeouts & Median time (s) & Largest instance solved \\",
+        r"Algorithm & Symmetry & NE found & Unsolved & Median time (s) & Largest instance solved \\",
         r"\midrule",
     ]
-    for alg in ALGS:
-        for sym in [False, True]:
-            rs = [r for r in d if r["algorithm"] == alg and r["symmetry"] == sym]
-            ok = [r for r in rs if r["found_ne"]]
-            to = [r for r in rs if r["status"] == "timeout"]
-            med = statistics.median(r["time_s"] for r in ok)
-            big = max(ok, key=lambda r: (r["num_sectors"], r["num_agents"]))
-            label = ALG_LABEL[alg] if not sym else ""
-            lines.append(
-                f"{label} & {'on' if sym else 'off'} & {len(ok)}/70 & {len(to)}"
-                f" & {med:.1f} & {gridname(big)} ($|T|={big['num_sectors']}$, $n={big['num_agents']}$) \\\\"
+    algs = _algs(d)
+    for alg in algs:
+        for sym in (False, True):
+            if (alg, sym) not in d.configs:
+                continue
+            ok = d.solved_of(alg, sym)
+            med = d.median_time(alg, sym)
+            big = d.largest_solved(alg, sym)
+            label = ALG_LABEL.get(alg, alg) if not sym else ""
+            med_s = f"{med:.1f}" if med is not None else "--"
+            big_s = (
+                f"{big.grid} ($|T|={big.sectors}$, $n={big.agents}$)"
+                if big is not None
+                else "--"
             )
-        if alg != ALGS[-1]:
+            lines.append(
+                f"{label} & {'on' if sym else 'off'} & {len(ok)}/{total} & {total - len(ok)}"
+                f" & {med_s} & {big_s} \\\\"
+            )
+        if alg != algs[-1]:
             lines.append(r"\addlinespace")
     lines += [r"\bottomrule", r"\end{tabular}"]
-    with open(os.path.join(outdir, "tab-summary.tex"), "w") as f:
-        f.write("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
-def write_cactus(d: list[dict], outdir: str) -> None:
+# ---------------------------------------------------------------------------
+# Figure 7.2
+# ---------------------------------------------------------------------------
+
+
+def cactus_plot(d: Results, mark_time: float | None = 300.0) -> str:
     plots = []
     legend = []
-    for alg in ALGS:
-        for sym in [False, True]:
-            times = sorted(
-                r["time_s"]
-                for r in d
-                if r["algorithm"] == alg and r["symmetry"] == sym and r["found_ne"]
-            )
+    most = 0
+    shortest = math.inf
+    for alg in _algs(d):
+        for sym in (False, True):
+            if (alg, sym) not in d.configs:
+                continue
+            times = sorted(r.time_s for r in d.solved_of(alg, sym))
+            most = max(most, len(times))
+            if times:
+                shortest = min(shortest, times[0])
             coords = " ".join(f"({i},{t:.3g})" for i, t in enumerate(times, 1))
-            style = f"color={ALG_COLOR[alg]}, mark=none, thick"
+            style = f"color={ALG_COLOR.get(alg, 'black')}, mark=none, thick"
             if sym:
                 style += ", dashed"
             plots.append(f"\\addplot[{style}] coordinates {{ {coords} }};")
-            legend.append(ALG_LABEL[alg] + ("+sym" if sym else ""))
+            legend.append(ALG_LABEL.get(alg, alg) + ("+sym" if sym else ""))
+    xmax = max(10, most + 4)
+    ymin = (
+        0.04
+        if shortest >= 0.04 or shortest is math.inf
+        else 10 ** math.floor(math.log10(max(shortest, 1e-3)))
+    )
+    ymax = max(3000.0, d.time_limit_s * 3)
     body = "\n".join(plots)
     legend_str = ", ".join(legend)
-    tex = rf"""\begin{{tikzpicture}}
+    mark = ""
+    if mark_time:
+        label = f"{mark_time:g}\\,s"
+        mark = (
+            f"\\addplot[gray, dotted, thick, forget plot] coordinates {{ (0,{mark_time:g}) ({xmax},{mark_time:g}) }};\n"
+            f"\\node[gray, font=\\footnotesize, anchor=north east] at (axis cs:{xmax - 0.5:g},{mark_time * 0.93:.3g}) {{{label}}};\n"
+        )
+    return rf"""\begin{{tikzpicture}}
 \begin{{axis}}[
     width=0.92\textwidth, height=0.58\textwidth,
-    ymode=log, xmin=0, xmax=62, ymin=0.04, ymax=3000,
+    ymode=log, xmin=0, xmax={xmax}, ymin={_fmt_count(ymin)}, ymax={_fmt_count(ymax)},
     xlabel={{instances solved}}, ylabel={{wall-clock time (s)}},
     grid=major, grid style={{gray!20}},
     legend pos=north west, legend columns=2,
@@ -131,18 +211,28 @@ def write_cactus(d: list[dict], outdir: str) -> None:
     tick label style={{font=\footnotesize}}, label style={{font=\small}},
 ]
 {body}
-\addplot[gray, dotted, thick] coordinates {{ (0,300) (62,300) }};
-\node[gray, font=\footnotesize, anchor=north east] at (axis cs:61.5,280) {{300\,s budget}};
-\legend{{{legend_str}}}
+{mark}\legend{{{legend_str}}}
 \end{{axis}}
 \end{{tikzpicture}}
 """
-    with open(os.path.join(outdir, "fig-cactus.tex"), "w") as f:
-        f.write(tex)
 
 
-def _scatter_axis(points_by_fam: dict, xlabel: str, ylabel: str) -> str:
+# ---------------------------------------------------------------------------
+# Figure 7.3
+# ---------------------------------------------------------------------------
+
+
+def _scatter_axis(
+    points_by_fam: dict[str, list[tuple[float, float]]], xlabel: str, ylabel: str
+) -> str:
     plots = []
+    lo = 0.04
+    for pts in points_by_fam.values():
+        for x, y in pts:
+            lo = min(lo, x, y)
+    if lo < 0.04:
+        lo = 10 ** math.floor(math.log10(max(lo, 1e-3)))
+    hi = 1500
     for fam in FAMILIES:
         pts = points_by_fam.get(fam, [])
         if not pts:
@@ -154,125 +244,303 @@ def _scatter_axis(points_by_fam: dict, xlabel: str, ylabel: str) -> str:
             f"fill opacity=0.55] coordinates {{ {coords} }};"
         )
     body = "\n".join(plots)
-    legend = ", ".join(FAM_LABEL[f] for f in FAMILIES if points_by_fam.get(f))
+    legend = ", ".join(FAMILY_LABEL[f] for f in FAMILIES if points_by_fam.get(f))
+    legend_line = f"\\legend{{{legend}}}\n" if legend else ""
     return rf"""\begin{{tikzpicture}}
 \begin{{axis}}[
     width=\linewidth, height=\linewidth,
     xmode=log, ymode=log,
-    xmin=0.04, xmax=1500, ymin=0.04, ymax=1500,
+    xmin={_fmt_count(lo)}, xmax={hi}, ymin={_fmt_count(lo)}, ymax={hi},
     xlabel={{{xlabel}}}, ylabel={{{ylabel}}},
     grid=major, grid style={{gray!20}},
     legend pos=north west,
     legend style={{font=\scriptsize, fill=white, fill opacity=0.85, draw opacity=1, text opacity=1}},
     tick label style={{font=\footnotesize}}, label style={{font=\footnotesize}},
 ]
-\addplot[black!60, forget plot] coordinates {{ (0.04,0.04) (1500,1500) }};
+\addplot[black!60, forget plot] coordinates {{ ({_fmt_count(lo)},{_fmt_count(lo)}) ({hi},{hi}) }};
 {body}
-\legend{{{legend}}}
-\end{{axis}}
+{legend_line}\end{{axis}}
 \end{{tikzpicture}}
 """
 
 
-def write_scatters(d: list[dict], outdir: str) -> None:
-    ix = {(gridname(r), r["num_agents"], r["algorithm"], r["symmetry"]): r for r in d}
-    # (a) symmetry off vs on, pooled over algorithms
-    sym_pts: dict[str, list] = defaultdict(list)
-    for (g, n, a, s), r in ix.items():
-        if s:
-            continue
-        r2 = ix.get((g, n, a, True))
-        if r2 and r["found_ne"] and r2["found_ne"]:
-            sym_pts[family(r)].append((r["time_s"], r2["time_s"]))
-    # (b) S-IBIS vs CEGAR, paired within the same symmetry setting
-    cg_pts: dict[str, list] = defaultdict(list)
-    for (g, n, a, s), r in ix.items():
-        if a != "sibis":
-            continue
-        r2 = ix.get((g, n, "cegar-sibis", s))
-        if r2 and r["found_ne"] and r2["found_ne"]:
-            cg_pts[family(r)].append((r["time_s"], r2["time_s"]))
-    with open(os.path.join(outdir, "fig-scatter-sym.tex"), "w") as f:
-        f.write(_scatter_axis(sym_pts, "time without symmetry (s)", "time with symmetry (s)"))
-    with open(os.path.join(outdir, "fig-scatter-cegar.tex"), "w") as f:
-        f.write(_scatter_axis(cg_pts, "S-IBIS time (s)", "CEGAR time (s)"))
+def symmetry_pairs(d: Results) -> dict[str, list[tuple[float, float]]]:
+    """(time without, time with) symmetry reduction, per family, for pairs both solve."""
+    pts: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for inst in d.instances:
+        for alg in _algs(d):
+            r0, r1 = d.get(inst, alg, False), d.get(inst, alg, True)
+            if r0 and r1 and r0.solved and r1.solved:
+                pts[r0.family].append((r0.time_s, r1.time_s))
+    return pts
 
 
-def write_full_table(d: list[dict], outdir: str) -> None:
-    ix = {(gridname(r), r["num_agents"], r["algorithm"], r["symmetry"]): r for r in d}
-    insts = sorted(
-        {(gridname(r), r["num_sectors"], r["num_agents"], r["horizon"]) for r in d},
-        key=lambda x: (x[1], x[0], x[2]),
+def cegar_pairs(d: Results) -> dict[str, list[tuple[float, float]]]:
+    """(S-IBIS time, CEGAR time), per family, within one symmetry setting."""
+    pts: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for inst in d.instances:
+        for sym in (False, True):
+            r0, r1 = d.get(inst, "sibis", sym), d.get(inst, "cegar-sibis", sym)
+            if r0 and r1 and r0.solved and r1.solved:
+                pts[r0.family].append((r0.time_s, r1.time_s))
+    return pts
+
+
+def scatter_sym(d: Results) -> str:
+    return _scatter_axis(
+        symmetry_pairs(d), "time without symmetry (s)", "time with symmetry (s)"
     )
-    lines = [
-        r"\begin{longtable}{@{}lrrr rrrrrrrr@{}}",
+
+
+def scatter_cegar(d: Results) -> str:
+    return _scatter_axis(cegar_pairs(d), "S-IBIS time (s)", "CEGAR time (s)")
+
+
+# ---------------------------------------------------------------------------
+# Table A.1
+# ---------------------------------------------------------------------------
+
+
+NC_TEXT = {
+    frozenset({"max_iters"}): "a run that reached the iteration bound",
+    frozenset({"cycle"}): "a run that returned to an earlier play",
+}
+"""Caption text of ``n/c`` when the log has only one of its two reasons."""
+
+
+def nc_text(d: Results | None) -> str:
+    """What ``n/c`` stands for in the runs of *d*.
+
+    Without an iteration bound (the revised protocol) a direct run ends
+    ``n/c`` only by recurrence, so the caption does not mention a bound.
+    """
+    if d is None:
+        return MARK_TEXT["n/c"]
+    reasons = frozenset(
+        str(r.reason) for r in d.runs if r.outcome == "n/c" and not r.solved
+    )
+    return NC_TEXT.get(reasons, MARK_TEXT["n/c"])
+
+
+def _marks_sentence(marks: set[str], d: Results | None = None) -> str:
+    """``\\emph{t/o} marks a timeout, \\emph{n/c} a run that ..., and ...``."""
+    present = [m for m in MARK_ORDER if m in marks]
+    parts = []
+    for i, m in enumerate(present):
+        verb = " marks " if i == 0 else " "
+        text = nc_text(d) if m == "n/c" else MARK_TEXT[m]
+        parts.append(rf"\emph{{{m}}}{verb}{text}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        text = parts[0]
+    elif len(parts) == 2:
+        text = f"{parts[0]} and {parts[1]}"
+    else:
+        text = ", ".join(parts[:-1]) + ", and " + parts[-1]
+    return " " + text + "."
+
+
+def _caption(d: Results, marks: set[str]) -> str:
+    return (
         r"\caption[Per-instance synthesis times]{Wall-clock synthesis time in seconds"
-        r" for every instance and configuration at the 900-second budget."
-        r" \emph{t/o} marks a timeout, \emph{n/c} a run that stopped at the iteration"
-        r" cap without converging, and \emph{uns} a run whose candidate-restricted"
-        r" encoding was unsatisfiable. Paired columns are without and with symmetry"
-        r" reduction.}\label{tab:exp:full}\\",
-        r"\toprule",
-        r" & & & & \multicolumn{2}{c}{IBIS} & \multicolumn{2}{c}{S-IBIS}"
-        r" & \multicolumn{2}{c}{Q-IBIS} & \multicolumn{2}{c}{CEGAR} \\",
-        r"\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(l){11-12}",
-        r"Grid & $|T|$ & $n$ & $m$ & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym} \\",
-        r"\midrule",
-        r"\endfirsthead",
-        r"\toprule",
-        r" & & & & \multicolumn{2}{c}{IBIS} & \multicolumn{2}{c}{S-IBIS}"
-        r" & \multicolumn{2}{c}{Q-IBIS} & \multicolumn{2}{c}{CEGAR} \\",
-        r"\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(l){11-12}",
-        r"Grid & $|T|$ & $n$ & $m$ & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}"
-        r" & \multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym} \\",
-        r"\midrule",
-        r"\endhead",
-        r"\bottomrule",
-        r"\endlastfoot",
-    ]
-    for g, sec, n, h in insts:
+        rf" for every instance and configuration, with a limit of {d.time_limit_s:g} seconds per run,"
+        r" from the result logs of the archived version of the tool~\cite{rcmas2026zenodo}."
+        + _marks_sentence(marks, d)
+        + r" Paired columns are without and with symmetry reduction.}\label{tab:exp:full}\\"
+    )
+
+
+def full_table(d: Results) -> str:
+    algs = _algs(d)
+    rows = []
+    marks: set[str] = set()
+    for inst in d.instances:
+        info = d.instance_info(inst)
         cells = []
-        for alg in ALGS:
-            for sym in [False, True]:
-                cells.append(cell(ix[(g, n, alg, sym)]))
-        lines.append(f"{g} & {sec} & {n} & {h} & " + " & ".join(cells) + r" \\")
+        for alg in algs:
+            for sym in (False, True):
+                c = cell(d.get(inst, alg, sym))
+                if not re.fullmatch(r"[0-9.]+", c):
+                    marks.add(c)
+                cells.append(c)
+        rows.append(
+            f"{info.grid} & {info.sectors} & {info.agents} & {info.horizon} & "
+            + " & ".join(cells)
+            + r" \\"
+        )
+    ncols = 2 * len(algs)
+    spec = "@{}lrrr " + "r" * ncols + "@{}"
+    groups = " & ".join(
+        rf"\multicolumn{{2}}{{c}}{{{ALG_LABEL.get(a, a)}}}" for a in algs
+    )
+    rules = "".join(
+        rf"\cmidrule({'l' if i == len(algs) - 1 else 'lr'}){{{5 + 2 * i}-{6 + 2 * i}}}"
+        for i in range(len(algs))
+    )
+    sub = " & ".join(r"\multicolumn{1}{c}{--} & \multicolumn{1}{c}{sym}" for _ in algs)
+    head = [
+        r"\toprule",
+        rf" & & & & {groups} \\",
+        rules,
+        rf"Grid & $|T|$ & $n$ & $m$ & {sub} \\",
+        r"\midrule",
+    ]
+    lines = [rf"\begin{{longtable}}{{{spec}}}", _caption(d, marks)]
+    lines += (
+        head
+        + [r"\endfirsthead"]
+        + head
+        + [r"\endhead", r"\bottomrule", r"\endlastfoot"]
+    )
+    lines += rows
     lines.append(r"\end{longtable}")
-    with open(os.path.join(outdir, "tab-full.tex"), "w") as f:
-        f.write("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
 
 
-def budget_report(primary: list[dict], secondary: list[dict]) -> None:
-    k = lambda r: r["name"]
-    p = {k(r): r for r in primary}
-    s = {k(r): r for r in secondary}
-    gained = [n for n in p if p[n]["found_ne"] and n in s and not s[n]["found_ne"]]
-    over = [r for r in primary if r["found_ne"] and r["time_s"] > 300]
-    print(f"runs solved at 900 s but not 300 s: {len(gained)} of {len(p)}")
-    print(f"solved runs needing more than 300 s: {len(over)} of {sum(1 for r in primary if r['found_ne'])}")
+# ---------------------------------------------------------------------------
+# Writing
+# ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--primary", required=True, help="900 s JSONL (used for all assets)")
-    ap.add_argument("--secondary", help="300 s JSONL (budget-sensitivity report only)")
-    ap.add_argument("--chapter-dir", required=True)
-    ap.add_argument("--appendix-dir", required=True)
-    args = ap.parse_args()
+def render(d: Results, mark_time: float | None = 300.0) -> dict[str, str]:
+    """Asset name -> LaTeX source."""
+    return {
+        "tab-summary": summary_table(d),
+        "fig-cactus": cactus_plot(d, mark_time),
+        "fig-scatter-sym": scatter_sym(d),
+        "fig-scatter-cegar": scatter_cegar(d),
+        "tab-full": full_table(d),
+    }
 
-    d = load(args.primary)
-    write_summary(d, args.chapter_dir)
-    write_cactus(d, args.chapter_dir)
-    write_scatters(d, args.chapter_dir)
-    write_full_table(d, args.appendix_dir)
-    if args.secondary:
-        budget_report(d, load(args.secondary))
-    print("assets written")
+
+def write_tree(assets: dict[str, str], root: str | Path) -> list[Path]:
+    """Write every asset to ``root/<thesis dir>/<name>.tex``; returns the paths."""
+    written = []
+    for name, text in assets.items():
+        path = Path(root) / ASSETS[name] / f"{name}.tex"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        written.append(path)
+    return written
+
+
+_INPUT = re.compile(r"\\input\{([^}]+)\}")
+
+
+def thesis_inputs(thesis_dir: str | Path) -> set[str]:
+    """Files that the experiment chapter and appendix of a thesis checkout input."""
+    found: set[str] = set()
+    for sub in (CHAPTER, APPENDIX):
+        main = Path(thesis_dir) / sub / "main.tex"
+        if not main.is_file():
+            continue
+        for line in main.read_text(encoding="utf-8").splitlines():
+            code = re.split(r"(?<!\\)%", line, maxsplit=1)[0]
+            for m in _INPUT.finditer(code):
+                target = m.group(1)
+                found.add(target[:-4] if target.endswith(".tex") else target)
+    return found
+
+
+def check_thesis_inputs(thesis_dir: str | Path) -> tuple[set[str], set[str]]:
+    """``(missing, extra)``: inputs the generator does not write, and assets the thesis does not input."""
+    expected = {f"{ASSETS[n]}/{n}" for n in ASSETS}
+    used = thesis_inputs(thesis_dir)
+    return used - expected, expected - used
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m experiments.thesis_assets", description=__doc__.split("\n")[0]
+    )
+    ap.add_argument(
+        "--results",
+        "--primary",
+        dest="results",
+        required=True,
+        help="Result log (JSON lines)",
+    )
+    ap.add_argument(
+        "--certificates",
+        default=None,
+        help="Output of `rcmas certify --output` for the log",
+    )
+    ap.add_argument("--secondary", default=None, help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--out-dir", default=None, help="Write the assets below this directory"
+    )
+    ap.add_argument(
+        "--thesis-dir", default=None, help="Also write them into this thesis checkout"
+    )
+    ap.add_argument(
+        "--chapter-dir",
+        default=None,
+        help="Write the chapter assets into this directory",
+    )
+    ap.add_argument(
+        "--appendix-dir",
+        default=None,
+        help="Write the appendix table into this directory",
+    )
+    ap.add_argument(
+        "--mark-time",
+        type=float,
+        default=300.0,
+        help="Time marked by the dotted line of the cactus plot (default 300; 0 for none)",
+    )
+    ap.add_argument(
+        "--no-certificate-required",
+        action="store_true",
+        help="Count uncertified equilibria as solved (only for the examined logs)",
+    )
+    args = ap.parse_args(argv)
+    if args.thesis_dir and not is_thesis_checkout(args.thesis_dir):
+        # A wrong path would otherwise give an empty report or a new tree of
+        # assets that the thesis never inputs, with exit code 0.
+        ap.error(
+            f"--thesis-dir {args.thesis_dir} is not a thesis checkout "
+            f"(no {THESIS_MARKER} there)"
+        )
+
+    if not (args.out_dir or args.thesis_dir or args.chapter_dir or args.appendix_dir):
+        ap.error("give --out-dir, --thesis-dir or --chapter-dir/--appendix-dir")
+    d = load(
+        args.results,
+        certificates=args.certificates,
+        require_certificate=not args.no_certificate_required,
+    )
+    for p in d.problems:
+        print(f"warning: {p}", file=sys.stderr)
+    assets = render(d, args.mark_time or None)
+    if args.out_dir:
+        for path in write_tree(assets, args.out_dir):
+            print(f"wrote {path}")
+    if args.thesis_dir:
+        missing, extra = check_thesis_inputs(args.thesis_dir)
+        for path in write_tree(assets, args.thesis_dir):
+            print(f"wrote {path}")
+        for m in sorted(missing):
+            print(
+                f"warning: the thesis inputs {m}, which this script does not generate",
+                file=sys.stderr,
+            )
+        for e in sorted(extra):
+            print(f"warning: the thesis does not input {e}", file=sys.stderr)
+    for target, names in ((args.chapter_dir, CHAPTER), (args.appendix_dir, APPENDIX)):
+        if target:
+            os.makedirs(target, exist_ok=True)
+            for name, text in assets.items():
+                if ASSETS[name] == names:
+                    path = Path(target) / f"{name}.tex"
+                    path.write_text(text, encoding="utf-8")
+                    print(f"wrote {path}")
+    n_solved = sum(r.solved for r in d.runs)
+    print(
+        f"{len(d.instances)} instances, {len(d.runs)} runs, {n_solved} solved (certified)"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
