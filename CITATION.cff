@@ -23,6 +23,5 @@ keywords:
   - multi-agent systems
   - symmetry reduction
   - abstraction refinement
-# After the Zenodo release, add the version DOI and the release date:
-# doi: 10.5281/zenodo.NNNNNNN
-# date-released: YYYY-MM-DD
+doi: 10.5281/zenodo.23984930
+date-released: 2026-11-05
