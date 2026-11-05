@@ -197,20 +197,35 @@ best-response query for an agent whose reward is already `R_max` (`m`, or
 the largest total weight of `m_hat` blocks in an abstract game), and
 VerifyNE poses none for an agent with reward `m`: `F` implies
 `reward_a <= R_max`, so the improvement potential of such an agent is 0, and
-an agent with potential 0 is never the one that is updated, so the runs are
-the same apart from the number of queries. From an initial play in which
-every reward is `m`, IBIS, S-IBIS and Q-IBIS therefore return without a
-best-response query. Without this, IBIS and Q-IBIS posed the optimisation
-query `smt(G_a(pi), reward_a)` for every agent, which has to construct a
-deviation with reward `m`: on `6x4` with 3 agents one such query took
-296 s. In CEGAR-NE the inner call at a coarse partition takes its initial
-play from `smt(F)` of the weighted abstract game (`cegar_inner_initial =
-"satisfying"`), and the call at the discrete partition from `smt(F, f)` of
-`M`, so that there CEGAR-NE runs like a direct run. The collectively optimal
-query of the weighted abstract game can be much harder than `smt(F, f)` of
-`M`: at the orbit partition of `5x5-shaped` with 2 agents and of `8x8-34`
-with 2 and 3 agents it was not answered within 900 s, with or without
-symmetry reduction, while `smt(F, f)` of `M` takes 6 to 9 s there.
+an agent with potential 0 is never the one that is updated. The skip
+changes no potential and no choice of agent; given the same answers to the
+queries it does pose, a run takes the same path with fewer queries. Z3's
+models depend on the queries posed before in the same process, however, so
+after a skipped query a later query with several optimal models can return
+another one, and the run continues from another, equally valid, best
+response. From an initial play in which every reward is `m`, IBIS, S-IBIS
+and Q-IBIS return without a best-response query. Without the skip, IBIS and
+Q-IBIS posed the optimisation query `smt(G_a(pi), reward_a)` for every
+agent, which has to construct a deviation with reward `m`: on `6x4` with 3
+agents one such query took 296 s. In CEGAR-NE the inner call at a coarse
+partition takes its initial play from `smt(F)` of the weighted abstract game
+(`cegar_inner_initial = "satisfying"`), and the call at the discrete
+partition from `smt(F, f)` of `M`, so that there CEGAR-NE runs like a direct
+run. The collectively optimal query of the weighted abstract game can be
+much harder than `smt(F, f)` of `M`: at the orbit partition of `5x5-shaped`
+with 2 agents and of `8x8-34` with 2 and 3 agents it was not answered within
+900 s, with or without symmetry reduction, while `smt(F, f)` of `M` takes 6
+to 9 s there. In a pilot at a limit of 120 s, the 44 runs of IBIS and
+Q-IBIS from an initial play with every reward `m` that had reached the
+limit before these two changes returned in 6 to 36 s, the time of
+`smt(F, f)`, and the first inner query of the 12 CEGAR-NE runs on
+`5x5-shaped` (2, 3, 4 and 6 agents) and `8x8-34` (3 and 6 agents) that had
+not been answered within the limit took 0.1 to 0.2 s. Those 12 runs still
+reach 120 s: most of the time goes into the best-response queries of the
+inner S-IBIS on the abstract game of 21 to 23 blocks (on `5x5-shaped` with
+2 agents it computed one best response in 125 s), and on `8x8-34` with 6
+agents into the direct run at the discrete partition, which the direct
+runs do not finish within 120 s either.
 `experiments/thesis-eval-n30.toml` holds the protocol of the first run:
 `./reproduce.sh --config experiments/thesis-eval-n30.toml` reruns it into
 `results/thesis-eval-n30-900.jsonl`, and its other outputs are named after
@@ -292,15 +307,17 @@ for the 300 s repeat. 120 of its 560 runs reached the 900 s limit and
 account for 30 of those hours, and 160 runs stopped at the bound, by
 recurrence or with Failure, in 9 hours. A pilot of the revised protocol ran
 all eight configurations at a limit of 120 s on the 37 instances where the
-first run stopped at the bound or that no configuration solved, and took
-the times of the other runs from the first run plus the measured cost of
-`smt(F, f)`. It estimates 32 to 43 CPU-hours for the 900 s sweep and 14 to
-16 CPU-hours for the 300 s repeat, about as long as the first run, because
-the runs that reach the limit dominate either way: with 7 workers about 4.5
-to 6 hours for the sweep and 2 to 2.5 hours for the repeat, and with the 4
-or 5 workers of an M3 Pro, on cores as fast as those of the i7, about 6.5
-to 11 hours and 3 to 4 hours. 140 and 47 CPU-hours are the bounds if every
-run reaches its limit. `--no-repeat` skips the repeat. The certification
+first run stopped at the bound or that no configuration solved (90 of its
+296 runs reached the limit), and took the times of the other runs from the
+first run plus the measured cost of `smt(F, f)`; a direct run from an
+initial play in which every reward is `m` takes the time of that query. It
+estimates 16 to 26 CPU-hours for the 900 s sweep and 8 to 10 CPU-hours for
+the 300 s repeat, less than the first run, since the runs that reach the
+limit dominate: with 7 workers about 2.5 to 4 hours for the sweep and 1.2 to
+1.4 hours for the repeat, and with the 4 or 5 workers of an M3 Pro, on
+cores as fast as those of the i7, about 3.5 to 6.5 hours and 1.7 to 2.5
+hours. 140 and 47 CPU-hours are the bounds if every run reaches its
+limit. `--no-repeat` skips the repeat. The certification
 and the other stages take minutes.
 
 **Provenance.** Every session of a log starts with a header record that

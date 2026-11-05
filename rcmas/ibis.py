@@ -29,9 +29,8 @@ search of Algorithm 2, which give the same potentials (Theorem 4.8.1).
 Neither poses a query for an agent whose reward is already ``R_max``
 (``m``, or the largest total weight of ``m`` sectors in an abstract game):
 ``F`` implies ``reward_a <= R_max``, so its potential is 0
-(:func:`at_reward_bound`).  This changes only the number of queries; from
-an initial play in which every agent has reward ``m`` a run returns in
-iteration 0 without a best-response query.
+(:func:`at_reward_bound`).  From an initial play in which every agent has
+reward ``m`` a run returns in iteration 0 without a best-response query.
 When Z3 answers a query with unknown, the initial query included, the run
 stops with outcome ``"unk"`` (Section 7.1).
 
@@ -304,8 +303,11 @@ def at_reward_bound(base: BaseEncoding, current: tuple[int, ...], agent: int) ->
     sectors of a collision-free final state, Lemma 3.10.1, and the witness
     region lies among them, Lemma 4.3.1), so ``BR_a(pi) <= R_max`` and the
     improvement potential of an agent at the bound is 0.  An agent with
-    potential 0 is never the one updated, so skipping its query leaves the
-    run unchanged apart from the number of queries.
+    potential 0 is never the one updated, so the skip changes no potential
+    and no choice: given the same answers to the queries it poses, a run
+    takes the same path with fewer queries.  Z3's models depend on the
+    queries posed before in the process, so a later query with several
+    optimal models may return another one than without the skip.
     """
     return current[agent] >= base.max_reward
 
