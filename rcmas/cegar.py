@@ -1,515 +1,963 @@
-"""Algorithm 1 (EUMAS): CEGAR-NE — Abstraction-refinement loop for NE synthesis.
+"""CEGAR-NE: counterexample-guided NE synthesis (thesis Algorithm 4, Chapter 6).
 
-Implements the counterexample-guided abstraction refinement loop:
-abstract game → synthesise NE → lift → verify in concrete → refine partition.
+:func:`solve_cegar` runs the loop of Algorithm 4 from an initial partition
+``P_0`` of the territory (the orbit partition by default, Section 6.5):
+
+1. (line 5) build the abstract RCMAS of ``P`` (Definition 6.1.2), with block
+   weights and block adjacency;
+2. (line 6) run the inner synthesiser, S-IBIS by default, or IBIS or Q-IBIS,
+   on it.  At the discrete partition the abstract game is ``M`` (Section
+   6.1), and the synthesiser runs on the concrete encoding of ``M``.  The
+   inner run has its own iteration bound at a coarse partition
+   (*inner_max_iters*) and at the discrete partition
+   (*discrete_max_iters*); either may be ``None`` (no bound), and by
+   default both are the bound ``N = max_iters`` of a direct run.  Its
+   initial play comes from ``smt(F)`` (``"satisfying"``) or from the
+   collectively optimal query (``"collective"``) of the game it runs on:
+   *inner_initial* selects the query at a coarse partition and *initial*
+   the query at the discrete partition, and by default *inner_initial* is
+   *initial*;
+3. (lines 7-12) if it returns no equilibrium (the abstract game has no
+   satisfying strategy, or the synthesiser stops with ``n/c``), return
+   FAILURE at the discrete partition, and otherwise split the largest block
+   with BFS-bisect;
+4. (line 14) lift the abstract play to a play ``pi`` of ``M`` (Definition
+   6.2.1);
+5. (lines 15-16) if some agent misses its demand in the final state of
+   ``pi``, refine with the sectors that the agent of smallest index with
+   ``r_b(pi) < d(b)`` controls;
+6. (lines 18-22) otherwise run VerifyNE: for each agent ``a``, in index
+   order, one query ``smt(G_a(pi) and reward_a > r_a(pi))`` over the
+   concrete encoding, in which the other agents follow the canonical
+   completion of ``pi`` (Definition 4.7.1), without symmetry-breaking or
+   candidate constraints.  The query of an agent with ``r_a(pi) = m`` is
+   not posed: ``F`` implies ``reward_a <= m``, so it is unsatisfiable
+   (:func:`~rcmas.ibis.at_reward_bound`).  If every query is unsatisfiable, return the
+   canonical completion of ``pi`` (Definition 4.4.2).  A model ``beta`` is a
+   counterexample, and ``D`` is the set of sectors whose control differs
+   between the final states of ``pi`` and ``pi_beta`` (Definition 6.3.2);
+7. (lines 24-34) return FAILURE if ``P`` is discrete; otherwise set ``P``
+   to ``Refine(P, D)`` (Definition 6.3.3), or, if that adds no block,
+   bisect the largest block of more than one sector inside ``D`` (the
+   largest block of ``P`` if there is none).
+
+Every iteration that does not return adds at least one block, so a run
+returns after at most ``|T| - |P_0| + 1`` iterations (Theorem 6.4.2), and the
+returned joint strategy is the canonical completion of a satisfying play
+that passed VerifyNE, hence a demand-constrained Nash equilibrium of ``M``
+(Theorem 6.4.1).  Neither property depends on the inner synthesiser, which
+can be any :data:`SynthesiseFn` whose calls terminate.  IBIS, S-IBIS and
+Q-IBIS terminate without an iteration bound too, since they stop at the
+first recurring play of a game with finitely many plays; an unbounded inner
+run that ends by recurrence at the discrete partition gives FAILURE.
+
+Symmetry reduction (Section 6.5) adds the lex-leader and spatial
+canonicalisation constraints, computed from the automorphisms of the
+weighted abstract graph and the demand classes, to the initial query of
+each abstract synthesis call only; at the discrete partition the inner
+synthesiser uses the constraints of Chapter 5 for ``M``, as a direct run
+does.  No symmetry is taken from the coordinates of the synthetic abstract
+territory, and VerifyNE is posed without symmetry constraints.
+
+When Z3 answers a query with unknown, in the inner synthesiser or in
+VerifyNE, the run stops with outcome ``"unk"`` (Section 7.1).  Outcomes:
+``"ne"``, ``"fail"`` (FAILURE, ``reason`` ``"failure_no_candidate"`` from
+line 9 or ``"failure_refuted"`` from line 25), ``"unk"``, ``"t/o"`` (the
+optional wall-clock limit *time_limit_s*) and ``"n/c"`` (the optional cap
+*max_refinements*; Algorithm 4 itself has neither limit).
 """
 
 from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import EllipsisType
+from typing import Any, Callable
 
 from .abstraction import (
-    LiftedStrategy,
+    AbstractRCMAS,
     Partition,
-    balanced_partition,
+    abstract_symmetry_constraints,
     bfs_bisect,
-    bfs_kway_partition,
     build_abstract_rcmas,
-    compute_deviation_set,
-    discrete_partition,
-    grid_partition,
-    lift_strategy,
-    orbit_partition,
+    deviation_set,
+    lift_play,
+    make_partition,
     refine_partition,
+    sectors_of,
 )
-from .model import Coord, Territory
+from .ibis import at_reward_bound
+from .model import Coord, State, Territory, rewards_from_owner
 from .smt_solve import (
+    BaseEncoding,
+    ExtraConstraints,
     SmtSolution,
     build_base_encoding,
     check_improvement_from_base,
-    solve_from_base,
-    solve_smt_game,
 )
-from .strategy import Policy, policy_from_solution
+from .strategy import CanonicalCompletion, Play, canonical_completion
+
+OUTCOME_BY_REASON = {
+    "ne": "ne",
+    "failure_no_candidate": "fail",
+    "failure_refuted": "fail",
+    "unknown": "unk",
+    "timeout": "t/o",
+    "max_refinements": "n/c",
+}
+
+SYNTHESISERS = ("ibis", "qibis", "sibis")
 
 
 # ---------------------------------------------------------------------------
-# Result
+# The inner synthesiser (line 6 of Algorithm 4)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisGame:
+    """The game that ``SynthesiseNE`` receives in one iteration.
+
+    Attributes:
+        abstract: the abstract RCMAS of the current partition.
+        territory: the synthetic abstract territory, or the territory of
+            ``M`` at the discrete partition.
+        num_agents: ``|Agt|``.
+        horizon: ``m_hat`` (``m`` at the discrete partition).
+        demands: ``d`` (``None`` = all 0).
+        weights: block weights (``None`` at the discrete partition).
+        custom_neighbors: block adjacency (``None`` at the discrete partition).
+        symmetry: add the symmetry constraints of Chapter 5 for the grid
+            territory to the initial query (discrete partition only).
+        initial_constraints: constraints for the initial query only, here
+            the symmetry constraints of the weighted abstract graph.
+        on_initial: called by the synthesiser with the outcome of its
+            initial query (an :class:`~rcmas.ibis.InitialPlay`) as soon as
+            it is known; ``None`` for no call.
+    """
+
+    abstract: AbstractRCMAS
+    territory: Territory
+    num_agents: int
+    horizon: int
+    demands: tuple[int, ...] | None
+    weights: tuple[int, ...] | None
+    custom_neighbors: dict[int, list[int]] | None
+    symmetry: bool
+    initial_constraints: ExtraConstraints | None
+    on_initial: Callable[[Any], None] | None = None
+
+    @property
+    def is_concrete(self) -> bool:
+        """True at the discrete partition, where the game is ``M`` itself."""
+        return self.weights is None
+
+
+@dataclass(frozen=True, slots=True)
+class InnerResult:
+    """What ``SynthesiseNE`` returns.
+
+    Attributes:
+        outcome: ``"ne"`` (``play`` is the play of the returned equilibrium
+            of the game), ``"n/c"`` or ``"uns"`` (no candidate, ``bot`` in
+            Algorithm 4) or ``"unk"`` (Z3 answered unknown).
+        play: the play, over the block indices of the game.
+        iterations: iterations of the inner synthesiser.
+        rewards: rewards of ``play`` in the game (abstract rewards).
+        detail: the synthesiser's own result object.
+        initial_query_s: time of the inner run's initial query, if known.
+        initial_play: the inner run's initial play, if known.
+        initial_rewards: its rewards in the game, if known.
+        returned_initial: the inner run returned its initial play.
+        initial: its initial query, ``"satisfying"`` or ``"collective"``,
+            if known.
+    """
+
+    outcome: str
+    play: Play | None = None
+    iterations: int = 0
+    rewards: tuple[int, ...] | None = None
+    detail: Any = None
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
+    initial: str | None = None
+
+
+SynthesiseFn = Callable[[SynthesisGame], InnerResult]
+"""``SynthesiseNE``: a game -> an equilibrium play of it, or no candidate."""
+
+
+SAME = ...
+"""Default of the CEGAR-NE bounds and of ``inner_initial``: the value of
+``max_iters`` (for a bound) or of ``initial`` (for the initial query)."""
+
+
+def _bound(value: int | None | EllipsisType, default: int | None) -> int | None:
+    bound = default if value is ... else value
+    if bound is not None and bound < 0:
+        raise ValueError("iteration bounds must be >= 0 or None")
+    return bound
+
+
+def _initial_query(value: str | EllipsisType, default: str, name: str) -> str:
+    from .smt_solve import INITIAL_QUERIES
+
+    query = default if value is ... else value
+    if query not in INITIAL_QUERIES:
+        raise ValueError(f"{name} must be one of {INITIAL_QUERIES}, got {query!r}")
+    return query
+
+
+def make_synthesiser(
+    name: str,
+    *,
+    max_iters: int | None = 30,
+    discrete_max_iters: int | None | EllipsisType = SAME,
+    initial: str = "satisfying",
+    inner_initial: str | EllipsisType = SAME,
+    timeout_ms: int | None = None,
+    seed: int = 0,
+    progress: bool = False,
+) -> SynthesiseFn:
+    """IBIS, S-IBIS or Q-IBIS as ``SynthesiseNE``.
+
+    The inner run has the iteration bound *max_iters* at a coarse partition
+    and *discrete_max_iters* at the discrete partition (``...``, the
+    default, takes *max_iters*); ``None`` runs it without a bound.  Its
+    initial query, ``"satisfying"`` (``smt(F)``) or ``"collective"``
+    (``smt(F, f)``), is posed on the game of the call: *inner_initial*
+    selects it at a coarse partition, where the rewards are weighted, and
+    *initial* at the discrete partition (``...``, the default of
+    *inner_initial*, takes *initial*).
+    """
+    if name not in SYNTHESISERS:
+        raise ValueError("synthesiser must be 'ibis', 'qibis', or 'sibis'")
+    discrete_initial = _initial_query(initial, "satisfying", "initial")
+    coarse_initial = _initial_query(inner_initial, discrete_initial, "inner_initial")
+    coarse_bound = _bound(max_iters, None)
+    discrete_bound = _bound(discrete_max_iters, coarse_bound)
+
+    def run(game: SynthesisGame) -> InnerResult:
+        res: Any
+        bound = discrete_bound if game.is_concrete else coarse_bound
+        query = discrete_initial if game.is_concrete else coarse_initial
+        if name == "qibis":
+            from .qibis import QibisConfig, solve_qibis
+
+            cfg = QibisConfig(
+                max_iters=bound,
+                initial=query,
+                timeout_ms=timeout_ms,
+                symmetry=game.symmetry,
+                demands=game.demands,
+                seed=seed,
+                progress=progress,
+            )
+            res = solve_qibis(
+                territory=game.territory,
+                num_agents=game.num_agents,
+                horizon=game.horizon,
+                cfg=cfg,
+                weights=game.weights,
+                custom_neighbors=game.custom_neighbors,
+                initial_constraints=game.initial_constraints,
+                on_initial=game.on_initial,
+            )
+        else:
+            from .ibis import solve_ibis, solve_sibis
+
+            solve = solve_sibis if name == "sibis" else solve_ibis
+            res = solve(
+                territory=game.territory,
+                num_agents=game.num_agents,
+                horizon=game.horizon,
+                max_iters=bound,
+                initial=query,
+                timeout_ms=timeout_ms,
+                symmetry=game.symmetry,
+                demands=game.demands,
+                weights=game.weights,
+                custom_neighbors=game.custom_neighbors,
+                initial_constraints=game.initial_constraints,
+                on_initial=game.on_initial,
+                progress=progress,
+            )
+        play = res.play if res.outcome == "ne" else None
+        return InnerResult(
+            res.outcome,
+            play,
+            res.iterations,
+            res.payoff_by_agent,
+            res,
+            initial_query_s=res.initial_query_s,
+            initial_play=res.initial_play,
+            initial_rewards=res.initial_rewards,
+            returned_initial=res.returned_initial,
+            initial=res.initial,
+        )
+
+    return run
+
+
+def synthesis_game(
+    abstract: AbstractRCMAS,
+    *,
+    demands: tuple[int, ...] | None = None,
+    symmetry: bool = False,
+) -> SynthesisGame:
+    """The game of line 6 for the abstract RCMAS *abstract*.
+
+    At the discrete partition this is ``M`` with its own symmetry
+    constraints (Chapter 5).  At every other partition it is the abstract
+    game with block weights and block adjacency, and with symmetry on it
+    carries the constraints of the weighted abstract graph for the initial
+    query (Section 6.5).
+    """
+    n = abstract.num_agents
+    if abstract.is_discrete:
+        return SynthesisGame(
+            abstract=abstract,
+            territory=abstract.concrete_territory,
+            num_agents=n,
+            horizon=abstract.concrete_horizon,
+            demands=demands,
+            weights=None,
+            custom_neighbors=None,
+            symmetry=symmetry,
+            initial_constraints=None,
+        )
+    init = abstract_symmetry_constraints(abstract, demands) if symmetry else None
+    return SynthesisGame(
+        abstract=abstract,
+        territory=abstract.territory,
+        num_agents=n,
+        horizon=abstract.horizon,
+        demands=demands,
+        weights=abstract.weights,
+        custom_neighbors=abstract.custom_neighbors,
+        symmetry=False,
+        initial_constraints=init,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CegarInitial:
+    """The initial query of one inner call, reported as soon as it is answered.
+
+    Attributes:
+        iteration: the iteration of Algorithm 4 (1-based).
+        blocks: ``|P|`` of the call's partition.
+        query_s: wall-clock time of the query.
+        abstract_rewards: rewards of the initial play in the call's game.
+        lifted_rewards: ``r_a`` in ``M`` of its lift (first call only).
+        status: the answer to the query, ``"sat"``, ``"unsat"`` or
+            ``"unknown"``.
+        initial: the query, ``"satisfying"`` (``smt(F)`` of the call's
+            game) or ``"collective"`` (its ``smt(F, f)``), if known.
+    """
+
+    iteration: int
+    blocks: int
+    query_s: float | None
+    abstract_rewards: tuple[int, ...] | None
+    lifted_rewards: tuple[int, ...] | None
+    status: str = "sat"
+    initial: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# VerifyNE (line 18 of Algorithm 4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class VerifyResult:
+    """Result of VerifyNE.
+
+    Attributes:
+        status: ``"verified"``, ``"counterexample"`` or ``"unknown"``.
+        agent: the deviating agent ``a`` (or the agent whose query Z3 could
+            not decide).
+        solution: the model ``beta``.
+        deviation: the play ``pi_beta``.
+        queries: number of queries posed (at most ``|Agt|``; none for an
+            agent whose reward is already ``R_max``).
+    """
+
+    status: str
+    agent: int | None = None
+    solution: SmtSolution | None = None
+    deviation: Play | None = None
+    queries: int = 0
+
+
+def verify_ne(
+    base: BaseEncoding,
+    play: Play,
+    *,
+    rewards: tuple[int, ...] | None = None,
+    timeout_ms: int | None = None,
+) -> VerifyResult:
+    """VerifyNE of Section 6.3: one query per agent against the canonical completion.
+
+    *base* is the formula ``F`` of ``M``, with the demands of ``M`` and
+    without symmetry constraints; *play* must be satisfying (line 15), the
+    hypothesis of Lemma 4.7.2.  For each agent ``a``, in index order, the
+    query ``smt(G_a(pi) and reward_a > r_a(pi))`` is posed, unless
+    ``r_a(pi) = R_max``: ``F`` implies ``reward_a <= R_max``, so that query
+    is unsatisfiable and is skipped (:func:`~rcmas.ibis.at_reward_bound`).
+    A model is a counterexample (Definition 6.3.1) and is returned at once;
+    if every query is unsatisfiable the play is verified.  An unknown answer
+    is returned as ``"unknown"`` and never read as unsatisfiable.
+    """
+    n = play.num_agents
+    if base.num_agents != n or base.horizon != play.horizon:
+        raise ValueError("the play does not belong to the encoded game")
+    current = base.rewards_of(play.final_state) if rewards is None else rewards
+    queries = 0
+    for a in range(n):
+        if at_reward_bound(base, current, a):
+            continue
+        sol = check_improvement_from_base(
+            base,
+            agent=a,
+            threshold=current[a],
+            opponent_play=play,
+            timeout_ms=timeout_ms,
+        )
+        queries += 1
+        if sol.reason == "unknown":
+            return VerifyResult("unknown", a, None, None, queries)
+        if not sol.is_sat:
+            continue
+        assert sol.play is not None and sol.payoff_by_agent is not None
+        if sol.payoff_by_agent[a] <= current[a]:
+            raise RuntimeError(
+                "a model of G_a(pi) with reward_a > r_a(pi) must improve "
+                "on r_a(pi) (Lemma 4.7.2(1) violated)"
+            )
+        return VerifyResult("counterexample", a, sol, sol.play, queries)
+    return VerifyResult("verified", None, None, None, queries)
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CegarIteration:
+    """One iteration of the loop of Algorithm 4.
+
+    Attributes:
+        index: the iteration (1-based).
+        blocks: ``|P|`` at the start of the iteration.
+        synthesis: outcome of the inner synthesiser (``"ne"``, ``"n/c"``,
+            ``"uns"`` or ``"unk"``).
+        inner_iterations: iterations of the inner synthesiser.
+        abstract_rewards: rewards of the abstract play, if any.
+        lifted_rewards: ``r_a(pi)`` of the lifted play, if any.
+        check: ``"no_candidate"``, ``"unsatisfying"``, ``"refuted"``,
+            ``"verified"`` or ``"unknown"``.
+        agent: ``b`` (unsatisfying play) or the deviating agent ``a``.
+        deviation_size: ``|D|`` for a refuted or unsatisfying play.
+        refinement: ``"bisect"`` (lines 11-12), ``"refine"`` (line 33),
+            ``"fallback"`` (lines 29-31) or ``None`` (the run stopped).
+        blocks_after: ``|P|`` at the end of the iteration.
+        verify_queries: number of VerifyNE queries.
+        time_s: wall-clock time of the iteration.
+        initial_query_s: time of the inner run's initial query, if known.
+        initial_rewards: rewards of the inner run's initial play in the
+            game of this iteration (abstract rewards), if known.
+        returned_initial: the inner run returned its initial play.
+        initial: the inner run's initial query, ``"satisfying"`` or
+            ``"collective"``, if known.
+    """
+
+    index: int
+    blocks: int
+    synthesis: str
+    inner_iterations: int
+    abstract_rewards: tuple[int, ...] | None
+    lifted_rewards: tuple[int, ...] | None
+    check: str
+    agent: int | None
+    deviation_size: int | None
+    refinement: str | None
+    blocks_after: int
+    verify_queries: int
+    time_s: float
+    initial_query_s: float | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
+    initial: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class CegarResult:
-    """Result of the CEGAR-NE loop."""
+    """Result of CEGAR-NE.
+
+    Attributes:
+        is_sat: an equilibrium was returned (same as ``found_ne``).
+        reason: ``"ne"``, ``"failure_no_candidate"``, ``"failure_refuted"``,
+            ``"unknown"``, ``"timeout"`` or ``"max_refinements"``.
+        found_ne: the canonical completion of ``play`` is a demand-constrained
+            NE of ``M`` (Theorem 6.4.1).
+        iterations: number of iterations of the loop that ran (at most
+            ``|T| - |P_0| + 1``, Theorem 6.4.2).
+        final_partition_size: ``|P|`` in the last iteration, the number of
+            blocks of the final partition.
+        strategy: the profiles of ``play`` as coordinates.
+        payoff_by_agent: ``r_a(play)`` on the final state (Definition 3.9.2).
+        final_solution: ``play`` as an :class:`SmtSolution` over the concrete
+            territory (for rendering).
+        play: the returned play if ``found_ne``; otherwise the last lifted
+            play, if any.
+        outcome: ``"ne"``, ``"fail"``, ``"unk"``, ``"t/o"`` or ``"n/c"``.
+        at_discrete: the returned equilibrium was verified at the discrete
+            partition.
+        refinements: number of refinements of the partition.
+        initial_partition_size: ``|P_0|``.
+        inner_iterations: iterations of the inner synthesiser, summed over
+            the iterations of the loop.
+        partition: the final partition.
+        trace: one :class:`CegarIteration` per iteration.
+        initial_query_s: time of the initial query of the first inner call.
+        initial_play: the lift (Definition 6.2.1) of the initial play of
+            the first inner call, a play of ``M``.
+        initial_rewards: ``r_a`` of that lifted play in ``M``.
+        returned_initial: the run returned in its first iteration the
+            initial play of the first inner call (lifted and verified).
+
+    The returned joint strategy is ``completion()``, the canonical completion
+    of ``play`` (line 20 of Algorithm 4).
+    """
 
     is_sat: bool
-    reason: str  # "ne" | "no_abstract_ne" | "max_refinements" | "concrete_fallback"
+    reason: str
     found_ne: bool
     iterations: int
     final_partition_size: int
     strategy: tuple[tuple[Coord | None, ...], ...] | None
     payoff_by_agent: tuple[int, ...] | None
     final_solution: SmtSolution | None
+    play: Play | None = None
+    outcome: str = ""
+    at_discrete: bool = False
+    refinements: int = 0
+    initial_partition_size: int = 0
+    inner_iterations: int = 0
+    partition: Partition | None = None
+    trace: tuple[CegarIteration, ...] = ()
+    initial_query_s: float | None = None
+    initial_play: Play | None = None
+    initial_rewards: tuple[int, ...] | None = None
+    returned_initial: bool = False
+
+    @property
+    def rewards(self) -> tuple[int, ...] | None:
+        """``r_a(play)`` (alias of ``payoff_by_agent``)."""
+        return self.payoff_by_agent
+
+    @property
+    def blocks(self) -> int:
+        """Number of blocks of the final partition."""
+        return self.final_partition_size
+
+    def completion(self) -> CanonicalCompletion | None:
+        """The canonical completion of the returned play, or ``None`` without an equilibrium."""
+        if not self.found_ne or self.play is None:
+            return None
+        return canonical_completion(self.play)
 
 
-# ---------------------------------------------------------------------------
-# NE verification
-# ---------------------------------------------------------------------------
-
-def verify_ne(
-    *,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    lifted_strategy: LiftedStrategy,
-    timeout_ms: int | None = None,
-    symmetry: bool = False,
-    demands: tuple[int, ...] | None = None,
-) -> tuple[int | None, SmtSolution | None, tuple[int, ...] | None]:
-    """Verify whether a lifted strategy is a Nash equilibrium in the concrete game.
-
-    For each agent, fix the other agents' policies (derived from the lifted
-    strategy) and maximise the agent's payoff.  If any agent can improve,
-    return the deviating agent, the deviation solution, and the deviated
-    terminal ownership.
-
-    Returns ``(None, None, None)`` if the strategy is verified as NE.
-    """
-    # Build policies from the lifted strategy's action trace
-    # We need owner_by_round to build policies.  Simulate from the actions.
-    from .model import State, evolve
-
-    state = State.initial(territory, num_agents)
-    owner_snapshots: list[tuple[int, ...]] = [state.owner_by_index]
-    for t in range(len(lifted_strategy.actions_by_round)):
-        step = lifted_strategy.actions_by_round[t]
-        actions: dict[int, Coord | None] = {}
-        for a in range(num_agents):
-            actions[a] = step[a]
-        state = evolve(state, actions)
-        owner_snapshots.append(state.owner_by_index)
-
-    owner_by_round = tuple(owner_snapshots)
-    actions_by_round = lifted_strategy.actions_by_round
-    lifted_horizon = len(actions_by_round)
-
-    # The verification must use the full concrete horizon so that deviating
-    # agents have all m rounds available.  With weight_balance_target the
-    # lifted horizon already equals the concrete horizon; the assertion
-    # guards against silent divergence if that invariant is relaxed later.
-    assert horizon >= lifted_horizon, (
-        f"concrete horizon ({horizon}) < lifted horizon ({lifted_horizon})"
-    )
-
-    policies: list[Policy] = []
-    for a in range(num_agents):
-        pol = policy_from_solution(owner_by_round, actions_by_round, a)
-        policies.append(pol)
-
-    # Build base encoding once — reuse across per-agent deviation checks
-    base_enc = build_base_encoding(
+def _solution_of(
+    play: Play, territory: Territory, rewards: tuple[int, ...]
+) -> SmtSolution:
+    """A concrete play as an :class:`SmtSolution` (for rendering and legacy callers)."""
+    final = State(
         territory=territory,
-        num_agents=num_agents,
-        horizon=horizon,
-        require_victory=True,
-        symmetry_breaking=symmetry,
-        demands=demands,
-        max_region_size=len(territory) // num_agents,
+        num_agents=play.num_agents,
+        owner_by_index=play.final_state,
+        round_index=play.horizon,
+    )
+    return SmtSolution(
+        is_sat=True,
+        reason="sat",
+        final_state=final,
+        actions_by_round=play.to_coords(territory),
+        owner_by_round=play.states,
+        payoff_by_agent=rewards,
+        play=play,
     )
 
-    # For each agent: check if they can do strictly better than current payoff.
-    # Uses z3.Solver with a bound constraint (not Optimize), which is faster
-    # since we only need to know *if* improvement exists, not the optimal.
-    for a in range(num_agents):
-        fixed: list[Policy | None] = [
-            None if other == a else policies[other]
-            for other in range(num_agents)
-        ]
-
-        br = check_improvement_from_base(
-            base_enc,
-            agent=a,
-            threshold=lifted_strategy.payoff_by_agent[a],
-            fixed_policy_by_agent=tuple(fixed),
-            enforce_state_only_for_agents=(a,),
-            timeout_ms=timeout_ms,
-        )
-
-        if not br.is_sat:
-            continue
-
-        # SAT means payoff[a] > threshold — agent can improve
-        assert br.final_state is not None
-        return a, br, br.final_state.owner_by_index
-
-    return None, None, None
-
 
 # ---------------------------------------------------------------------------
-# Main CEGAR-NE loop (Algorithm 1)
+# Algorithm 4
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class _SynthResult:
-    """Unified result type for IBIS and Q-IBIS when used by CEGAR."""
-
-    is_sat: bool
-    reason: str
-    found_ne: bool
-    iterations: int
-    strategy: tuple[tuple[Coord | None, ...], ...] | None
-    payoff_by_agent: tuple[int, ...] | None
-    final_solution: SmtSolution | None
-
-
-def _run_synthesiser(
-    *,
-    synthesiser: str,
-    territory: Territory,
-    num_agents: int,
-    horizon: int,
-    progress: bool = False,
-    timing: bool = False,
-    timeout_ms: int | None = None,
-    symmetry: bool = False,
-    demands: tuple[int, ...] | None = None,
-    weights: tuple[int, ...] | None = None,
-    custom_neighbors: dict[int, list[int]] | None = None,
-    weight_balance_target: int | None = None,
-    require_victory: bool = True,
-) -> _SynthResult:
-    """Dispatch to IBIS or Q-IBIS and return a unified result."""
-    if synthesiser == "ibis":
-        from .ibis import solve_ibis
-
-        res = solve_ibis(
-            territory=territory,
-            num_agents=num_agents,
-            horizon=horizon,
-            progress=progress,
-            timing=timing,
-            timeout_ms=timeout_ms,
-            symmetry=symmetry,
-            demands=demands,
-            weights=weights,
-            custom_neighbors=custom_neighbors,
-            weight_balance_target=weight_balance_target,
-            require_victory=require_victory,
-        )
-        return _SynthResult(
-            is_sat=res.is_sat,
-            reason=res.reason,
-            found_ne=res.found_ne,
-            iterations=res.iterations,
-            strategy=res.strategy,
-            payoff_by_agent=res.payoff_by_agent,
-            final_solution=res.final_solution,
-        )
-    elif synthesiser == "qibis":
-        from .qibis import QibisConfig, solve_qibis
-
-        cfg = QibisConfig(
-            progress=progress,
-            timing=timing,
-            timeout_ms=timeout_ms,
-            symmetry=symmetry,
-            demands=demands,
-        )
-        res = solve_qibis(
-            territory=territory,
-            num_agents=num_agents,
-            horizon=horizon,
-            cfg=cfg,
-        )
-        return _SynthResult(
-            is_sat=res.is_sat,
-            reason=res.reason,
-            found_ne=res.found_ne,
-            iterations=res.iterations,
-            strategy=res.strategy,
-            payoff_by_agent=res.payoff_by_agent,
-            final_solution=res.final_solution,
-        )
-    elif synthesiser == "sibis":
-        from .ibis import solve_sibis
-
-        res = solve_sibis(
-            territory=territory,
-            num_agents=num_agents,
-            horizon=horizon,
-            progress=progress,
-            timing=timing,
-            timeout_ms=timeout_ms,
-            symmetry=symmetry,
-            demands=demands,
-            weights=weights,
-            custom_neighbors=custom_neighbors,
-            weight_balance_target=weight_balance_target,
-            require_victory=require_victory,
-        )
-        return _SynthResult(
-            is_sat=res.is_sat,
-            reason=res.reason,
-            found_ne=res.found_ne,
-            iterations=res.iterations,
-            strategy=res.strategy,
-            payoff_by_agent=res.payoff_by_agent,
-            final_solution=res.final_solution,
-        )
-    else:
-        raise ValueError(f"unknown synthesiser: {synthesiser!r}")
 
 
 def solve_cegar(
     *,
     territory: Territory,
     num_agents: int,
-    horizon: int,
+    horizon: int | None = None,
     initial_partition: str | Partition = "orbit",
-    synthesiser: str = "ibis",
-    max_iters: int = 25,
+    synthesiser: str | SynthesiseFn = "sibis",
+    max_iters: int | None = 30,
+    inner_max_iters: int | None | EllipsisType = SAME,
+    discrete_max_iters: int | None | EllipsisType = SAME,
+    initial: str = "satisfying",
+    inner_initial: str | EllipsisType = SAME,
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
     symmetry: bool = False,
     demands: tuple[int, ...] | None = None,
+    seed: int = 0,
+    max_refinements: int | None = None,
+    time_limit_s: float | None = None,
+    on_initial: Callable[[CegarInitial], None] | None = None,
 ) -> CegarResult:
-    """Run the CEGAR-NE loop (Algorithm 1, EUMAS).
+    """Run CEGAR-NE (Algorithm 4) on ``M = (Agt, T, d)``.
 
     Parameters
     ----------
-    territory : Territory
-        The concrete territory.
-    num_agents : int
-        Number of agents.
-    horizon : int
-        Concrete game horizon (ignored for abstract games which compute
-        their own horizon from partition size).
-    initial_partition : str or Partition
-        ``"orbit"`` (default) starts from symmetry orbits,
-        ``"discrete"`` starts fully refined (skips abstraction).
-    synthesiser : str
-        ``"ibis"`` (default) or ``"qibis"``.
-    max_iters : int
-        Maximum refinement iterations.
-    progress : bool
-        Print per-iteration progress to stderr.
-    timing : bool
-        Include timing information in progress output.
-    timeout_ms : int or None
-        Z3 timeout per individual solve call.
-    symmetry : bool
-        Enable symmetry-breaking constraints in SMT calls.
+    territory, num_agents, demands
+        The RCMAS ``M``; *demands* ``None`` means every demand is 0.
+    horizon
+        Must be ``m = floor(|T|/|Agt|)``; ``None`` selects it.
+    initial_partition
+        ``P_0``: a :class:`Partition` or a name accepted by
+        :func:`~rcmas.abstraction.make_partition` (default ``"orbit"``).
+    synthesiser
+        ``"sibis"`` (default, as in Chapter 7), ``"ibis"``, ``"qibis"``, or
+        any :data:`SynthesiseFn`.  A callable receives only the game of
+        each call, so it cannot be combined with a non-default
+        *max_iters*, *inner_max_iters*, *discrete_max_iters*, *initial*,
+        *inner_initial* or *seed* (:class:`ValueError`).
+    max_iters
+        The iteration bound ``N`` of the inner synthesiser at every
+        partition, the same bound as a direct run; ``None`` means no bound.
+        It does not bound the loop of Algorithm 4, which needs no bound
+        (Theorem 6.4.2).
+    inner_max_iters, discrete_max_iters
+        Separate bounds of the inner synthesiser at a coarse partition and
+        at the discrete partition, where nothing is left to refine; ``...``
+        (the default) takes *max_iters*, ``None`` means no bound.  The
+        thesis protocol bounds the coarse runs (CEGAR-NE refines after a
+        coarse run that ends without converging) and leaves the discrete
+        run unbounded, like a direct run.
+    initial, inner_initial
+        The initial query of the inner call at the discrete partition
+        (*initial*) and at a coarse partition (*inner_initial*; ``...``,
+        the default, takes *initial*): ``"satisfying"`` (``smt(F)`` of the
+        call's game) or ``"collective"`` (its ``smt(F, f)``, with weighted
+        rewards at a coarse partition).  The thesis protocol poses
+        ``smt(F_hat)`` at a coarse partition, whose collectively optimal
+        query can be much harder than ``smt(F, f)`` of ``M``, and
+        ``smt(F, f)`` at the discrete partition, where the inner run is a
+        direct run on ``M``.
+    timeout_ms
+        Z3 timeout per query; an expired query answers unknown and the run
+        stops with outcome ``"unk"``.
+    symmetry
+        Add symmetry-breaking constraints to the initial query of each
+        inner synthesis call (Section 6.5).
+    seed
+        Seed of the Q-IBIS learners.
+    max_refinements, time_limit_s
+        Optional limits outside Algorithm 4: stop with outcome ``"n/c"``
+        instead of refining more than *max_refinements* times, or with
+        ``"t/o"`` at the start of an iteration once *time_limit_s* seconds
+        have passed.
+    on_initial
+        Called with a :class:`CegarInitial` as soon as the initial query of
+        an inner call has been answered.
+    progress, timing
+        Log every iteration to stderr, with times.
     """
+    t0 = time.perf_counter()
 
     def _log(msg: str) -> None:
         if progress:
+            if timing:
+                msg = f"{msg} t={time.perf_counter() - t0:.3f}s"
             print(msg, file=sys.stderr, flush=True)
 
-    if synthesiser not in ("ibis", "qibis", "sibis"):
-        raise ValueError("synthesiser must be 'ibis', 'qibis', or 'sibis'")
-
-    # Build initial partition
-    if isinstance(initial_partition, str):
-        if initial_partition == "orbit":
-            partition = orbit_partition(territory)
-        elif initial_partition == "discrete":
-            partition = discrete_partition(territory)
-        elif initial_partition.startswith("grid-"):
-            # e.g. "grid-2x2" → tile_w=2, tile_h=2
-            try:
-                dims = initial_partition[5:].split("x")
-                tw, th = int(dims[0]), int(dims[1])
-            except (IndexError, ValueError):
-                raise ValueError(f"invalid grid partition format: {initial_partition!r} (expected grid-WxH)")
-            partition = grid_partition(territory, tw, th)
-        elif initial_partition.startswith("bfs-"):
-            # e.g. "bfs-4" → k=4
-            try:
-                k = int(initial_partition[4:])
-            except ValueError:
-                raise ValueError(f"invalid bfs partition format: {initial_partition!r} (expected bfs-K)")
-            partition = bfs_kway_partition(territory, k)
-        elif initial_partition == "balanced":
-            partition = balanced_partition(territory, num_agents)
-        else:
-            raise ValueError(f"unknown partition type: {initial_partition!r}")
-    else:
-        partition = initial_partition
-
-    t0 = time.perf_counter()
-
-    for it in range(1, max_iters + 1):
-        iter_t0 = time.perf_counter()
-        _log(f"cegar iter={it} blocks={len(partition.blocks)}")
-
-        # If partition is fully discrete, fall through to concrete solve
-        if len(partition.blocks) >= len(territory):
-            _log(f"cegar iter={it} partition=discrete, falling through to concrete {synthesiser}")
-            concrete_result = _run_synthesiser(
-                synthesiser=synthesiser,
-                territory=territory,
-                num_agents=num_agents,
-                horizon=horizon,
-                progress=progress,
-                timing=timing,
-                timeout_ms=timeout_ms,
-                symmetry=symmetry,
-                demands=demands,
-            )
-            if timing:
-                _log(f"cegar done reason=concrete_fallback total_time_s={time.perf_counter() - t0:.3f}")
-            return CegarResult(
-                is_sat=concrete_result.is_sat,
-                reason="concrete_fallback",
-                found_ne=concrete_result.found_ne,
-                iterations=it,
-                final_partition_size=len(partition.blocks),
-                strategy=concrete_result.strategy,
-                payoff_by_agent=concrete_result.payoff_by_agent,
-                final_solution=concrete_result.final_solution,
-            )
-
-        # 1. Build abstract RCMAS
-        abstract = build_abstract_rcmas(territory, num_agents, partition)
-
-        # If partition is too coarse (fewer blocks than agents), abstract
-        # game has zero horizon — fall through to concrete.
-        if abstract.horizon < 1:
-            _log(f"cegar iter={it} partition too coarse (blocks={len(partition.blocks)} < agents={num_agents}), falling through to concrete {synthesiser}")
-            concrete_result = _run_synthesiser(
-                synthesiser=synthesiser,
-                territory=territory,
-                num_agents=num_agents,
-                horizon=horizon,
-                progress=progress,
-                timing=timing,
-                timeout_ms=timeout_ms,
-                symmetry=symmetry,
-                demands=demands,
-            )
-            if timing:
-                _log(f"cegar done reason=concrete_fallback total_time_s={time.perf_counter() - t0:.3f}")
-            return CegarResult(
-                is_sat=concrete_result.is_sat,
-                reason="concrete_fallback",
-                found_ne=concrete_result.found_ne,
-                iterations=it,
-                final_partition_size=len(partition.blocks),
-                strategy=concrete_result.strategy,
-                payoff_by_agent=concrete_result.payoff_by_agent,
-                final_solution=concrete_result.final_solution,
-            )
-
-        # 2. Synthesise NE on abstract game (no victory/weight-balance
-        #    requirement — unclaimed blocks are permitted)
-        abstract_result = _run_synthesiser(
-            synthesiser=synthesiser,
-            territory=abstract.territory,
-            num_agents=num_agents,
-            horizon=abstract.horizon,
-            weights=abstract.weights,
-            custom_neighbors=abstract.neighbors,
-            require_victory=False,
-            progress=False,
+    n = num_agents
+    if n <= 0:
+        raise ValueError("num_agents must be >= 1")
+    S = len(territory)
+    m = S // n
+    if horizon is None:
+        horizon = m
+    if horizon != m:
+        raise ValueError(
+            f"horizon must be m = floor(|T|/|Agt|) = {m} (Definition 3.9.1), got {horizon}"
+        )
+    if demands is not None:
+        demands = tuple(demands)
+        if len(demands) != n:
+            raise ValueError("demands must have one entry per agent")
+    coarse_bound = _bound(inner_max_iters, _bound(max_iters, None))
+    discrete_bound = _bound(discrete_max_iters, _bound(max_iters, None))
+    discrete_initial = _initial_query(initial, "satisfying", "initial")
+    coarse_initial = _initial_query(inner_initial, discrete_initial, "inner_initial")
+    if isinstance(synthesiser, str):
+        synth = make_synthesiser(
+            synthesiser,
+            max_iters=coarse_bound,
+            discrete_max_iters=discrete_bound,
+            initial=discrete_initial,
+            inner_initial=coarse_initial,
             timeout_ms=timeout_ms,
-            symmetry=symmetry,
-            demands=demands,
+            seed=seed,
+        )
+    else:
+        # A callable receives only the game of each call: the bounds, the
+        # initial query and the seed configure the named synthesisers, so a
+        # callable would silently ignore them.
+        ignored = [
+            name
+            for name, given in (
+                ("max_iters", max_iters != 30),
+                ("inner_max_iters", inner_max_iters is not SAME),
+                ("discrete_max_iters", discrete_max_iters is not SAME),
+                ("initial", initial != "satisfying"),
+                ("inner_initial", inner_initial is not SAME),
+                ("seed", seed != 0),
+            )
+            if given
+        ]
+        if ignored:
+            raise ValueError(
+                f"{', '.join(ignored)} configure the named synthesisers "
+                "('ibis', 'sibis', 'qibis'); a callable synthesiser receives "
+                "only the game of each call and must apply them itself"
+            )
+        synth = synthesiser
+
+    partition = make_partition(initial_partition, territory, n)
+    p0 = len(partition)
+    bound = S - p0 + 1
+    d = demands if demands is not None else (0,) * n
+    neighbors = territory.neighbor_map()
+
+    # F of M, built once and shared by every VerifyNE query (Section 7.1).
+    base = build_base_encoding(
+        territory=territory, num_agents=n, horizon=m, demands=demands
+    )
+
+    trace: list[CegarIteration] = []
+    refinements = 0
+    inner_total = 0
+    last_play: Play | None = None
+    last_rewards: tuple[int, ...] | None = None
+    first: dict[str, Any] = {}
+
+    def _result(reason: str, it: int, k: int, ne: bool = False) -> CegarResult:
+        play = last_play
+        return CegarResult(
+            is_sat=ne,
+            reason=reason,
+            found_ne=ne,
+            iterations=it,
+            final_partition_size=k,
+            strategy=None if play is None else play.to_coords(territory),
+            payoff_by_agent=last_rewards,
+            final_solution=(
+                None
+                if play is None or last_rewards is None
+                else _solution_of(play, territory, last_rewards)
+            ),
+            play=play,
+            outcome=OUTCOME_BY_REASON[reason],
+            at_discrete=ne and k == S,
+            refinements=refinements,
+            initial_partition_size=p0,
+            inner_iterations=inner_total,
+            partition=partition,
+            trace=tuple(trace),
+            initial_query_s=first.get("query_s"),
+            initial_play=first.get("play"),
+            initial_rewards=first.get("rewards"),
+            returned_initial=bool(
+                ne and it == 1 and trace and trace[0].returned_initial
+            ),
         )
 
-        if timing:
-            _log(f"cegar iter={it} abstract_solve_time_s={time.perf_counter() - iter_t0:.3f}")
+    def _note_first(
+        abstract: AbstractRCMAS, query_s: float | None, play0: Play | None
+    ) -> CegarInitial:
+        """Record the initial play of the first inner call, lifted to ``M``."""
+        lifted = None if play0 is None else lift_play(abstract, play0)
+        r0 = (
+            None
+            if lifted is None
+            else rewards_from_owner(lifted.final_state, n, neighbors)
+        )
+        first.update(query_s=query_s, play=lifted, rewards=r0)
+        return CegarInitial(1, len(abstract.partition), query_s, None, r0)
 
-        # 3. If abstract is unsat, refine by splitting the largest block.
-        #    Abstract unsat may be caused by the partition being too coarse
-        #    (e.g. no weight-balanced allocation exists), not by absence of
-        #    a concrete NE.
-        if not abstract_result.is_sat or abstract_result.final_solution is None:
-            _log(f"cegar iter={it} abstract=unsat reason={abstract_result.reason}, refining largest block")
-            largest_idx = max(range(len(partition.blocks)), key=lambda p: len(partition.blocks[p]))
-            block = partition.blocks[largest_idx]
-            if len(block) <= 1:
-                # Cannot refine further — partition is (nearly) discrete
-                _log(f"cegar iter={it} cannot refine further, falling through to concrete")
-                continue  # will hit the discrete fallthrough check at top of loop
-            delta = bfs_bisect(block, territory)
-            partition = refine_partition(partition, delta)
+    def _initial_hook(it: int, abstract: AbstractRCMAS) -> Callable[[Any], None]:
+        def hook(init: Any) -> None:
+            if it == 1:
+                info = _note_first(abstract, init.query_s, init.play)
+            else:
+                info = CegarInitial(
+                    it, len(abstract.partition), init.query_s, None, None
+                )
+            info = replace(
+                info,
+                abstract_rewards=init.rewards,
+                status=init.reason,
+                initial=getattr(init, "initial", None),
+            )
+            if on_initial is not None:
+                on_initial(info)
+
+        return hook
+
+    def _push(row: dict[str, Any], started: float, **fields: Any) -> None:
+        row.update(fields)
+        trace.append(CegarIteration(**row, time_s=time.perf_counter() - started))
+
+    it = 0
+    while True:
+        it += 1
+        if it > bound:  # pragma: no cover - Theorem 6.4.2
+            raise RuntimeError("CEGAR-NE exceeded |T| - |P_0| + 1 iterations")
+        if time_limit_s is not None and time.perf_counter() - t0 > time_limit_s:
+            _log(f"cegar iter={it} time limit reached")
+            return _result("timeout", it - 1, len(partition))
+        it_t0 = time.perf_counter()
+        k = len(partition)
+        row: dict[str, Any] = {
+            "index": it,
+            "blocks": k,
+            "abstract_rewards": None,
+            "lifted_rewards": None,
+            "agent": None,
+            "deviation_size": None,
+            "refinement": None,
+            "blocks_after": k,
+            "verify_queries": 0,
+        }
+
+        # Line 5: the abstract RCMAS.  Line 6: SynthesiseNE.
+        abstract = build_abstract_rcmas(territory, n, partition)
+        game = synthesis_game(abstract, demands=demands, symmetry=symmetry)
+        game = replace(game, on_initial=_initial_hook(it, abstract))
+        inner = synth(game)
+        inner_total += inner.iterations
+        row["synthesis"] = inner.outcome
+        row["inner_iterations"] = inner.iterations
+        row["initial_query_s"] = inner.initial_query_s
+        row["initial_rewards"] = inner.initial_rewards
+        row["returned_initial"] = inner.returned_initial
+        row["initial"] = inner.initial
+        if it == 1 and not first:
+            _note_first(abstract, inner.initial_query_s, inner.initial_play)
+        _log(
+            f"cegar iter={it} blocks={k} horizon={game.horizon} "
+            f"synthesis={inner.outcome} inner_iters={inner.iterations} "
+            f"abstract_rewards={inner.rewards}"
+        )
+        if inner.outcome == "unk":
+            _push(row, it_t0, check="unknown")
+            return _result("unknown", it, k)
+
+        if inner.outcome != "ne" or inner.play is None:
+            # Lines 7-12: no abstract candidate.
+            if k == S:
+                _push(row, it_t0, check="no_candidate")
+                _log(f"cegar iter={it} no candidate at the discrete partition")
+                return _result("failure_no_candidate", it, k)
+            if max_refinements is not None and refinements >= max_refinements:
+                _push(row, it_t0, check="no_candidate")
+                return _result("max_refinements", it, k)
+            star = partition.largest_block()
+            refined = refine_partition(
+                partition, bfs_bisect(partition.blocks[star], territory)
+            )
+            assert len(refined) == k + 1
+            partition = refined
+            refinements += 1
+            _push(
+                row,
+                it_t0,
+                check="no_candidate",
+                refinement="bisect",
+                blocks_after=len(partition),
+            )
+            _log(f"cegar iter={it} no candidate: bisect block {star}")
             continue
 
-        _log(f"cegar iter={it} abstract_ne={abstract_result.found_ne} abstract_payoff={abstract_result.payoff_by_agent}")
+        # Line 14: lift.
+        pi = lift_play(abstract, inner.play)
+        r = rewards_from_owner(pi.final_state, n, neighbors)
+        last_play, last_rewards = pi, r
+        row["abstract_rewards"] = inner.rewards
+        row["lifted_rewards"] = r
+        _log(f"cegar iter={it} lifted_rewards={r}")
 
-        # 4. Lift abstract solution to concrete (extend to full concrete horizon)
-        lifted = lift_strategy(abstract, abstract_result.final_solution, concrete_horizon=horizon)
-        _log(f"cegar iter={it} concrete_payoff={lifted.payoff_by_agent}")
+        # Lines 15-16: the satisfaction check on the lifted play.
+        unsatisfied = [b for b in range(n) if r[b] < d[b]]
+        if unsatisfied:
+            agent = unsatisfied[0]
+            D = sectors_of(pi.final_state, agent)
+            row["check"] = "unsatisfying"
+            _log(f"cegar iter={it} lifted play not satisfying: agent={agent}")
+        else:
+            # Line 18: VerifyNE, without symmetry constraints.
+            vr = verify_ne(base, pi, rewards=r, timeout_ms=timeout_ms)
+            row["verify_queries"] = vr.queries
+            if vr.status == "unknown":
+                _push(row, it_t0, check="unknown", agent=vr.agent)
+                _log(f"cegar iter={it} VerifyNE: solver answered unknown")
+                return _result("unknown", it, k)
+            if vr.status == "verified":
+                _push(row, it_t0, check="verified")
+                _log(f"cegar iter={it} verified with {k} blocks")
+                return _result("ne", it, k, ne=True)
+            assert vr.deviation is not None and vr.agent is not None
+            agent = vr.agent
+            D = deviation_set(pi.final_state, vr.deviation.final_state)
+            assert D, "a profitable deviation changes the final state"
+            row["check"] = "refuted"
+            _log(f"cegar iter={it} counterexample: agent={agent} |D|={len(D)}")
+        row["agent"] = agent
+        row["deviation_size"] = len(D)
 
-        # 5. Verify NE in concrete game
-        verify_t0 = time.perf_counter()
-        dev_agent, dev_sol, dev_terminal = verify_ne(
-            territory=territory,
-            num_agents=num_agents,
-            horizon=horizon,
-            lifted_strategy=lifted,
-            timeout_ms=timeout_ms,
-            symmetry=symmetry,
-            demands=demands,
-        )
-        if timing:
-            _log(f"cegar iter={it} verify_time_s={time.perf_counter() - verify_t0:.3f}")
+        # Line 24: refuted at the discrete partition.
+        if k == S:
+            _push(row, it_t0)
+            _log(f"cegar iter={it} refuted at the discrete partition")
+            return _result("failure_refuted", it, k)
+        if max_refinements is not None and refinements >= max_refinements:
+            _push(row, it_t0)
+            return _result("max_refinements", it, k)
 
-        # 6. If verified, return NE
-        if dev_agent is None:
-            _log(f"cegar iter={it} verified=NE")
-            if timing:
-                _log(f"cegar done reason=ne total_time_s={time.perf_counter() - t0:.3f}")
-            return CegarResult(
-                is_sat=True,
-                reason="ne",
-                found_ne=True,
-                iterations=it,
-                final_partition_size=len(partition.blocks),
-                strategy=lifted.actions_by_round,
-                payoff_by_agent=lifted.payoff_by_agent,
-                final_solution=abstract_result.final_solution,
+        # Lines 27-34: refine, with the fallback when D is a union of blocks.
+        refined = refine_partition(partition, D)
+        how = "refine"
+        if len(refined) == k:
+            inside = [
+                p for p, B in enumerate(partition.blocks) if B <= D and len(B) > 1
+            ]
+            star = (
+                partition.largest_block(inside) if inside else partition.largest_block()
             )
-
-        # 7. Compute deviation set and refine
-        assert dev_terminal is not None
-        delta = compute_deviation_set(lifted.terminal_owner, dev_terminal)
-        _log(f"cegar iter={it} deviating_agent={dev_agent} deviation_set_size={len(delta)}")
-
-        old_size = len(partition.blocks)
-        partition = refine_partition(partition, delta)
-
-        # If the deviation set aligned with existing block boundaries (no
-        # new blocks), fall back to BFS-bisect of the largest multi-sector
-        # block to guarantee progress.
-        if len(partition.blocks) == old_size:
-            _log(f"cegar iter={it} no progress from deviation set, bisecting largest block")
-            largest_idx = max(
-                range(len(partition.blocks)),
-                key=lambda p: len(partition.blocks[p]),
+            refined = refine_partition(
+                partition, bfs_bisect(partition.blocks[star], territory)
             )
-            block = partition.blocks[largest_idx]
-            if len(block) > 1:
-                delta_bisect = bfs_bisect(block, territory)
-                partition = refine_partition(partition, delta_bisect)
-
-        _log(f"cegar iter={it} refined blocks={old_size}->{len(partition.blocks)}")
-
-        if timing:
-            _log(f"cegar iter={it} iter_time_s={time.perf_counter() - iter_t0:.3f}")
-
-    # Max iterations reached
-    if timing:
-        _log(f"cegar done reason=max_refinements total_time_s={time.perf_counter() - t0:.3f}")
-    return CegarResult(
-        is_sat=False,
-        reason="max_refinements",
-        found_ne=False,
-        iterations=max_iters,
-        final_partition_size=len(partition.blocks),
-        strategy=None,
-        payoff_by_agent=None,
-        final_solution=None,
-    )
+            how = "fallback"
+        assert len(refined) > k
+        partition = refined
+        refinements += 1
+        _push(row, it_t0, refinement=how, blocks_after=len(partition))
+        _log(f"cegar iter={it} {how}: {k} -> {len(partition)} blocks")

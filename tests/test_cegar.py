@@ -1,203 +1,1161 @@
-"""Tests for rcmas.cegar (Algorithm 1)."""
+"""Tests for rcmas.cegar (thesis Algorithm 4, Sections 6.3-6.6).
+
+Every equilibrium that CEGAR-NE returns is checked against an exhaustive
+enumeration of the deviations from the canonical completion of its play
+(``tests/brute_force.py``), on instances where ``n`` divides ``|T|`` and on
+instances where it does not.  Adversarial inner synthesisers check that
+soundness (Theorem 6.4.1) and the iteration bound (Theorem 6.4.2) do not
+depend on the inner synthesiser.
+"""
 
 from __future__ import annotations
+
+import random
 
 import pytest
 
 z3 = pytest.importorskip("z3")
 
-from rcmas.abstraction import discrete_partition, orbit_partition
-from rcmas.cegar import CegarResult, solve_cegar, verify_ne
-from rcmas.model import Coord, Territory
+from rcmas import smt_constraints, smt_solve  # noqa: E402
+from rcmas.abstraction import (  # noqa: E402
+    Partition,
+    build_abstract_rcmas,
+    discrete_partition,
+    orbit_partition,
+)
+from rcmas.cegar import (  # noqa: E402
+    CegarResult,
+    InnerResult,
+    SynthesisGame,
+    make_synthesiser,
+    solve_cegar,
+    synthesis_game,
+    verify_ne,
+)
+from rcmas.model import Territory  # noqa: E402
+from rcmas.smt_solve import build_base_encoding  # noqa: E402
+from rcmas.strategy import Play, canonical_completion, default_action  # noqa: E402
+
+from .brute_force import best_deviation, is_equilibrium, random_play  # noqa: E402
+from .replay import QueryReplay, disable_skip  # noqa: E402
+
+GRID_4x2 = ["....", "...."]
+GRID_6x2 = ["......", "......"]
+GRID_3x3 = ["...", "...", "..."]
+
+
+def _t(rows: list[str]) -> Territory:
+    return Territory.from_ascii(rows)
+
+
+def _check_run(
+    res: CegarResult,
+    territory: Territory,
+    n: int,
+    demands: tuple[int, ...] | None,
+) -> None:
+    """Theorems 6.4.1 and 6.4.2 on one run, with brute-force certification."""
+    S = len(territory)
+    bound = S - res.initial_partition_size + 1
+    assert 1 <= res.iterations <= bound
+    assert res.refinements == res.iterations - 1
+    assert res.refinements <= S - res.initial_partition_size
+    assert len(res.trace) == res.iterations
+    for row in res.trace[:-1]:
+        assert row.blocks_after > row.blocks
+        assert row.refinement in ("bisect", "refine", "fallback")
+    for a, b in zip(res.trace, res.trace[1:]):
+        assert b.blocks == a.blocks_after
+    assert res.final_partition_size == res.trace[-1].blocks
+    if res.found_ne:
+        assert res.outcome == "ne" and res.reason == "ne" and res.is_sat
+        assert res.trace[-1].check == "verified"
+        assert res.at_discrete == (res.final_partition_size == S)
+        play = res.play
+        assert play is not None and play.horizon == S // n
+        d = demands or (0,) * n
+        rewards = play.rewards(territory.neighbor_map())
+        assert res.payoff_by_agent == rewards
+        assert all(rewards[a] >= d[a] for a in range(n))
+        assert is_equilibrium(play, territory.neighbor_map(), demands)
+        comp = res.completion()
+        assert comp is not None and comp.play == play
+        assert res.final_solution is not None
+        assert res.final_solution.owner_by_round == play.states
+        assert res.strategy == play.to_coords(territory)
+    else:
+        assert res.completion() is None
+        assert res.outcome in ("fail", "unk", "t/o", "n/c")
+
+
+def _sound_inner(res: CegarResult) -> None:
+    """With a sound inner synthesiser, a candidate at P_bot always passes VerifyNE.
+
+    IBIS, S-IBIS and Q-IBIS return only plays that pass the unrestricted
+    best-response test, so a run can end with FAILURE only through line 9
+    (the inner synthesiser stops without an equilibrium of M), never through
+    line 25.  Whether the inner synthesiser stops without an equilibrium
+    depends on the models Z3 returns, so the outcome itself is not fixed.
+    """
+    assert res.outcome in ("ne", "fail")
+    if res.outcome == "fail":
+        assert res.reason == "failure_no_candidate"
+    S = res.partition.num_sectors
+    assert all(row.check != "refuted" for row in res.trace if row.blocks == S)
 
 
 # ---------------------------------------------------------------------------
-# TestWeightedSmt — weighted size constraint produces correct values
+# VerifyNE (line 18)
 # ---------------------------------------------------------------------------
 
-class TestWeightedSmt:
-    def test_weighted_payoff(self) -> None:
-        """Weighted solve on a 2-sector territory with weights (2, 3) should
-        produce a payoff of 5 for a single agent owning both."""
-        territory = Territory.from_ascii([".."])
-        from rcmas.smt_solve import solve_smt_game
 
-        sol = solve_smt_game(
-            territory=territory,
-            num_agents=1,
-            horizon=2,
-            objective="sum",
-            require_victory=True,
-            debug=True,
-            weights=(2, 3),
+class TestVerifyNE:
+    @pytest.mark.parametrize(
+        "rows, n, demands",
+        [
+            (["..", ".."], 2, None),
+            (["...", "..."], 2, None),
+            (["...", "..."], 2, (2, 1)),
+            (GRID_3x3, 2, None),
+            ([".....", "....."], 3, None),
+            (["..#..", "..#.."], 2, (1, 2)),
+        ],
+    )
+    def test_matches_exhaustive_deviations(self, rows, n, demands) -> None:
+        """VerifyNE verifies a satisfying play iff no admissible deviation is profitable."""
+        t = _t(rows)
+        nbrs = t.neighbor_map()
+        m = len(t) // n
+        base = build_base_encoding(
+            territory=t, num_agents=n, horizon=m, demands=demands
         )
-        assert sol.is_sat
-        assert sol.payoff_by_agent is not None
-        # Agent 0 owns both sectors: weighted size = 2 + 3 = 5
-        assert sol.payoff_by_agent[0] == 5
+        d = demands or (0,) * n
+        rng = random.Random(len(t) * 10 + n)
+        seen = {"verified": 0, "counterexample": 0}
+        tried = 0
+        while tried < 8:
+            play = random_play(len(t), n, m, rng)
+            r = play.rewards(nbrs)
+            if any(r[a] < d[a] for a in range(n)):
+                continue
+            tried += 1
+            vr = verify_ne(base, play)
+            assert vr.status in ("verified", "counterexample")
+            seen[vr.status] += 1
+            assert (vr.status == "verified") == is_equilibrium(play, nbrs, demands)
+            # One query per agent below R_max = m, none for an agent at m.
+            below = [r[b] < base.max_reward for b in range(n)]
+            if vr.status == "verified":
+                assert vr.queries == sum(below)
+                continue
+            a = vr.agent
+            assert below[a] and vr.queries == sum(below[: a + 1])
+            # The agents before a cannot improve; a can, and its deviation is
+            # an admissible run against the canonical completion.
+            completion = canonical_completion(play)
+            for b in range(a):
+                assert best_deviation(completion, b, nbrs, demands)[0] <= r[b]
+            dev = vr.deviation
+            r_dev = dev.rewards(nbrs)
+            assert r_dev[a] > r[a]
+            assert all(r_dev[b] >= d[b] for b in range(n))
+            for t_ in range(m):
+                for b in range(n):
+                    if b != a:
+                        assert dev.actions[t_][b] == completion.action(
+                            dev.states[t_], b
+                        )
 
-    def test_unit_weights_match_unweighted(self) -> None:
-        """Explicit unit weights should produce same payoffs as no weights."""
-        territory = Territory.from_ascii(["..", ".."])
-        from rcmas.smt_solve import solve_smt_game
+    def test_known_equilibrium(self, monkeypatch, territory_2x1: Territory) -> None:
+        """Both rewards are m = 1: verified without a query; posed, both are unsat."""
+        base = build_base_encoding(territory=territory_2x1, num_agents=2, horizon=1)
+        vr = verify_ne(base, Play.from_actions(2, 2, [[0, 1]]))
+        assert vr.status == "verified" and vr.agent is None and vr.queries == 0
+        disable_skip(monkeypatch)
+        vr = verify_ne(base, Play.from_actions(2, 2, [[0, 1]]))
+        assert vr.status == "verified" and vr.agent is None and vr.queries == 2
 
-        weighted = solve_smt_game(
-            territory=territory,
-            num_agents=2,
-            horizon=2,
-            objective="sum",
-            require_victory=True,
-            debug=True,
-            weights=(1, 1, 1, 1),
-        )
-        unweighted = solve_smt_game(
-            territory=territory,
-            num_agents=2,
-            horizon=2,
-            objective="sum",
-            require_victory=True,
-            debug=True,
-        )
-        assert weighted.is_sat and unweighted.is_sat
-        assert weighted.payoff_by_agent is not None
-        assert unweighted.payoff_by_agent is not None
-        assert sum(weighted.payoff_by_agent) == sum(unweighted.payoff_by_agent)
+    def test_unknown_is_not_unsat(self, monkeypatch, territory_2x2: Territory) -> None:
+        base = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
+        play = Play.from_actions(4, 2, [[0, 1], [3, 2]])  # rewards (1, 1) < m = 2
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        vr = verify_ne(base, play)
+        assert vr.status == "unknown" and vr.agent == 0 and vr.queries == 1
 
-    def test_custom_neighbors(self) -> None:
-        """Custom neighbors should override default adjacency."""
-        # 3 synthetic sectors, only 0~1 adjacent (not 1~2)
-        territory = Territory.from_ascii(["..."])
-        from rcmas.smt_solve import solve_smt_game
-
-        custom_nb: dict[int, list[int]] = {0: [1], 1: [0], 2: []}
-        sol = solve_smt_game(
-            territory=territory,
-            num_agents=1,
-            horizon=3,
-            objective="sum",
-            require_victory=True,
-            debug=True,
-            custom_neighbors=custom_nb,
-        )
-        assert sol.is_sat
-        assert sol.payoff_by_agent is not None
-        # Agent 0 owns all 3, but sector 2 is disconnected -> max region = 2
-        assert sol.payoff_by_agent[0] == 2
-
-
-# ---------------------------------------------------------------------------
-# TestVerifyNe
-# ---------------------------------------------------------------------------
-
-class TestVerifyNe:
-    def test_known_ne_passes(self, territory_2x1: Territory) -> None:
-        """On 2x1 with 2 agents, each gets 1 sector — should be NE."""
-        from rcmas.abstraction import LiftedStrategy
-
-        # Each agent owns one sector, payoff 1 each
-        sectors = territory_2x1.ordered_sectors()
-        lifted = LiftedStrategy(
-            terminal_owner=(0, 1),
-            actions_by_round=((sectors[0], sectors[1]),),
-            payoff_by_agent=(1, 1),
-        )
-        agent, _, _ = verify_ne(
-            territory=territory_2x1,
-            num_agents=2,
-            horizon=1,
-            lifted_strategy=lifted,
-        )
-        assert agent is None  # No deviating agent -> NE
-
-
-# ---------------------------------------------------------------------------
-# TestCegarSmoke
-# ---------------------------------------------------------------------------
-
-class TestCegarSmoke:
-    def test_2x1_two_agents(self, territory_2x1: Territory) -> None:
-        """2x1 with 2 agents: trivial NE, should find it."""
-        result = solve_cegar(
-            territory=territory_2x1,
-            num_agents=2,
-            horizon=1,
-        )
-        assert result.is_sat
-        assert result.found_ne
-        assert result.payoff_by_agent is not None
-
-    def test_2x2_two_agents(self, territory_2x2: Territory) -> None:
-        """2x2 with 2 agents: should find NE."""
-        result = solve_cegar(
-            territory=territory_2x2,
-            num_agents=2,
-            horizon=2,
-        )
-        assert result.is_sat
-        assert result.found_ne
-        assert result.payoff_by_agent is not None
-        assert len(result.payoff_by_agent) == 2
-
-    def test_discrete_partition_2x1(self, territory_2x1: Territory) -> None:
-        """Discrete partition should fall through to concrete IBIS."""
-        result = solve_cegar(
-            territory=territory_2x1,
-            num_agents=2,
-            horizon=1,
-            initial_partition="discrete",
-        )
-        assert result.is_sat
-        assert result.found_ne
-        assert result.reason == "concrete_fallback"
-
-
-# ---------------------------------------------------------------------------
-# TestCegarRefinement
-# ---------------------------------------------------------------------------
-
-class TestCegarRefinement:
-    def test_orbit_partition_triggers_refinement_or_finds_ne(
-        self, territory_2x2: Territory
+    def test_no_query_for_an_agent_at_the_bound(
+        self, monkeypatch, territory_2x2: Territory
     ) -> None:
-        """Orbit partition on 2x2 (1 block) should either find NE or refine."""
-        result = solve_cegar(
-            territory=territory_2x2,
-            num_agents=2,
-            horizon=2,
-            initial_partition="orbit",
-            progress=False,
+        """r_a = R_max: F implies reward_a <= R_max, so VerifyNE poses no query for a."""
+        import rcmas.cegar as cegar_mod
+
+        t = _t(["...", "..."])
+        base = build_base_encoding(territory=t, num_agents=3, horizon=2)
+        nb = t.neighbor_map()
+        asked: list[int] = []
+        real = cegar_mod.check_improvement_from_base
+
+        def spy(b, **kw):
+            asked.append(kw["agent"])
+            return real(b, **kw)
+
+        monkeypatch.setattr(cegar_mod, "check_improvement_from_base", spy)
+        # Tool agent 1 holds the adjacent sectors 1 and 2 (reward m = 2);
+        # agents 0 and 2 hold two sectors that are not adjacent (reward 1).
+        play = Play.from_actions(6, 3, [[0, 1, 3], [4, 2, 5]])
+        assert play.rewards(nb) == (1, 2, 1)
+        vr = verify_ne(base, play)
+        assert vr.status in ("verified", "counterexample")
+        assert (vr.status == "verified") == is_equilibrium(play, nb)
+        assert 1 not in asked and asked == [0, 2][: vr.queries]
+        # Every agent at m: verified without a query, even if Z3 could not answer.
+        base2 = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
+        nb2 = territory_2x2.neighbor_map()
+        asked.clear()
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        top = Play.from_actions(4, 2, [[0, 1], [2, 3]])
+        assert top.rewards(nb2) == (2, 2) and is_equilibrium(top, nb2)
+        vr = verify_ne(base2, top)
+        assert vr.status == "verified" and vr.queries == 0 and asked == []
+
+    @pytest.mark.parametrize(
+        "rows, n, demands",
+        [
+            (["...", "..."], 3, None),
+            (["....", "...."], 2, None),
+            (["..#", "...", ".#."], 2, (1, 1)),
+            (["....", "...."], 4, None),
+        ],
+    )
+    def test_same_verdict_with_and_without_the_skip(
+        self, monkeypatch, rows, n, demands
+    ) -> None:
+        """The skip changes the number of queries only: same status, same agent."""
+        t = _t(rows)
+        nbrs = t.neighbor_map()
+        m = len(t) // n
+        base = build_base_encoding(
+            territory=t, num_agents=n, horizon=m, demands=demands
         )
-        # Should eventually find NE (possibly after refinement or concrete fallback)
-        assert result.is_sat
-        assert result.found_ne
+        d = demands or (0,) * n
+        rng = random.Random(len(t) + 7 * n)
+        plays = []
+        while len(plays) < 12:
+            play = random_play(len(t), n, m, rng)
+            if all(x >= y for x, y in zip(play.rewards(nbrs), d)):
+                plays.append(play)
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = [verify_ne(base, p) for p in plays]
+        posed = replay.replay()
+        skipped = [verify_ne(base, p) for p in plays]
+        skips = 0
+        for p, a, b in zip(plays, full, skipped):
+            assert (a.status, a.agent) == (b.status, b.agent)
+            assert (b.status == "verified") == is_equilibrium(p, nbrs, demands)
+            r = p.rewards(nbrs)
+            stop = n if a.agent is None else a.agent + 1
+            assert a.queries == stop
+            assert b.queries == sum(r[x] < m for x in range(stop))
+            skips += a.queries - b.queries
+        # Every query the skip leaves out has reward_a > m and is unsatisfiable.
+        left_out = [k for k in posed if k not in replay.posed]
+        assert skips > 0 and len(left_out) == skips  # the skip is exercised
+        assert all(k[4] == m for k in left_out)
+        assert all(not replay.answers[k].is_sat for k in left_out)
 
-    def test_invalid_synthesiser_raises(self, territory_2x1: Territory) -> None:
-        with pytest.raises(ValueError, match="'ibis', 'qibis', or 'sibis'"):
-            solve_cegar(
-                territory=territory_2x1,
-                num_agents=2,
-                horizon=1,
-                synthesiser="bogus",
+    def test_wrong_game_rejected(self, territory_2x2: Territory) -> None:
+        base = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
+        with pytest.raises(ValueError):
+            verify_ne(base, Play.from_actions(4, 2, [[0, 1]]))
+
+
+# ---------------------------------------------------------------------------
+# Algorithm 4 with the real synthesisers
+# ---------------------------------------------------------------------------
+
+
+SOUNDNESS_CASES = [
+    (["..", ".."], 2, None),
+    (["...", "..."], 2, None),
+    (GRID_4x2, 2, (1, 1)),
+    (GRID_3x3, 2, None),  # n does not divide |T|
+    (GRID_3x3, 3, (2, 2, 3)),
+    (["..", ".", ".."], 2, None),  # L shape, n does not divide |T|
+    (["..#..", "..#.."], 2, (2, 2)),  # two components
+    (["..", "..", "..", "..", ".."], 3, None),  # 5x2, n does not divide |T|
+]
+
+
+class TestSoundness:
+    @pytest.mark.parametrize("rows, n, demands", SOUNDNESS_CASES)
+    @pytest.mark.parametrize("partition", ["orbit", "trivial"])
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_sibis_equilibria_are_equilibria(
+        self, rows, n, demands, partition, symmetry
+    ):
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t,
+            num_agents=n,
+            initial_partition=partition,
+            synthesiser="sibis",
+            symmetry=symmetry,
+            demands=demands,
+        )
+        _check_run(res, t, n, demands)
+        _sound_inner(res)
+
+    @pytest.mark.parametrize("rows, n, demands", SOUNDNESS_CASES[:5])
+    def test_ibis_equilibria_are_equilibria(self, rows, n, demands):
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t, num_agents=n, synthesiser="ibis", demands=demands
+        )
+        _check_run(res, t, n, demands)
+        _sound_inner(res)
+
+    @pytest.mark.parametrize(
+        "rows, n, demands", [(GRID_4x2, 2, (1, 1)), (["...", "..."], 3, None)]
+    )
+    def test_qibis_equilibria_are_equilibria(self, rows, n, demands):
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t,
+            num_agents=n,
+            synthesiser="qibis",
+            demands=demands,
+            symmetry=True,
+        )
+        _check_run(res, t, n, demands)
+        _sound_inner(res)
+
+    def test_non_dividing_3x3_is_not_accepted_at_rewards_1_1(self) -> None:
+        """Defect 7: with require_victory the old loop accepted (1, 1) on 3x3 with n = 2."""
+        t = _t(GRID_3x3)
+        # Agent 1 holds the corners, agent 2 the edges: each agent can reach 4.
+        corners_edges = Play.from_actions(9, 2, [[0, 1], [2, 3], [6, 5], [8, 7]])
+        assert corners_edges.rewards(t.neighbor_map()) == (1, 1)
+        base = build_base_encoding(territory=t, num_agents=2, horizon=4)
+        vr = verify_ne(base, corners_edges)
+        assert vr.status == "counterexample" and vr.agent == 0
+        res = solve_cegar(territory=t, num_agents=2, synthesiser="sibis")
+        _check_run(res, t, 2, None)
+        _sound_inner(res)
+        if res.found_ne:
+            assert res.payoff_by_agent != (1, 1)
+
+
+class TestExamples:
+    def test_example_6_3_2_iteration_1(self) -> None:
+        """Example 6.3.2: the half partition of the 4x2 grid is verified at once."""
+        t = _t(GRID_4x2)
+        halves = Partition.from_blocks([{0, 1, 4, 5}, {2, 3, 6, 7}], 8)
+        res = solve_cegar(
+            territory=t, num_agents=2, initial_partition=halves, demands=(1, 1)
+        )
+        _check_run(res, t, 2, (1, 1))
+        assert res.outcome == "ne" and res.iterations == 1 and res.refinements == 0
+        assert res.final_partition_size == 2 and not res.at_discrete
+        assert res.payoff_by_agent == (4, 4)
+        claims = {res.play.claims_of(0), res.play.claims_of(1)}
+        assert claims == {(0, 1, 4, 5), (2, 3, 6, 7)}
+        assert res.trace[0].abstract_rewards == (4, 4)
+        # Both agents have reward m = 4, so VerifyNE poses no query (both
+        # queries reward_a > 4 are unsatisfiable, since F implies reward_a <= 4).
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 0
+
+    def test_example_6_3_2_iteration_1_with_every_verify_query(
+        self, monkeypatch
+    ) -> None:
+        """Example 6.3.2 as written: VerifyNE poses both queries, both unsatisfiable."""
+        disable_skip(monkeypatch)
+        t = _t(GRID_4x2)
+        halves = Partition.from_blocks([{0, 1, 4, 5}, {2, 3, 6, 7}], 8)
+        res = solve_cegar(
+            territory=t, num_agents=2, initial_partition=halves, demands=(1, 1)
+        )
+        _check_run(res, t, 2, (1, 1))
+        assert res.outcome == "ne" and res.iterations == 1
+        assert res.payoff_by_agent == (4, 4)
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 2
+
+    def test_example_6_3_2_alternative_scenario(self) -> None:
+        """Example 6.3.2: m_hat = 0, no satisfying abstract strategy, bisect {1,2,3,7,8,9}."""
+        t = _t(GRID_6x2)
+        P0 = Partition.from_blocks([{0, 1, 2, 6, 7, 8}, {3, 4, 5, 9, 10, 11}], 12)
+        seen: list[Partition] = []
+        sibis = make_synthesiser("sibis")
+
+        def recording(game: SynthesisGame) -> InnerResult:
+            seen.append(game.abstract.partition)
+            return sibis(game)
+
+        # The example follows the first iteration only; the cap keeps the test
+        # short (later iterations depend on the models Z3 returns).
+        res = solve_cegar(
+            territory=t,
+            num_agents=3,
+            initial_partition=P0,
+            synthesiser=recording,
+            demands=(1, 1, 1),
+            max_refinements=1,
+        )
+        _check_run(res, t, 3, (1, 1, 1))
+        assert res.iterations <= 2
+        first = res.trace[0]
+        assert first.synthesis == "uns" and first.check == "no_candidate"
+        assert first.refinement == "bisect" and first.blocks_after == 3
+        assert seen[1].blocks == (
+            frozenset({0, 1, 6}),
+            frozenset({2, 7, 8}),
+            frozenset({3, 4, 5, 9, 10, 11}),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Algorithm 4 with adversarial inner synthesisers (Theorems 6.4.1 and 6.4.2)
+# ---------------------------------------------------------------------------
+
+
+def _never(game: SynthesisGame) -> InnerResult:
+    return InnerResult("n/c")
+
+
+def _default_play(game: SynthesisGame) -> InnerResult:
+    """The play in which every agent always takes its default action."""
+    n, k, h = game.num_agents, len(game.territory), game.horizon
+    state = [-1] * k
+    actions = []
+    for _ in range(h):
+        prof = [default_action(tuple(state), a, n) for a in range(n)]
+        for a, i in enumerate(prof):
+            state[i] = a
+        actions.append(prof)
+    return InnerResult("ne", Play.from_actions(k, n, actions))
+
+
+def _random_synth(seed: int):
+    rng = random.Random(seed)
+
+    def run(game: SynthesisGame) -> InnerResult:
+        if rng.random() < 0.2:
+            return InnerResult("uns")
+        k = len(game.territory)
+        return InnerResult("ne", random_play(k, game.num_agents, game.horizon, rng))
+
+    return run
+
+
+class TestAdversarialSynthesisers:
+    @pytest.mark.parametrize(
+        "rows, n, partition",
+        [(GRID_3x3, 2, "trivial"), (GRID_3x3, 3, "orbit"), (GRID_6x2, 3, "orbit")],
+    )
+    def test_no_candidate_reaches_the_bound(self, rows, n, partition) -> None:
+        """With no candidate ever, each iteration splits one block (Theorem 6.4.2 is tight)."""
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t, num_agents=n, initial_partition=partition, synthesiser=_never
+        )
+        _check_run(res, t, n, None)
+        assert res.outcome == "fail" and res.reason == "failure_no_candidate"
+        assert res.iterations == len(t) - res.initial_partition_size + 1
+        assert res.final_partition_size == len(t)
+        assert all(r.blocks_after == r.blocks + 1 for r in res.trace[:-1])
+        assert res.play is None
+
+    def test_refuted_at_discrete_partition_is_failure(self) -> None:
+        """A candidate refuted at P_bot ends the run with FAILURE (line 25)."""
+        t = _t(GRID_3x3)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="discrete",
+            synthesiser=_default_play,
+        )
+        _check_run(res, t, 2, None)
+        assert res.outcome == "fail" and res.reason == "failure_refuted"
+        assert res.iterations == 1
+        assert res.trace[0].check == "refuted"
+        assert res.payoff_by_agent == (1, 1)
+        assert not is_equilibrium(res.play, t.neighbor_map())
+
+    def test_refuted_until_discrete(self) -> None:
+        """Default plays from {T}: a lifted default play can be an NE at a coarse
+        partition (which _check_run certifies); otherwise the run is refuted at P_bot.
+        """
+        t = _t(GRID_3x3)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            synthesiser=_default_play,
+        )
+        _check_run(res, t, 2, None)
+        assert res.outcome in ("ne", "fail")
+        if res.outcome == "fail":
+            assert res.reason == "failure_refuted"
+            assert res.trace[-1].blocks == 9 and res.trace[-1].check == "refuted"
+
+    def test_unsatisfying_candidate_at_discrete_partition(self) -> None:
+        t = _t(GRID_3x3)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="discrete",
+            synthesiser=_default_play,
+            demands=(2, 2),
+        )
+        assert res.outcome == "fail" and res.reason == "failure_refuted"
+        assert res.trace[0].check == "unsatisfying" and res.trace[0].agent == 0
+        assert res.trace[0].verify_queries == 0
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_random_candidates(self, seed: int) -> None:
+        """Soundness and termination with an unsound, random inner synthesiser."""
+        rows, n, demands = [
+            (GRID_3x3, 2, None),
+            (["...", "..."], 2, (1, 1)),
+            (GRID_4x2, 2, None),
+            (["..", ".", ".."], 2, None),
+            (["...", "..."], 3, None),
+            (GRID_3x3, 3, (1, 1, 1)),
+        ][seed]
+        t = _t(rows)
+        for partition in ("trivial", "orbit"):
+            res = solve_cegar(
+                territory=t,
+                num_agents=n,
+                initial_partition=partition,
+                synthesiser=_random_synth(seed),
+                demands=demands,
             )
+            _check_run(res, t, n, demands)
+            assert res.outcome in ("ne", "fail")
 
-    def test_invalid_partition_type_raises(self, territory_2x1: Territory) -> None:
+    def test_fallback_bisects_a_block_inside_D(self) -> None:
+        """D a union of blocks: bisect the largest block of D with more than one sector."""
+        t = _t(GRID_4x2)
+        columns = Partition.from_blocks([{0, 4}, {1, 5}, {2, 6}, {3, 7}], 8)
+        seen: list[Partition] = []
+
+        def split_columns(game: SynthesisGame) -> InnerResult:
+            seen.append(game.abstract.partition)
+            if len(seen) == 1:
+                # Agent 0 takes the non-adjacent columns 1 and 3 (reward 2 < 4).
+                return InnerResult("ne", Play.from_actions(4, 2, [[0, 1], [2, 3]]))
+            return InnerResult("uns")
+
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition=columns,
+            synthesiser=split_columns,
+            demands=(4, 0),
+        )
+        first = res.trace[0]
+        assert first.check == "unsatisfying" and first.agent == 0
+        assert first.deviation_size == 4 and first.refinement == "fallback"
+        assert seen[1].blocks == (
+            frozenset({0}),
+            frozenset({1, 5}),
+            frozenset({2, 6}),
+            frozenset({3, 7}),
+            frozenset({4}),
+        )
+        _check_run(res, t, 2, (4, 0))
+
+    def test_fallback_never_picks_a_singleton_in_D(self) -> None:
+        """D a union of singletons: bisect the largest block of P instead."""
+        t = _t(["..", ".."])  # sectors 0, 1 bottom row, 2, 3 top row
+        P0 = Partition.from_blocks([{0}, {1, 3}, {2}], 4)
+        seen: list[Partition] = []
+
+        def synth(game: SynthesisGame) -> InnerResult:
+            seen.append(game.abstract.partition)
+            if len(seen) == 1:
+                # Agent 0 claims {0}, agent 1 claims {1, 3}; sector 2 goes to agent 0.
+                return InnerResult("ne", Play.from_actions(3, 2, [[0, 1]]))
+            return InnerResult("uns")
+
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition=P0,
+            synthesiser=synth,
+            demands=(3, 0),
+        )
+        first = res.trace[0]
+        assert first.check == "unsatisfying" and first.refinement == "fallback"
+        assert res.play is not None
+        assert seen[1].is_discrete
+        _check_run(res, t, 2, (3, 0))
+
+
+# ---------------------------------------------------------------------------
+# Symmetry (Section 6.5), unknown answers, limits and parameters
+# ---------------------------------------------------------------------------
+
+
+class TestSymmetryScope:
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_symmetry_only_in_initial_queries(self, monkeypatch, symmetry) -> None:
+        calls = {"abstract": 0, "grid": 0}
+        real_abstract = smt_constraints.symmetry_breaking_constraint
+        real_grid = smt_solve.symmetry_constraints
+
+        def abstract_spy(*a, **kw):
+            calls["abstract"] += 1
+            return real_abstract(*a, **kw)
+
+        def grid_spy(*a, **kw):
+            calls["grid"] += 1
+            return real_grid(*a, **kw)
+
+        monkeypatch.setattr(
+            smt_constraints, "symmetry_breaking_constraint", abstract_spy
+        )
+        monkeypatch.setattr(smt_solve, "symmetry_constraints", grid_spy)
+        t = _t(GRID_3x3)
+        res = solve_cegar(territory=t, num_agents=3, symmetry=symmetry)
+        _check_run(res, t, 3, None)
+        abstract_iters = sum(1 for r in res.trace if r.blocks < len(t))
+        discrete_iters = res.iterations - abstract_iters
+        if symmetry:
+            # One initial query per synthesis call, nothing in BR or VerifyNE.
+            assert calls["abstract"] == abstract_iters
+            assert calls["grid"] == discrete_iters
+        else:
+            assert calls == {"abstract": 0, "grid": 0}
+
+    def test_abstract_game_takes_no_grid_symmetry(self) -> None:
+        t = _t(["...."] * 4)
+        A = build_abstract_rcmas(t, 2, orbit_partition(t))
+        g = synthesis_game(A, symmetry=True)
+        assert not g.symmetry and g.initial_constraints is not None
+        assert g.weights == (4, 8, 4) and g.custom_neighbors == {
+            0: [1],
+            1: [0, 2],
+            2: [1],
+        }
+        assert synthesis_game(A, symmetry=False).initial_constraints is None
+        D = build_abstract_rcmas(t, 2, discrete_partition(t))
+        gd = synthesis_game(D, symmetry=True)
+        assert gd.is_concrete and gd.symmetry and gd.territory is t and gd.horizon == 8
+
+
+class TestUnknown:
+    def test_unknown_in_inner_synthesis(self, monkeypatch, territory_2x2) -> None:
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        res = solve_cegar(territory=territory_2x2, num_agents=2)
+        assert res.outcome == "unk" and res.reason == "unknown"
+        assert res.iterations == 1 and res.trace[0].check == "unknown"
+        assert not res.found_ne
+
+    def test_unknown_in_verification(self, monkeypatch) -> None:
+        t = _t(GRID_3x3)
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            synthesiser=_default_play,
+        )
+        assert res.outcome == "unk" and res.iterations == 1
+        assert res.trace[0].check == "unknown" and res.trace[0].verify_queries == 1
+
+    def test_real_timeout_answers_unknown(self) -> None:
+        t = _t(["......"] * 4)
+        res = solve_cegar(territory=t, num_agents=2, timeout_ms=1)
+        assert res.outcome in ("unk", "ne")
+        if res.outcome == "ne":
+            _check_run(res, t, 2, None)
+
+
+class TestLimitsAndParameters:
+    def test_time_limit(self, territory_3x3) -> None:
+        res = solve_cegar(territory=territory_3x3, num_agents=2, time_limit_s=0.0)
+        assert res.outcome == "t/o" and res.iterations == 0 and not res.found_ne
+
+    def test_max_refinements(self, territory_3x3) -> None:
+        res = solve_cegar(
+            territory=territory_3x3,
+            num_agents=2,
+            initial_partition="trivial",
+            synthesiser=_never,
+            max_refinements=2,
+        )
+        assert res.outcome == "n/c" and res.reason == "max_refinements"
+        assert res.refinements == 2 and res.iterations == 3
+
+    def test_inner_iteration_bound_matches_direct_runs(self, monkeypatch) -> None:
+        import rcmas.ibis as ibis_mod
+
+        bounds: list[int] = []
+        real = ibis_mod.solve_sibis
+
+        def spy(**kw):
+            bounds.append(kw["max_iters"])
+            return real(**kw)
+
+        monkeypatch.setattr(ibis_mod, "solve_sibis", spy)
+        t = _t(["...", "..."])
+        solve_cegar(territory=t, num_agents=2)
+        solve_cegar(territory=t, num_agents=2, max_iters=7)
+        assert bounds and set(bounds) <= {30, 7} and bounds[0] == 30 and bounds[-1] == 7
+
+    def test_inner_bound_zero(self) -> None:
+        """N = 0: the inner synthesiser returns only an initial play that is already an NE."""
+        t = _t(GRID_3x3)
+        res = solve_cegar(territory=t, num_agents=3, max_iters=0)
+        _check_run(res, t, 3, None)
+
+    def test_parameter_validation(self, territory_2x2) -> None:
+        with pytest.raises(ValueError, match="horizon"):
+            solve_cegar(territory=territory_2x2, num_agents=2, horizon=3)
+        with pytest.raises(ValueError, match="'ibis', 'qibis', or 'sibis'"):
+            solve_cegar(territory=territory_2x2, num_agents=2, synthesiser="bogus")
         with pytest.raises(ValueError, match="unknown partition"):
             solve_cegar(
-                territory=territory_2x1,
-                num_agents=2,
-                horizon=1,
-                initial_partition="bogus",
+                territory=territory_2x2, num_agents=2, initial_partition="bogus"
             )
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, demands=(1,))
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=0)
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, max_iters=-1)
 
-    def test_3x3_finds_ne(self, territory_3x3: Territory) -> None:
-        """3x3 with 3 agents and orbit partition (3 blocks) should find NE."""
-        result = solve_cegar(
-            territory=territory_3x3,
-            num_agents=3,
-            horizon=3,
-            initial_partition="orbit",
+    def test_callable_synthesiser_takes_no_named_options(self, territory_2x2) -> None:
+        """Options of the named synthesisers are refused with a callable (review-9)."""
+        for kw in (
+            {"initial": "collective"},
+            {"inner_initial": "satisfying"},
+            {"discrete_max_iters": None},
+            {"inner_max_iters": 30},
+            {"max_iters": None},
+            {"seed": 1},
+        ):
+            with pytest.raises(ValueError, match="callable synthesiser") as e:
+                solve_cegar(
+                    territory=territory_2x2,
+                    num_agents=2,
+                    synthesiser=_default_play,
+                    **kw,
+                )
+            assert next(iter(kw)) in str(e.value)
+        # The refusal comes before any query.  (A callable without these
+        # options runs as before; the tests above use _default_play.  This
+        # test poses no Z3 query, since Z3's models depend on process-wide
+        # state and test_certify assumes the trajectory of a Q-IBIS run.)
+
+    def test_horizon_none_selects_m(self, territory_2x1) -> None:
+        res = solve_cegar(territory=territory_2x1, num_agents=2, horizon=None)
+        assert res.found_ne and res.play.horizon == 1
+        res = solve_cegar(territory=territory_2x1, num_agents=2, horizon=1)
+        assert res.found_ne
+
+    def test_discrete_partition_is_verified(self, territory_2x2) -> None:
+        """At P_bot the inner result is verified, not returned unchecked."""
+        res = solve_cegar(
+            territory=territory_2x2, num_agents=2, initial_partition="discrete"
         )
-        assert result.is_sat
-        assert result.found_ne
-        assert result.payoff_by_agent is not None
-        assert len(result.payoff_by_agent) == 3
+        _check_run(res, territory_2x2, 2, None)
+        assert res.outcome == "ne" and res.at_discrete and res.reason == "ne"
+        assert res.trace[0].check == "verified"
+        r = res.trace[0].lifted_rewards
+        assert res.trace[0].verify_queries == sum(x < 2 for x in r)
+
+    def test_discrete_partition_is_verified_with_every_query(
+        self, monkeypatch, territory_2x2
+    ) -> None:
+        disable_skip(monkeypatch)
+        res = solve_cegar(
+            territory=territory_2x2, num_agents=2, initial_partition="discrete"
+        )
+        _check_run(res, territory_2x2, 2, None)
+        assert res.outcome == "ne" and res.at_discrete
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 2
+
+
+# ---------------------------------------------------------------------------
+# The protocol of Chapter 7: separate inner bounds, collectively optimal start
+# ---------------------------------------------------------------------------
+
+
+def _spy_inner(monkeypatch, fail_at_discrete: bool = False, fail_coarse: bool = False):
+    """Record (concrete?, max_iters, initial) of every inner S-IBIS call.
+
+    With *fail_at_discrete*, the inner run at the discrete partition ends by
+    recurrence without an equilibrium (``n/c``, reason ``cycle``), as an
+    unbounded run can; with *fail_coarse*, every run at a coarse partition
+    ends at its bound without an equilibrium (``n/c``, reason ``max_iters``).
+    """
+    from dataclasses import replace
+
+    import rcmas.ibis as ibis_mod
+
+    calls: list[tuple[bool, int | None, str]] = []
+    real = ibis_mod.solve_sibis
+
+    def spy(**kw):
+        concrete = kw.get("weights") is None
+        calls.append((concrete, kw["max_iters"], kw["initial"]))
+        res = real(**kw)
+        if fail_at_discrete and concrete:
+            return replace(res, reason="cycle", found_ne=False, outcome="n/c")
+        if fail_coarse and not concrete:
+            return replace(res, reason="max_iters", found_ne=False, outcome="n/c")
+        return res
+
+    monkeypatch.setattr(ibis_mod, "solve_sibis", spy)
+    return calls
+
+
+class TestProtocolBounds:
+    def test_coarse_bounded_discrete_unbounded(self, monkeypatch) -> None:
+        """inner_max_iters at a coarse partition, discrete_max_iters at the discrete one."""
+        calls = _spy_inner(monkeypatch)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            symmetry=True,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+        )
+        _check_run(res, t, 2, None)
+        _sound_inner(res)
+        coarse = [c for c in calls if not c[0]]
+        discrete = [c for c in calls if c[0]]
+        assert coarse and all(b == 30 for _, b, _ in coarse)
+        assert all(b is None for _, b, _ in discrete)
+        assert all(init == "collective" for *_, init in calls)
+        assert [row.blocks < len(t) for row in res.trace] == [
+            not c for c, _, _ in calls
+        ]
+
+    def test_defaults_keep_one_bound_everywhere(self, monkeypatch) -> None:
+        calls = _spy_inner(monkeypatch)
+        t = _t(GRID_4x2)
+        solve_cegar(territory=t, num_agents=2, symmetry=True, max_iters=7)
+        assert calls and {b for _, b, _ in calls} == {7}
+        assert {init for *_, init in calls} == {"satisfying"}
+        calls.clear()
+        solve_cegar(territory=t, num_agents=2, symmetry=True, discrete_max_iters=None)
+        assert {b for c, b, _ in calls if not c} <= {30}
+        assert {b for c, b, _ in calls if c} <= {None}
+
+    def test_recurrence_at_the_discrete_partition_is_failure(self, monkeypatch) -> None:
+        """An unbounded inner run that ends by recurrence at P_bot gives FAILURE (line 9).
+
+        Every coarse run ends at its bound, so CEGAR-NE bisects until the
+        discrete partition, in ``|T| - |P_0| + 1`` iterations (Theorem 6.4.2).
+        """
+        calls = _spy_inner(monkeypatch, fail_at_discrete=True, fail_coarse=True)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+        )
+        _check_run(res, t, 2, None)
+        assert res.outcome == "fail" and res.reason == "failure_no_candidate"
+        assert res.iterations == len(t) - 1 + 1 and res.refinements == len(t) - 1
+        assert [c for c, _, _ in calls] == [False] * (len(t) - 1) + [True]
+        assert {b for c, b, _ in calls if not c} == {30}
+        assert calls[-1][1] is None
+        last = res.trace[-1]
+        assert last.blocks == len(t) and last.synthesis == "n/c"
+        assert last.check == "no_candidate" and last.refinement is None
+        assert all(row.refinement == "bisect" for row in res.trace[:-1])
+
+    def test_recurrence_at_discrete_orbit_partition_is_failure(
+        self, monkeypatch
+    ) -> None:
+        """On a territory whose orbit partition is discrete the first call is at P_bot."""
+        _spy_inner(monkeypatch, fail_at_discrete=True)
+        t = _t(["..#", "...", ".#."])  # asymmetric: every orbit is one sector
+        res = solve_cegar(
+            territory=t, num_agents=2, discrete_max_iters=None, initial="collective"
+        )
+        assert res.initial_partition_size == len(t)
+        assert res.outcome == "fail" and res.reason == "failure_no_candidate"
+        assert res.iterations == 1 and res.refinements == 0
+
+    @pytest.mark.parametrize("rows, n, demands", SOUNDNESS_CASES)
+    @pytest.mark.parametrize("symmetry", [False, True])
+    @pytest.mark.parametrize("bounds", [(30, None), (None, None)])
+    def test_terminates_and_is_sound_without_bounds(
+        self, rows, n, demands, symmetry, bounds
+    ) -> None:
+        """Theorem 6.4.2 holds with unbounded inner runs; every equilibrium is certified."""
+        t = _t(rows)
+        res = solve_cegar(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            symmetry=symmetry,
+            inner_max_iters=bounds[0],
+            discrete_max_iters=bounds[1],
+            initial="collective",
+        )
+        _check_run(res, t, n, demands)
+        _sound_inner(res)
+        for row in res.trace:
+            assert row.initial_query_s is not None
+            if row.blocks == len(t) and row.synthesis == "n/c":
+                assert res.reason == "failure_no_candidate"
+
+    def test_initial_fields(self) -> None:
+        t = _t(["...", "..."])
+        seen = []
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="discrete",
+            initial="collective",
+            discrete_max_iters=None,
+            on_initial=seen.append,
+        )
+        # At P_bot the inner game is M, and its collectively optimal play gives (3, 3).
+        assert res.outcome == "ne" and res.iterations == 1 and res.returned_initial
+        assert res.initial_rewards == (3, 3) and res.initial_query_s is not None
+        assert res.initial_play == res.play
+        (info,) = seen
+        assert info.iteration == 1 and info.blocks == 6 and info.status == "sat"
+        assert info.lifted_rewards == (3, 3) and info.abstract_rewards == (3, 3)
+        assert res.trace[0].initial_query_s == info.query_s
+
+    def test_lifted_initial_play_of_a_coarse_partition(self) -> None:
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t, num_agents=2, symmetry=True, initial="collective"
+        )
+        assert res.initial_play is not None and res.initial_play.horizon == 4
+        assert res.initial_rewards == res.initial_play.rewards(t.neighbor_map())
+        assert res.returned_initial == (
+            res.found_ne and res.iterations == 1 and res.trace[0].returned_initial
+        )
+
+    def test_invalid_bounds_and_initial(self, territory_2x2) -> None:
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, inner_max_iters=-1)
+        with pytest.raises(ValueError):
+            solve_cegar(territory=territory_2x2, num_agents=2, discrete_max_iters=-1)
+        with pytest.raises(ValueError, match="initial"):
+            solve_cegar(territory=territory_2x2, num_agents=2, initial="best")
+        with pytest.raises(ValueError, match="inner_initial"):
+            solve_cegar(territory=territory_2x2, num_agents=2, inner_initial="best")
+        with pytest.raises(ValueError, match="inner_initial"):
+            make_synthesiser("sibis", inner_initial="best")
+
+
+# ---------------------------------------------------------------------------
+# The initial query of an inner call: smt(F_hat) coarse, smt(F, f) discrete
+# ---------------------------------------------------------------------------
+
+
+def _spy_initial_queries(monkeypatch) -> list[tuple[bool, str]]:
+    """Record (on M?, query) of every initial query that an inner IBIS/S-IBIS/Q-IBIS poses."""
+    import rcmas.ibis as ibis_mod
+
+    calls: list[tuple[bool, str]] = []
+    real = ibis_mod.initial_from_base
+
+    def spy(base, **kw):
+        calls.append((base.variables.weights is None, kw["initial"]))
+        return real(base, **kw)
+
+    monkeypatch.setattr(ibis_mod, "initial_from_base", spy)
+    return calls
+
+
+class TestInnerInitial:
+    def test_coarse_satisfying_discrete_collective(self, monkeypatch) -> None:
+        """Every coarse call poses smt(F_hat), the call at P_bot smt(F, f) of M.
+
+        Every coarse run ends at its bound, so CEGAR-NE bisects from the
+        trivial partition down to the discrete one (Theorem 6.4.2).
+        """
+        inner = _spy_inner(monkeypatch, fail_coarse=True)
+        posed = _spy_initial_queries(monkeypatch)
+        seen = []
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+            on_initial=seen.append,
+        )
+        _check_run(res, t, 2, None)
+        assert [c for c, _, _ in inner] == [False] * (len(t) - 1) + [True]
+        assert [q for *_, q in inner] == ["satisfying"] * (len(t) - 1) + ["collective"]
+        assert posed == [(c, q) for c, _, q in inner]  # one query per call, on its game
+        assert [row.initial for row in res.trace] == [q for _, q in posed]
+        assert [info.initial for info in seen] == [q for _, q in posed]
+        assert [info.blocks for info in seen] == [row.blocks for row in res.trace]
+        assert res.trace[-1].blocks == len(t) and res.at_discrete == res.found_ne
+
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_orbit_partition_of_the_thesis_protocol(self, monkeypatch, symmetry):
+        """The protocol of Chapter 7 on 4x2: coarse calls from smt(F_hat), with symmetry too."""
+        posed = _spy_initial_queries(monkeypatch)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            symmetry=symmetry,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+        )
+        _check_run(res, t, 2, None)
+        _sound_inner(res)
+        assert len(posed) == len(res.trace) and res.trace[0].blocks < len(t)
+        for (concrete, q), row in zip(posed, res.trace):
+            assert concrete == (row.blocks == len(t))
+            assert q == ("collective" if concrete else "satisfying") == row.initial
+
+    def test_discrete_orbit_partition_starts_from_smt_F_f(self, monkeypatch) -> None:
+        """When P_0 is discrete the only call is a direct run on M, from smt(F, f)."""
+        posed = _spy_initial_queries(monkeypatch)
+        t = _t(["..#", "...", ".#."])  # asymmetric: every orbit is one sector
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+        )
+        _check_run(res, t, 2, None)
+        assert res.initial_partition_size == len(t)
+        assert posed == [(True, "collective")] and res.trace[0].initial == "collective"
+
+    def test_default_and_reversed(self, monkeypatch) -> None:
+        """inner_initial defaults to initial; each applies to its own partitions."""
+        inner = _spy_inner(monkeypatch, fail_coarse=True)
+        t = _t(GRID_4x2)
+        kw = dict(territory=t, num_agents=2, initial_partition="trivial")
+        solve_cegar(**kw, initial="collective")
+        assert {q for *_, q in inner} == {"collective"}
+        inner.clear()
+        solve_cegar(**kw, initial="satisfying", inner_initial="collective")
+        assert {q for c, _, q in inner if not c} == {"collective"}
+        assert [q for c, _, q in inner if c] == ["satisfying"]
+
+    @pytest.mark.parametrize("name", ["ibis", "sibis", "qibis"])
+    def test_make_synthesiser(self, monkeypatch, name) -> None:
+        """make_synthesiser passes inner_initial at a coarse and initial at P_bot."""
+        import rcmas.ibis as ibis_mod
+        import rcmas.qibis as qibis_mod
+
+        used: list[tuple[bool, str]] = []
+
+        def fake_direct(**kw):
+            used.append((kw["weights"] is None, kw["initial"]))
+            raise StopIteration
+
+        def fake_qibis(**kw):
+            used.append((kw["weights"] is None, kw["cfg"].initial))
+            raise StopIteration
+
+        monkeypatch.setattr(ibis_mod, "solve_ibis", fake_direct)
+        monkeypatch.setattr(ibis_mod, "solve_sibis", fake_direct)
+        monkeypatch.setattr(qibis_mod, "solve_qibis", fake_qibis)
+        t = _t(GRID_4x2)
+        coarse = synthesis_game(build_abstract_rcmas(t, 2, orbit_partition(t)))
+        fine = synthesis_game(build_abstract_rcmas(t, 2, discrete_partition(t)))
+        assert not coarse.is_concrete and fine.is_concrete
+        synth = make_synthesiser(name, initial="collective", inner_initial="satisfying")
+        default = make_synthesiser(name, initial="collective")
+        for s, game in ((synth, coarse), (synth, fine), (default, coarse)):
+            with pytest.raises(StopIteration):
+                s(game)
+        assert used == [
+            (False, "satisfying"),
+            (True, "collective"),
+            (False, "collective"),
+        ]
+
+
+class TestRewardBoundInCegar:
+    @pytest.mark.parametrize(
+        "rows, n, demands, initial",
+        [
+            (GRID_4x2, 2, None, "collective"),
+            (GRID_3x3, 3, None, "satisfying"),
+            (["..#", "...", ".#."], 2, (1, 1), "satisfying"),
+            (["...", "..."], 3, None, "collective"),
+        ],
+    )
+    def test_same_run_with_and_without_the_skip(
+        self, monkeypatch, rows, n, demands, initial
+    ) -> None:
+        """Skipping the queries of agents at R_max (inner runs, VerifyNE) changes no run.
+
+        The run without the skip poses every query, and the run with it is
+        answered from that record (``tests/replay.py``).
+        """
+        t = _t(rows)
+        kw = dict(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            symmetry=True,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial=initial,
+            inner_initial="satisfying",
+        )
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = solve_cegar(**kw)
+        recorded = replay.replay()
+        fast = solve_cegar(**kw)
+        _check_run(fast, t, n, demands)
+
+        def rows_of(res):
+            return [
+                (
+                    r.blocks,
+                    r.synthesis,
+                    r.inner_iterations,
+                    r.abstract_rewards,
+                    r.lifted_rewards,
+                    r.check,
+                    r.agent,
+                    r.deviation_size,
+                    r.refinement,
+                    r.blocks_after,
+                    r.initial,
+                )
+                for r in res.trace
+            ]
+
+        assert (fast.outcome, fast.reason, fast.iterations) == (
+            full.outcome,
+            full.reason,
+            full.iterations,
+        )
+        assert fast.play == full.play and fast.rewards == full.rewards
+        assert rows_of(fast) == rows_of(full)
+        left_out = [k for k in replay.best_responses(recorded) if k not in replay.posed]
+        assert left_out, "the case must exercise the skip"
+        m = len(t) // n
+        verify = [k for k in left_out if k[0] == "verify"]
+        assert all(k[4] == m and not replay.answers[k].is_sat for k in verify)
+        assert sum(r.verify_queries for r in full.trace) - sum(
+            r.verify_queries for r in fast.trace
+        ) == len(verify)

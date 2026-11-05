@@ -1,11 +1,19 @@
-"""Definitions 1-8: RCMAS model primitives.
+"""Chapter 3 of the thesis: RCMAS model primitives.
 
-Defines the core domain objects for the Region Control Multi-Agent System:
-coordinates, territories, game states, and the state-evolution function.
+Defines the core domain objects of a region-control multi-agent system
+(Definition 3.1.1): coordinates, territories, control maps (Definition 3.4.1),
+the evolution of a state under an action profile (Definition 3.6.1), cohesive
+regions (Definition 3.7.1) and rewards (Definition 3.9.2).
 
-Convention: agents are 0-indexed internally (0..A-1), with -1 denoting
-unoccupied sectors.  The paper uses 1-indexed agents with 0=unoccupied;
-docstrings note where the mapping applies.
+Conventions.  Agents are 0-indexed internally (``0..n-1``), and ``UNOWNED``
+(``-1``) marks an unoccupied sector; the thesis numbers agents ``1..n`` and
+writes ``0`` for an unoccupied sector, so tool agent ``k`` is thesis agent
+``k+1``.  Sectors are numbered ``0..|T|-1`` by the enumeration of Remark 3.1.1
+(bottom row first, left to right within a row), so tool sector ``i`` is thesis
+sector ``i+1``.  A :class:`Coord` keeps the ASCII position of a sector (``y``
+is the line number of the grid file, counted from the top), and a sector on
+line ``y`` of a grid file with ``h`` lines has thesis coordinates
+``(x+1, h-y)``.
 """
 
 from __future__ import annotations
@@ -13,26 +21,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-
 UNOWNED: int = -1
 """Sentinel value for an unoccupied sector (paper: 0)."""
 
 
 # ---------------------------------------------------------------------------
-# Def 1: Coordinate
+# Coordinates (Definition 3.1.1)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class Coord:
-    """A 2-D grid coordinate (x increases rightward, y increases downward)."""
+    """A 2-D grid coordinate as written in a grid file.
+
+    ``x`` is the column (increasing to the right) and ``y`` the line of the
+    grid file (increasing downward).  The thesis draws the grid with ``y``
+    increasing upward (Figure 3.1); see the module docstring for the mapping.
+    """
 
     x: int
     y: int
 
 
 # ---------------------------------------------------------------------------
-# Def 2: 4-connected neighbourhood
+# Four-connected adjacency (Section 3.2)
 # ---------------------------------------------------------------------------
+
 
 def neighbors4(c: Coord) -> Iterable[Coord]:
     """Yield the four cardinal neighbours of *c* (N, S, E, W)."""
@@ -43,16 +57,18 @@ def neighbors4(c: Coord) -> Iterable[Coord]:
 
 
 # ---------------------------------------------------------------------------
-# Def 3: Territory
+# Territory (Definition 3.1.1, Remark 3.1.1)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class Territory:
     """An immutable 2-D territory of acquirable sectors.
 
     Sectors may form any shape; only coordinates present in *sectors* are
-    part of the game.  An internal deterministic ordering is maintained for
-    use by the SMT encoding and Q-learning state representation.
+    part of the game.  The sectors are numbered by the enumeration of
+    Remark 3.1.1, which the SMT encoding, the canonical completion
+    (Definition 4.4.2) and the Q-learning state representation all use.
     """
 
     sectors: frozenset[Coord]
@@ -61,20 +77,33 @@ class Territory:
 
     @staticmethod
     def from_ascii(lines: Iterable[str], *, sector: str = ".") -> Territory:
-        """Parse an ASCII grid where *sector* marks acquirable cells."""
+        """Parse an ASCII grid where *sector* marks acquirable cells.
+
+        The first line of the grid is the top row of the territory.  Sectors
+        are numbered as in Remark 3.1.1: row by row from the bottom row (the
+        last line), and from left to right within a row.
+        """
         rows = [line.rstrip("\n") for line in lines]
         coords: set[Coord] = set()
         for y, row in enumerate(rows):
             for x, ch in enumerate(row):
                 if ch == sector:
                     coords.add(Coord(x, y))
-        ordered = tuple(sorted(coords, key=lambda c: (c.y, c.x)))
+        ordered = tuple(sorted(coords, key=lambda c: (-c.y, c.x)))
         index_by_coord = {c: i for i, c in enumerate(ordered)}
         return Territory(frozenset(coords), ordered, index_by_coord)
 
     def ordered_sectors(self) -> tuple[Coord, ...]:
-        """Sectors in a deterministic row-major order."""
+        """Sectors in the enumeration of Remark 3.1.1 (bottom row first)."""
         return self._ordered
+
+    def neighbor_map(self) -> dict[int, frozenset[int]]:
+        """Four-connected adjacency between sector indices (Section 3.2)."""
+        out: dict[int, frozenset[int]] = {}
+        for i, c in enumerate(self._ordered):
+            nbs = (self._index_by_coord.get(nb) for nb in neighbors4(c))
+            out[i] = frozenset(j for j in nbs if j is not None)
+        return out
 
     def index_of(self, coord: Coord) -> int | None:
         """Return the sector index for *coord*, or ``None`` if not in the territory."""
@@ -85,8 +114,9 @@ class Territory:
 
 
 # ---------------------------------------------------------------------------
-# Def 4-5: State + ownership
+# Control maps (Definition 3.4.1) and the protocol (Definition 3.5.1)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class State:
@@ -105,7 +135,7 @@ class State:
 
     @staticmethod
     def initial(territory: Territory, num_agents: int) -> State:
-        """Create the initial state with all sectors unowned (Def 4)."""
+        """Create the initial state ``s_0`` with all sectors unoccupied (Definition 3.4.1)."""
         if num_agents <= 0:
             raise ValueError("num_agents must be >= 1")
         return State(
@@ -128,9 +158,11 @@ class State:
         return None if owner == UNOWNED else owner
 
     def available_actions(self) -> tuple[Coord, ...]:
-        """Return the set of unowned (claimable) sectors in deterministic order (Def 5)."""
+        """Return the unoccupied sectors in the enumeration order (Definition 3.5.1)."""
         sectors = self.ordered_sectors
-        return tuple(sectors[i] for i, o in enumerate(self.owner_by_index) if o == UNOWNED)
+        return tuple(
+            sectors[i] for i, o in enumerate(self.owner_by_index) if o == UNOWNED
+        )
 
     def is_terminal(self) -> bool:
         """True when every sector has been claimed."""
@@ -138,18 +170,21 @@ class State:
 
 
 # ---------------------------------------------------------------------------
-# Def 6: State evolution (step)
+# Evolution (Definition 3.6.1)
 # ---------------------------------------------------------------------------
+
 
 class CollisionError(Exception):
     """Raised when two or more agents attempt to claim the same sector."""
 
 
 def evolve(state: State, actions: dict[int, Coord | None]) -> State:
-    """Apply one round of concurrent actions to *state* and return the successor (Def 6).
+    """Apply one round of concurrent actions to *state* and return the successor.
 
-    Each agent may claim one unowned sector or pass (``None``).  If two or
-    more agents target the same sector, a :class:`CollisionError` is raised.
+    Implements case 2 of Definition 3.6.1.  A colliding profile (case 1,
+    whose successor is the failure state) raises :class:`CollisionError`.
+    For convenience an agent may also pass (``None``), which the thesis
+    model does not allow; the synthesisers never pass.
 
     Returns the new state with updated ownership and an incremented round
     counter.
@@ -192,8 +227,9 @@ def evolve(state: State, actions: dict[int, Coord | None]) -> State:
 
 
 # ---------------------------------------------------------------------------
-# Def 7: Adjacency + connected components
+# Cohesive regions (Definition 3.7.1)
 # ---------------------------------------------------------------------------
+
 
 def adjacent_owned(state: State, agent_id: int) -> set[tuple[int, int]]:
     """Return pairs (i, j) of sector indices that are 4-adjacent and both owned by *agent_id*."""
@@ -212,7 +248,7 @@ def adjacent_owned(state: State, agent_id: int) -> set[tuple[int, int]]:
 
 
 def connected_components(state: State, agent_id: int) -> list[set[Coord]]:
-    """Return the list of 4-connected components for *agent_id*'s owned sectors (Def 7)."""
+    """Return the cohesive regions of *agent_id* in *state* (Definition 3.7.1)."""
     owned = {c for c in state.ordered_sectors if state.owner_of(c) == agent_id}
     seen: set[Coord] = set()
     components: list[set[Coord]] = []
@@ -236,15 +272,61 @@ def connected_components(state: State, agent_id: int) -> list[set[Coord]]:
 
 
 # ---------------------------------------------------------------------------
-# Def 8: Largest region size (payoff primitive)
+# Rewards (Definition 3.9.2)
 # ---------------------------------------------------------------------------
 
+
 def largest_region_size(state: State, agent_id: int) -> int:
-    """Size of the largest 4-connected region owned by *agent_id* (Def 8)."""
+    """Reward ``r_a(s)``: size of the largest cohesive region of *agent_id* (Definition 3.9.2)."""
     comps = connected_components(state, agent_id)
     return max((len(c) for c in comps), default=0)
 
 
 def scores(state: State) -> tuple[int, ...]:
-    """Convenience: largest-region-size for each agent."""
+    """Rewards of all agents in *state* (Definition 3.9.2)."""
     return tuple(largest_region_size(state, i) for i in range(state.num_agents))
+
+
+def largest_component_weight(
+    owner_by_index: tuple[int, ...] | list[int],
+    agent_id: int,
+    neighbors: dict[int, frozenset[int]] | dict[int, list[int]],
+    weights: tuple[int, ...] | None = None,
+) -> int:
+    """Weight of the largest connected component of *agent_id* under *neighbors*.
+
+    With unit weights and four-connected adjacency this is the reward of
+    Definition 3.9.2.  With block weights and block adjacency it is the
+    abstract reward of Definition 6.1.2(4), where a component's weight is
+    the sum of the weights of its blocks.  Sectors are given by index.
+    """
+    best = 0
+    seen: set[int] = set()
+    for start, o in enumerate(owner_by_index):
+        if o != agent_id or start in seen:
+            continue
+        seen.add(start)
+        stack = [start]
+        total = 0
+        while stack:
+            u = stack.pop()
+            total += 1 if weights is None else weights[u]
+            for w in neighbors.get(u, ()):
+                if w not in seen and owner_by_index[w] == agent_id:
+                    seen.add(w)
+                    stack.append(w)
+        best = max(best, total)
+    return best
+
+
+def rewards_from_owner(
+    owner_by_index: tuple[int, ...] | list[int],
+    num_agents: int,
+    neighbors: dict[int, frozenset[int]] | dict[int, list[int]],
+    weights: tuple[int, ...] | None = None,
+) -> tuple[int, ...]:
+    """Rewards of all agents in a final control vector (Definitions 3.9.2 and 6.1.2(4))."""
+    return tuple(
+        largest_component_weight(owner_by_index, a, neighbors, weights)
+        for a in range(num_agents)
+    )

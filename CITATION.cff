@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the archived version."
+type: software
+title: "rcmas: Nash Equilibrium Synthesis for Region-Control Multi-Agent Systems"
+version: 2.0.0
+license: MIT
+repository-code: "https://github.com/SJ-Jordaan/rcmas"
+authors:
+  - family-names: Jordaan
+    given-names: Steven
+    affiliation: University of Pretoria
+abstract: >-
+  rcmas synthesises pure Nash equilibria of region-control multi-agent
+  systems with the Z3 SMT solver (IBIS, S-IBIS, Q-IBIS and CEGAR-NE, with
+  symmetry reduction), and checks every equilibrium it returns with an
+  independent certifier. It contains the benchmark territories, the
+  configuration and the scripts of the evaluation in Chapter 7 of the PhD
+  thesis of Steven Jordaan (University of Pretoria).
+keywords:
+  - Nash equilibrium
+  - strategy synthesis
+  - SMT
+  - multi-agent systems
+  - symmetry reduction
+  - abstraction refinement
+doi: 10.5281/zenodo.23984930
+date-released: 2026-11-05

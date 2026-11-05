@@ -1,21 +1,45 @@
-# Thesis evaluation — technique comparison up to 30 sectors
+# Thesis evaluation (Chapter 7, Sections 7.2-7.3, Appendix A).
 #
-# Compares the six techniques of the thesis evaluation chapter:
-#   IBIS, S-IBIS, Q-IBIS (sym off);  Symmetry Reduction (sym on);
-#   CEGAR (orbit start, sym off);  CEGAR + Symmetry (orbit start, sym on).
-# The algorithms x symmetry cross-product yields these six plus IBIS+sym and
-# Q-IBIS+sym (the symmetry-effect and spurious-unsat measurements).
+# 27 territories with 6 to 30 sectors; every number of agents n with
+# 2 <= n <= 6 that divides |T| gives an instance with horizon m = |T|/n,
+# 70 instances in all.  Four algorithms (IBIS, S-IBIS, Q-IBIS, and CEGAR-NE
+# with S-IBIS as its inner synthesiser and the orbit partition as its
+# initial partition), each without and with symmetry reduction, give eight
+# configurations and 560 runs.  T-5x5 (13 sectors) has no such n and is
+# therefore not listed.
 #
-# CEGAR uses S-IBIS as its inner synthesiser (the most performant) and the
-# orbit partition as its starting abstraction.
+# Protocol of the revised evaluation.  The direct runs of IBIS, S-IBIS and
+# Q-IBIS have no iteration bound: a run stops at an equilibrium, at the
+# first recurring play, or at the time limit.  They take their initial
+# play from the collectively optimal query smt(F, f) (Definition 4.6.1),
+# with the symmetry-breaking constraints when symmetry reduction is on.  The
+# inner S-IBIS of CEGAR-NE keeps the bound 30 at a coarse partition, after
+# which CEGAR-NE refines, and takes its initial play there from smt(F) of
+# the weighted abstract game, whose collectively optimal query can be much
+# harder than smt(F, f) of M.  At the discrete partition, where nothing is
+# left to refine, the inner S-IBIS is a direct run on M: no bound, initial
+# play from smt(F, f).  The first run used N = 30 and smt(F) everywhere;
+# experiments/thesis-eval-n30.toml repeats it.
 #
-# Usage:
-#   python -m experiments.run --config experiments/thesis-eval.toml \
-#       --runs 3 --workers 8 --timeout 300 --output thesis-eval.jsonl --resume
+# Usage (./reproduce.sh runs this and the rest of the pipeline):
 #   python -m experiments.run --config experiments/thesis-eval.toml --list
+#   python -m experiments.run --config experiments/thesis-eval.toml \
+#       --workers 7 --output results/thesis-eval-900.jsonl --resume
 
 [suite]
 name = "thesis-eval"
+
+[protocol]
+time_limit_s = 900                 # wall-clock limit per run (Section 7.2)
+runs = 1                           # one run per (instance, configuration)
+max_iters = "none"                 # no iteration bound for IBIS, S-IBIS, Q-IBIS
+initial = "collective"             # initial play from smt(F, f)
+cegar_inner_max_iters = 30         # inner S-IBIS of CEGAR-NE, coarse partition
+cegar_discrete_max_iters = "none"  # inner S-IBIS of CEGAR-NE, discrete partition
+cegar_inner_initial = "satisfying" # inner S-IBIS of CEGAR-NE, coarse partition: smt(F)
+                                   # (at the discrete partition: initial, smt(F, f))
+demand = 0                         # d(a) = 0 for every agent
+seed = 0                           # seed of the Q-IBIS learners
 
 [grids]
 symmetric = [
@@ -32,7 +56,6 @@ symmetric = [
     "6x5.txt"
 ]
 local_symmetry = [
-    "T-5x5.txt",
     "L-4x4-2.txt",
     "L-6x4-4.txt",
     "L-5x5-4.txt",
