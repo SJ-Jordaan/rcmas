@@ -10,13 +10,16 @@
 #
 # Protocol of the revised evaluation.  The direct runs of IBIS, S-IBIS and
 # Q-IBIS have no iteration bound: a run stops at an equilibrium, at the
-# first recurring play, or at the time limit.  Every synthesis call takes
-# its initial play from the collectively optimal query smt(F, f)
-# (Definition 4.6.1), with the symmetry-breaking constraints when symmetry
-# reduction is on.  The inner S-IBIS of CEGAR-NE keeps the bound 30 at a
-# coarse partition, after which CEGAR-NE refines, and has no bound at the
-# discrete partition, where nothing is left to refine.  The first run used
-# N = 30 everywhere and smt(F); experiments/thesis-eval-n30.toml repeats it.
+# first recurring play, or at the time limit.  They take their initial
+# play from the collectively optimal query smt(F, f) (Definition 4.6.1),
+# with the symmetry-breaking constraints when symmetry reduction is on.  The
+# inner S-IBIS of CEGAR-NE keeps the bound 30 at a coarse partition, after
+# which CEGAR-NE refines, and takes its initial play there from smt(F) of
+# the weighted abstract game, whose collectively optimal query can be much
+# harder than smt(F, f) of M.  At the discrete partition, where nothing is
+# left to refine, the inner S-IBIS is a direct run on M: no bound, initial
+# play from smt(F, f).  The first run used N = 30 and smt(F) everywhere;
+# experiments/thesis-eval-n30.toml repeats it.
 #
 # Usage (./reproduce.sh runs this and the rest of the pipeline):
 #   python -m experiments.run --config experiments/thesis-eval.toml --list
@@ -33,6 +36,8 @@ max_iters = "none"                 # no iteration bound for IBIS, S-IBIS, Q-IBIS
 initial = "collective"             # initial play from smt(F, f)
 cegar_inner_max_iters = 30         # inner S-IBIS of CEGAR-NE, coarse partition
 cegar_discrete_max_iters = "none"  # inner S-IBIS of CEGAR-NE, discrete partition
+cegar_inner_initial = "satisfying" # inner S-IBIS of CEGAR-NE, coarse partition: smt(F)
+                                   # (at the discrete partition: initial, smt(F, f))
 demand = 0                         # d(a) = 0 for every agent
 seed = 0                           # seed of the Q-IBIS learners
 

@@ -4,9 +4,10 @@
 #
 # The protocol is that of experiments/thesis-eval.toml: no iteration bound
 # for IBIS, S-IBIS and Q-IBIS, the initial play from smt(F, f), and for the
-# inner S-IBIS of CEGAR-NE the bound 30 at a coarse and none at the discrete
-# partition.  experiments/thesis-eval-n30.toml (--config) holds the protocol
-# of the first run (N = 30 everywhere, initial play from smt(F)).
+# inner S-IBIS of CEGAR-NE the bound 30 and the initial play from smt(F) of
+# the abstract game at a coarse partition, and no bound and smt(F, f) at the
+# discrete partition.  experiments/thesis-eval-n30.toml (--config) holds the
+# protocol of the first run (N = 30 everywhere, initial play from smt(F)).
 #
 # Stages, in order (every stage can be rerun; the sweeps resume):
 #   sweep     560 runs (70 instances x 8 configurations), 900 s each, into

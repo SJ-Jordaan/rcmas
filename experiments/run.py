@@ -11,17 +11,20 @@ cores minus one.)
 
 The ``[protocol]`` table of the configuration fixes the limit per run
 (900 s), the number of runs (1), the iteration bound of the direct runs
-(none), the initial query (collective), the bounds of the inner synthesiser
-of CEGAR-NE (30 at a coarse partition, none at the discrete one), the demand
-(0) and the Q-IBIS seed (0); ``experiments/thesis-eval-n30.toml`` holds the
-protocol of the first run (N = 30 everywhere, satisfying initial query).
-``--timeout``, ``--runs``, ``--max-iters``, ``--initial``,
-``--cegar-inner-max-iters``, ``--cegar-discrete-max-iters``, ``--demand``
-and ``--seed`` override it; a bound is an integer or ``none``.
-``--max-iters`` also sets a CEGAR-NE bound that neither the configuration
-nor the command line sets.  The values used are recorded in the session
-header of the log and in every run record.  ``./reproduce.sh`` runs the
-whole pipeline.
+(none), the initial query of the direct runs and of the inner call of
+CEGAR-NE at the discrete partition (collective), the bounds of the inner
+synthesiser of CEGAR-NE (30 at a coarse partition, none at the discrete
+one), the initial query of its inner calls at a coarse partition
+(satisfying), the demand (0) and the Q-IBIS seed (0);
+``experiments/thesis-eval-n30.toml`` holds the protocol of the first run
+(N = 30 everywhere, satisfying initial query everywhere).  ``--timeout``,
+``--runs``, ``--max-iters``, ``--initial``, ``--cegar-inner-max-iters``,
+``--cegar-discrete-max-iters``, ``--cegar-inner-initial``, ``--demand`` and
+``--seed`` override it; a bound is an integer or ``none``.  ``--max-iters``
+also sets a CEGAR-NE bound, and ``--initial`` the coarse initial query of
+CEGAR-NE, that neither the configuration nor the command line sets.  The
+values used are recorded in the session header of the log and in every run
+record.  ``./reproduce.sh`` runs the whole pipeline.
 
 Other uses::
 
@@ -133,7 +136,17 @@ def main(argv: list[str] | None = None) -> int:
         "--initial",
         choices=list(INITIAL_QUERIES),
         default=None,
-        help="Query for the initial play (default: config, else satisfying)",
+        help="Query for the initial play of the direct runs and of CEGAR-NE's "
+        "inner call at the discrete partition (default: config, else "
+        "satisfying); also sets --cegar-inner-initial if neither the config "
+        "nor the command line sets it",
+    )
+    parser.add_argument(
+        "--cegar-inner-initial",
+        choices=list(INITIAL_QUERIES),
+        default=None,
+        help="Query for the initial play of CEGAR-NE's inner calls at a coarse "
+        "partition (default: config, else the query of --initial)",
     )
     parser.add_argument(
         "--cegar-inner-max-iters",
@@ -263,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
         if v is not None
     }
     table = protocol_table(args.config) if args.config else {}
+    if args.cegar_inner_initial is not None:
+        overrides["cegar_inner_initial"] = args.cegar_inner_initial
+    elif args.initial is not None and "cegar_inner_initial" not in table:
+        overrides["cegar_inner_initial"] = args.initial
     for key in CEGAR_BOUNDS:
         value = getattr(args, key)
         if value is not ...:

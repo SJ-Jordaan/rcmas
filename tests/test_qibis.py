@@ -42,6 +42,7 @@ from .brute_force import (
     max_welfare,
     random_play,
 )
+from .replay import QueryReplay, disable_skip
 
 z3 = pytest.importorskip("z3")
 
@@ -349,6 +350,16 @@ class TestRestrictedQuery:
             cand = _random_candidates(play, a, rng)
             expected, _, _ = _restricted_best(play, a, nb, cand, demands)
             res = br(play, a, current, cand)
+            if current[a] == base.max_reward:
+                # r_a = R_max: IP = 0 without a query (rcmas.ibis.at_reward_bound).
+                assert expected == current[a]
+                assert (res.status, res.reward, res.play, res.checks) == (
+                    "ok",
+                    current[a],
+                    None,
+                    0,
+                )
+                continue
             assert res.status == "ok" and res.play is not None
             assert res.reward == expected >= current[a]
             assert res.reward == rewards_from_owner(res.play.final_state, n, nb)[a]
@@ -378,9 +389,9 @@ class TestRestrictedQuery:
         monkeypatch.setattr(smt_solve, "_check", lambda s, *a: z3.unsat)
         t = Territory.from_ascii(["..", ".."])
         base = build_base_encoding(territory=t, num_agents=2, horizon=2)
-        play = Play.from_actions(4, 2, [[0, 1], [2, 3]])
+        play = Play.from_actions(4, 2, [[0, 1], [3, 2]])  # rewards (1, 1) < m = 2
         with pytest.raises(RuntimeError, match="unsatisfiable"):
-            restricted_smt_best_response(base)(play, 0, (2, 2), _current_only(play)[0])
+            restricted_smt_best_response(base)(play, 0, (1, 1), _current_only(play)[0])
 
 
 # ===================================================================
@@ -562,9 +573,13 @@ class TestOutcomes:
         res = solve_qibis(territory=t, num_agents=2, cfg=QibisConfig(**FAST))
         assert res.outcome == "unk" and res.reason == "unknown" and not res.is_sat
 
-    @pytest.mark.parametrize("call,phase", [(2, "restricted"), (4, "certification")])
+    @pytest.mark.parametrize("call,phase", [(1, "restricted"), (3, "certification")])
     def test_unknown_stops_the_run(self, monkeypatch, call, phase):
-        """Checks: 1 initial, 2-3 restricted, 4-5 certification (k = 0)."""
+        """Checks: 1-2 restricted, 3-4 certification (k = 0, given play, no reward m).
+
+        The initial play is given, so that no agent has reward m and every
+        query is posed (an agent at m gets IP 0 without a query).
+        """
         real = smt_solve._check
         calls = {"n": 0}
 
@@ -574,7 +589,14 @@ class TestOutcomes:
 
         monkeypatch.setattr(smt_solve, "_check", nth_unknown)
         t = Territory.from_ascii(["...", "..."])
-        res = solve_qibis(territory=t, num_agents=2, cfg=QibisConfig(top_k=0, **FAST))
+        play = Play.from_actions(6, 2, [[0, 1], [2, 3], [4, 5]])
+        assert play.rewards(t.neighbor_map()) == (1, 1)
+        res = solve_qibis(
+            territory=t,
+            num_agents=2,
+            cfg=QibisConfig(top_k=0, **FAST),
+            initial_play=play,
+        )
         assert res.outcome == "unk" and not res.found_ne and res.play is not None
         it = res.trace[0]
         if phase == "restricted":
@@ -745,3 +767,112 @@ class TestUnboundedAndCollective:
             solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(initial="x"))
         with pytest.raises(ValueError, match="max_iters"):
             solve_qibis(territory=t, num_agents=1, cfg=QibisConfig(max_iters=-2))
+
+
+# ===================================================================
+# No query for an agent at R_max (rcmas.ibis.at_reward_bound)
+# ===================================================================
+
+
+def _count_checks(monkeypatch) -> list:
+    """Record every solver check (every query of a run goes through smt_solve._check)."""
+    calls: list = []
+    real = smt_solve._check
+
+    def counting(solver, *a):
+        calls.append(solver)
+        return real(solver, *a)
+
+    monkeypatch.setattr(smt_solve, "_check", counting)
+    return calls
+
+
+class TestRewardBound:
+    @pytest.mark.parametrize(
+        "grid,n",
+        [(["...", "..."], 2), (["...", "..."], 3), (["....", "...."], 4)],
+    )
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_all_m_start_poses_no_best_response_query(
+        self, monkeypatch, grid, n, symmetry
+    ):
+        """Every reward m: neither restricted nor certification queries, only smt(F, f)."""
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        assert max_welfare(len(t), n, m, nb) == n * m
+        checks = _count_checks(monkeypatch)
+        cfg = QibisConfig(
+            max_iters=None, initial="collective", symmetry=symmetry, **FAST
+        )
+        res = solve_qibis(territory=t, num_agents=n, cfg=cfg)
+        assert res.initial_rewards == (m,) * n
+        assert res.outcome == "ne" and res.iterations == 0 and res.returned_initial
+        it = res.trace[0]
+        assert it.restricted == (0,) * n and it.certified == (0,) * n
+        assert it.checks == 0 and len(checks) == 1  # the initial query only
+        assert is_equilibrium(res.play, nb)
+
+    @pytest.mark.parametrize(
+        "grid,n,demands,k,start",
+        [
+            (RUNNING, 3, (2, 2, 2), 0, "fig_3_1"),
+            (RUNNING, 3, (2, 2, 2), 3, "fig_3_1"),
+            (["....", "...."], 4, None, 3, "satisfying"),
+            (["..#", "...", ".#."], 2, (1, 1), 1, "satisfying"),
+            ([".....", "....."], 3, None, 3, "satisfying"),
+        ],
+    )
+    def test_same_run_with_and_without_the_skip(
+        self, monkeypatch, grid, n, demands, k, start
+    ):
+        """The skip removes queries only: same plays, potentials and outcome.
+
+        The run without the skip poses every query, and the run with it is
+        answered from that record (``tests/replay.py``).  The learners are
+        seeded, so both runs train the same tables on the same plays.
+        """
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        cfg = QibisConfig(top_k=k, demands=demands, max_iters=None, **FAST)
+        kw: dict = dict(territory=t, num_agents=n, cfg=cfg)
+        if start == "fig_3_1":
+            kw["initial_play"] = _fig_3_1_play()
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = solve_qibis(**kw)
+        recorded = replay.replay()
+        fast = solve_qibis(**kw)
+        assert (fast.outcome, fast.reason, fast.iterations) == (
+            full.outcome,
+            full.reason,
+            full.iterations,
+        )
+        assert fast.play == full.play and fast.rewards == full.rewards
+
+        def rows(res):
+            return [
+                (it.index, it.rewards, it.restricted, it.certified, it.chosen)
+                for it in res.trace
+            ]
+
+        assert rows(fast) == rows(full)
+        # One query left out per round (restricted, certification) and agent at m.
+        at_bound = 0
+        for it in full.trace:
+            for a in range(n):
+                if it.rewards[a] == m:
+                    assert a >= len(it.restricted) or it.restricted[a] == 0
+                    assert a >= len(it.certified) or it.certified[a] == 0
+                    at_bound += (a < len(it.restricted)) + (a < len(it.certified))
+        assert at_bound > 0, "the case must exercise the skip"
+        left_out = len(replay.best_responses(recorded)) - len(replay.best_responses())
+        assert left_out == at_bound
+        assert (
+            sum(it.checks for it in full.trace) - sum(it.checks for it in fast.trace)
+            == at_bound
+        )
+        if fast.outcome == "ne":
+            assert is_equilibrium(fast.play, nb, demands)

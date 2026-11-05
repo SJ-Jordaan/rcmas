@@ -15,7 +15,9 @@ horizon IBIS, S-IBIS, Q-IBIS and CEGAR-NE accept, and the iteration bound
 ``N`` defaults to 30; ``--max-iters none`` runs without a bound, which stops
 at an equilibrium or at the first recurring play.  ``--initial collective``
 takes the initial play from ``smt(F, f)`` (Definition 4.6.1) instead of
-``smt(F)``.  Plays are printed in the numbering of
+``smt(F)``; for ``cegar`` it selects the initial query at the discrete
+partition, and ``--inner-initial`` the one at a coarse partition (default:
+``--initial``).  Plays are printed in the numbering of
 the thesis: agents ``1..n`` and sectors ``1..|T|`` in the enumeration of
 Remark 3.1.1 (bottom row first, left to right).  The tool numbers both from
 0 internally.
@@ -80,6 +82,7 @@ class RunArgs:
     initial: str = "satisfying"
     inner_max_iters: int | None | EllipsisType = ...
     discrete_max_iters: int | None | EllipsisType = ...
+    inner_initial: str | EllipsisType = ...
 
 
 def _agent_symbol(o: int) -> str:
@@ -299,6 +302,15 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         "(default: --max-iters; 'none' as in the thesis protocol)",
     )
     cegar.add_argument(
+        "--inner-initial",
+        choices=list(INITIAL_QUERIES),
+        default=...,
+        help="Initial query of the inner synthesiser at a coarse partition, "
+        "on the weighted abstract game (default: --initial, which then "
+        "applies at the discrete partition only; satisfying as in the thesis "
+        "protocol)",
+    )
+    cegar.add_argument(
         "--seed", type=int, default=0, help="Seed of an inner Q-IBIS (default 0)"
     )
 
@@ -359,6 +371,7 @@ def _parse_args(argv: list[str] | None = None) -> RunArgs:
         initial=str(getattr(ns, "initial", "satisfying")),
         inner_max_iters=getattr(ns, "inner_max_iters", ...),
         discrete_max_iters=getattr(ns, "discrete_max_iters", ...),
+        inner_initial=getattr(ns, "inner_initial", ...),
     )
 
 
@@ -375,8 +388,14 @@ def _report(res: object, args: RunArgs, territory: Territory) -> int:
     print(f"iterations={getattr(res, 'iterations', None)}")
     init_s = getattr(res, "initial_query_s", None)
     init_r = getattr(res, "initial_rewards", None)
+    queries = f"initial={args.initial}"
+    if args.mode == "cegar":
+        # The time and rewards are those of the first inner call, at a coarse
+        # partition unless P_0 is discrete.
+        inner = args.initial if args.inner_initial is ... else args.inner_initial
+        queries += f" inner_initial={inner}"
     print(
-        f"initial={args.initial} initial_query_s="
+        f"{queries} initial_query_s="
         f"{'-' if init_s is None else f'{init_s:.3f}'} "
         f"initial_rewards={None if init_r is None else tuple(init_r)} "
         f"returned_initial={getattr(res, 'returned_initial', False)}"
@@ -510,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
             inner_max_iters=args.inner_max_iters,
             discrete_max_iters=args.discrete_max_iters,
             initial=args.initial,
+            inner_initial=args.inner_initial,
             progress=args.progress,
             timing=args.timing,
             timeout_ms=timeout_ms,

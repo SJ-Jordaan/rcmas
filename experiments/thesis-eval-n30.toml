@@ -25,6 +25,9 @@ max_iters = 30                   # iteration bound N of IBIS, S-IBIS, Q-IBIS
 initial = "satisfying"           # initial play from smt(F)
 cegar_inner_max_iters = 30       # inner S-IBIS of CEGAR-NE, coarse partition
 cegar_discrete_max_iters = 30    # inner S-IBIS of CEGAR-NE, discrete partition
+cegar_inner_initial = "satisfying"  # inner S-IBIS of CEGAR-NE, coarse partition: smt(F)
+                                 # (the first run's config had no such key, which means
+                                 # the value of initial)
 demand = 0                       # d(a) = 0 for every agent
 seed = 0                         # seed of the Q-IBIS learners
 

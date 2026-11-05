@@ -40,15 +40,20 @@ values it used::
     initial = "collective"           # initial play: "satisfying" smt(F) or "collective" smt(F, f)
     cegar_inner_max_iters = 30       # bound of the inner synthesiser of CEGAR-NE at a coarse partition
     cegar_discrete_max_iters = "none"  # ... and at the discrete partition
+    cegar_inner_initial = "satisfying"  # initial query of an inner call at a coarse partition
     demand = 0                       # d(a) for every agent
     seed = 0                         # seed of the Q-IBIS learners
 
 An iteration bound is a non-negative integer or the string ``"none"`` (TOML
-has no null), which means no bound.  A missing CEGAR-NE bound takes the
-value of ``max_iters``, and a missing ``initial`` is ``"satisfying"``: a
-table without these keys gives the protocol of the first run of the thesis
-evaluation, in which every synthesiser, the inner one included, had the
-bound ``N = 30`` and started from ``smt(F)``.
+has no null), which means no bound.  ``initial`` is the initial query of
+the direct runs and of the inner call of CEGAR-NE at the discrete partition,
+where the inner run is a direct run on ``M``; ``cegar_inner_initial`` is
+that of an inner call at a coarse partition, posed on the weighted abstract
+game.  A missing CEGAR-NE bound takes the value of ``max_iters``, a missing
+``initial`` is ``"satisfying"`` and a missing ``cegar_inner_initial`` takes
+the value of ``initial``: a table without these keys gives the protocol of
+the first run of the thesis evaluation, in which every synthesiser, the
+inner one included, had the bound ``N = 30`` and started from ``smt(F)``.
 """
 
 from __future__ import annotations
@@ -76,6 +81,7 @@ SYNTHESIS_FIELDS = (
     "initial",
     "cegar_inner_max_iters",
     "cegar_discrete_max_iters",
+    "cegar_inner_initial",
 )
 """The fields of :class:`Protocol` that change what a synthesiser computes."""
 
@@ -88,8 +94,10 @@ class Protocol:
     Q-IBIS, and ``cegar_inner_max_iters`` and ``cegar_discrete_max_iters``
     are the bounds of the inner synthesiser of CEGAR-NE at a coarse and at
     the discrete partition; ``None`` means no bound.  ``initial`` is the
-    query for the initial play of every synthesis call.  The defaults are
-    the protocol of the first run (``N = 30`` everywhere, ``smt(F)``);
+    query for the initial play of a direct run and of the inner call of
+    CEGAR-NE at the discrete partition, ``cegar_inner_initial`` that of an
+    inner call at a coarse partition.  The defaults are the protocol of the
+    first run (``N = 30`` everywhere, ``smt(F)`` everywhere);
     ``experiments/thesis-eval.toml`` sets the revised protocol.
     """
 
@@ -101,6 +109,7 @@ class Protocol:
     initial: str = "satisfying"
     cegar_inner_max_iters: int | None = 30
     cegar_discrete_max_iters: int | None = 30
+    cegar_inner_initial: str = "satisfying"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,7 +152,10 @@ def normalise_protocol(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     ``max_iters``, ``demand`` and ``seed``.  Their runs started from
     ``smt(F)``, and the inner synthesiser of CEGAR-NE had the bound
     ``max_iters`` at every partition, so the missing fields take these
-    values.
+    values.  Logs written before ``cegar_inner_initial`` existed posed the
+    query ``initial`` at every partition, so it takes the value of
+    ``initial``: ``"satisfying"`` for the first run, ``"collective"`` for
+    the first sweeps of the revised protocol.
     """
     if raw is None:
         return None
@@ -151,6 +163,7 @@ def normalise_protocol(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     out.setdefault("initial", "satisfying")
     out.setdefault("cegar_inner_max_iters", out.get("max_iters"))
     out.setdefault("cegar_discrete_max_iters", out.get("max_iters"))
+    out.setdefault("cegar_inner_initial", out.get("initial"))
     return out
 
 
@@ -168,12 +181,15 @@ def protocol_from_table(raw: dict[str, Any], where: str = "[protocol]") -> Proto
     vals.setdefault("max_iters", Protocol.__dataclass_fields__["max_iters"].default)
     for key in ("cegar_inner_max_iters", "cegar_discrete_max_iters"):
         vals.setdefault(key, vals["max_iters"])
+    vals.setdefault("initial", Protocol.__dataclass_fields__["initial"].default)
+    vals.setdefault("cegar_inner_initial", vals["initial"])
     proto = Protocol(**vals)
-    if proto.initial not in INITIAL_QUERIES:
-        raise ValueError(
-            f"invalid [protocol] in {where}: initial must be one of "
-            f"{INITIAL_QUERIES}, got {proto.initial!r}"
-        )
+    for key in ("initial", "cegar_inner_initial"):
+        if getattr(proto, key) not in INITIAL_QUERIES:
+            raise ValueError(
+                f"invalid [protocol] in {where}: {key} must be one of "
+                f"{INITIAL_QUERIES}, got {getattr(proto, key)!r}"
+            )
     if proto.time_limit_s <= 0 or proto.runs < 1:
         raise ValueError(f"invalid [protocol] in {where}: {proto}")
     return proto

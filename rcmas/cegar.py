@@ -12,8 +12,11 @@
    (*inner_max_iters*) and at the discrete partition
    (*discrete_max_iters*); either may be ``None`` (no bound), and by
    default both are the bound ``N = max_iters`` of a direct run.  Its
-   initial play comes from ``smt(F)`` or, with ``initial="collective"``,
-   from the collectively optimal query of the game it runs on;
+   initial play comes from ``smt(F)`` (``"satisfying"``) or from the
+   collectively optimal query (``"collective"``) of the game it runs on:
+   *inner_initial* selects the query at a coarse partition and *initial*
+   the query at the discrete partition, and by default *inner_initial* is
+   *initial*;
 3. (lines 7-12) if it returns no equilibrium (the abstract game has no
    satisfying strategy, or the synthesiser stops with ``n/c``), return
    FAILURE at the discrete partition, and otherwise split the largest block
@@ -27,7 +30,9 @@
    order, one query ``smt(G_a(pi) and reward_a > r_a(pi))`` over the
    concrete encoding, in which the other agents follow the canonical
    completion of ``pi`` (Definition 4.7.1), without symmetry-breaking or
-   candidate constraints.  If every query is unsatisfiable, return the
+   candidate constraints.  The query of an agent with ``r_a(pi) = m`` is
+   not posed: ``F`` implies ``reward_a <= m``, so it is unsatisfiable
+   (:func:`~rcmas.ibis.at_reward_bound`).  If every query is unsatisfiable, return the
    canonical completion of ``pi`` (Definition 4.4.2).  A model ``beta`` is a
    counterexample, and ``D`` is the set of sectors whose control differs
    between the final states of ``pi`` and ``pi_beta`` (Definition 6.3.2);
@@ -82,6 +87,7 @@ from .abstraction import (
     refine_partition,
     sectors_of,
 )
+from .ibis import at_reward_bound
 from .model import Coord, State, Territory, rewards_from_owner
 from .smt_solve import (
     BaseEncoding,
@@ -164,6 +170,8 @@ class InnerResult:
         initial_play: the inner run's initial play, if known.
         initial_rewards: its rewards in the game, if known.
         returned_initial: the inner run returned its initial play.
+        initial: its initial query, ``"satisfying"`` or ``"collective"``,
+            if known.
     """
 
     outcome: str
@@ -175,6 +183,7 @@ class InnerResult:
     initial_play: Play | None = None
     initial_rewards: tuple[int, ...] | None = None
     returned_initial: bool = False
+    initial: str | None = None
 
 
 SynthesiseFn = Callable[[SynthesisGame], InnerResult]
@@ -182,7 +191,8 @@ SynthesiseFn = Callable[[SynthesisGame], InnerResult]
 
 
 SAME = ...
-"""Default of the CEGAR-NE bounds: the same bound as ``max_iters``."""
+"""Default of the CEGAR-NE bounds and of ``inner_initial``: the value of
+``max_iters`` (for a bound) or of ``initial`` (for the initial query)."""
 
 
 def _bound(value: int | None | EllipsisType, default: int | None) -> int | None:
@@ -192,12 +202,22 @@ def _bound(value: int | None | EllipsisType, default: int | None) -> int | None:
     return bound
 
 
+def _initial_query(value: str | EllipsisType, default: str, name: str) -> str:
+    from .smt_solve import INITIAL_QUERIES
+
+    query = default if value is ... else value
+    if query not in INITIAL_QUERIES:
+        raise ValueError(f"{name} must be one of {INITIAL_QUERIES}, got {query!r}")
+    return query
+
+
 def make_synthesiser(
     name: str,
     *,
     max_iters: int | None = 30,
     discrete_max_iters: int | None | EllipsisType = SAME,
     initial: str = "satisfying",
+    inner_initial: str | EllipsisType = SAME,
     timeout_ms: int | None = None,
     seed: int = 0,
     progress: bool = False,
@@ -206,29 +226,30 @@ def make_synthesiser(
 
     The inner run has the iteration bound *max_iters* at a coarse partition
     and *discrete_max_iters* at the discrete partition (``...``, the
-    default, takes *max_iters*); ``None`` runs it without a bound.
-    *initial* selects its initial query, ``"satisfying"`` or
-    ``"collective"``, posed on the game of the call (weighted rewards at a
-    coarse partition).
+    default, takes *max_iters*); ``None`` runs it without a bound.  Its
+    initial query, ``"satisfying"`` (``smt(F)``) or ``"collective"``
+    (``smt(F, f)``), is posed on the game of the call: *inner_initial*
+    selects it at a coarse partition, where the rewards are weighted, and
+    *initial* at the discrete partition (``...``, the default of
+    *inner_initial*, takes *initial*).
     """
     if name not in SYNTHESISERS:
         raise ValueError("synthesiser must be 'ibis', 'qibis', or 'sibis'")
-    from .smt_solve import INITIAL_QUERIES
-
-    if initial not in INITIAL_QUERIES:
-        raise ValueError(f"initial must be one of {INITIAL_QUERIES}, got {initial!r}")
+    discrete_initial = _initial_query(initial, "satisfying", "initial")
+    coarse_initial = _initial_query(inner_initial, discrete_initial, "inner_initial")
     coarse_bound = _bound(max_iters, None)
     discrete_bound = _bound(discrete_max_iters, coarse_bound)
 
     def run(game: SynthesisGame) -> InnerResult:
         res: Any
         bound = discrete_bound if game.is_concrete else coarse_bound
+        query = discrete_initial if game.is_concrete else coarse_initial
         if name == "qibis":
             from .qibis import QibisConfig, solve_qibis
 
             cfg = QibisConfig(
                 max_iters=bound,
-                initial=initial,
+                initial=query,
                 timeout_ms=timeout_ms,
                 symmetry=game.symmetry,
                 demands=game.demands,
@@ -254,7 +275,7 @@ def make_synthesiser(
                 num_agents=game.num_agents,
                 horizon=game.horizon,
                 max_iters=bound,
-                initial=initial,
+                initial=query,
                 timeout_ms=timeout_ms,
                 symmetry=game.symmetry,
                 demands=game.demands,
@@ -275,6 +296,7 @@ def make_synthesiser(
             initial_play=res.initial_play,
             initial_rewards=res.initial_rewards,
             returned_initial=res.returned_initial,
+            initial=res.initial,
         )
 
     return run
@@ -333,6 +355,8 @@ class CegarInitial:
         lifted_rewards: ``r_a`` in ``M`` of its lift (first call only).
         status: the answer to the query, ``"sat"``, ``"unsat"`` or
             ``"unknown"``.
+        initial: the query, ``"satisfying"`` (``smt(F)`` of the call's
+            game) or ``"collective"`` (its ``smt(F, f)``), if known.
     """
 
     iteration: int
@@ -341,6 +365,7 @@ class CegarInitial:
     abstract_rewards: tuple[int, ...] | None
     lifted_rewards: tuple[int, ...] | None
     status: str = "sat"
+    initial: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +383,8 @@ class VerifyResult:
             not decide).
         solution: the model ``beta``.
         deviation: the play ``pi_beta``.
-        queries: number of queries posed (at most ``|Agt|``).
+        queries: number of queries posed (at most ``|Agt|``; none for an
+            agent whose reward is already ``R_max``).
     """
 
     status: str
@@ -380,10 +406,12 @@ def verify_ne(
     *base* is the formula ``F`` of ``M``, with the demands of ``M`` and
     without symmetry constraints; *play* must be satisfying (line 15), the
     hypothesis of Lemma 4.7.2.  For each agent ``a``, in index order, the
-    query ``smt(G_a(pi) and reward_a > r_a(pi))`` is posed.  A model is a
-    counterexample (Definition 6.3.1) and is returned at once; if every query
-    is unsatisfiable the play is verified.  An unknown answer is returned as
-    ``"unknown"`` and never read as unsatisfiable.
+    query ``smt(G_a(pi) and reward_a > r_a(pi))`` is posed, unless
+    ``r_a(pi) = R_max``: ``F`` implies ``reward_a <= R_max``, so that query
+    is unsatisfiable and is skipped (:func:`~rcmas.ibis.at_reward_bound`).
+    A model is a counterexample (Definition 6.3.1) and is returned at once;
+    if every query is unsatisfiable the play is verified.  An unknown answer
+    is returned as ``"unknown"`` and never read as unsatisfiable.
     """
     n = play.num_agents
     if base.num_agents != n or base.horizon != play.horizon:
@@ -391,6 +419,8 @@ def verify_ne(
     current = base.rewards_of(play.final_state) if rewards is None else rewards
     queries = 0
     for a in range(n):
+        if at_reward_bound(base, current, a):
+            continue
         sol = check_improvement_from_base(
             base,
             agent=a,
@@ -443,6 +473,8 @@ class CegarIteration:
         initial_rewards: rewards of the inner run's initial play in the
             game of this iteration (abstract rewards), if known.
         returned_initial: the inner run returned its initial play.
+        initial: the inner run's initial query, ``"satisfying"`` or
+            ``"collective"``, if known.
     """
 
     index: int
@@ -461,6 +493,7 @@ class CegarIteration:
     initial_query_s: float | None = None
     initial_rewards: tuple[int, ...] | None = None
     returned_initial: bool = False
+    initial: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +611,7 @@ def solve_cegar(
     inner_max_iters: int | None | EllipsisType = SAME,
     discrete_max_iters: int | None | EllipsisType = SAME,
     initial: str = "satisfying",
+    inner_initial: str | EllipsisType = SAME,
     progress: bool = False,
     timing: bool = False,
     timeout_ms: int | None = None,
@@ -603,8 +637,8 @@ def solve_cegar(
         ``"sibis"`` (default, as in Chapter 7), ``"ibis"``, ``"qibis"``, or
         any :data:`SynthesiseFn`.  A callable receives only the game of
         each call, so it cannot be combined with a non-default
-        *max_iters*, *inner_max_iters*, *discrete_max_iters*, *initial* or
-        *seed* (:class:`ValueError`).
+        *max_iters*, *inner_max_iters*, *discrete_max_iters*, *initial*,
+        *inner_initial* or *seed* (:class:`ValueError`).
     max_iters
         The iteration bound ``N`` of the inner synthesiser at every
         partition, the same bound as a direct run; ``None`` means no bound.
@@ -617,10 +651,16 @@ def solve_cegar(
         thesis protocol bounds the coarse runs (CEGAR-NE refines after a
         coarse run that ends without converging) and leaves the discrete
         run unbounded, like a direct run.
-    initial
-        The initial query of every inner call, ``"satisfying"`` (``smt(F)``
-        of the call's game) or ``"collective"`` (its ``smt(F, f)``, with
-        weighted rewards at a coarse partition).
+    initial, inner_initial
+        The initial query of the inner call at the discrete partition
+        (*initial*) and at a coarse partition (*inner_initial*; ``...``,
+        the default, takes *initial*): ``"satisfying"`` (``smt(F)`` of the
+        call's game) or ``"collective"`` (its ``smt(F, f)``, with weighted
+        rewards at a coarse partition).  The thesis protocol poses
+        ``smt(F_hat)`` at a coarse partition, whose collectively optimal
+        query can be much harder than ``smt(F, f)`` of ``M``, and
+        ``smt(F, f)`` at the discrete partition, where the inner run is a
+        direct run on ``M``.
     timeout_ms
         Z3 timeout per query; an expired query answers unknown and the run
         stops with outcome ``"unk"``.
@@ -665,12 +705,15 @@ def solve_cegar(
             raise ValueError("demands must have one entry per agent")
     coarse_bound = _bound(inner_max_iters, _bound(max_iters, None))
     discrete_bound = _bound(discrete_max_iters, _bound(max_iters, None))
+    discrete_initial = _initial_query(initial, "satisfying", "initial")
+    coarse_initial = _initial_query(inner_initial, discrete_initial, "inner_initial")
     if isinstance(synthesiser, str):
         synth = make_synthesiser(
             synthesiser,
             max_iters=coarse_bound,
             discrete_max_iters=discrete_bound,
-            initial=initial,
+            initial=discrete_initial,
+            inner_initial=coarse_initial,
             timeout_ms=timeout_ms,
             seed=seed,
         )
@@ -685,6 +728,7 @@ def solve_cegar(
                 ("inner_max_iters", inner_max_iters is not SAME),
                 ("discrete_max_iters", discrete_max_iters is not SAME),
                 ("initial", initial != "satisfying"),
+                ("inner_initial", inner_initial is not SAME),
                 ("seed", seed != 0),
             )
             if given
@@ -767,7 +811,12 @@ def solve_cegar(
                 info = CegarInitial(
                     it, len(abstract.partition), init.query_s, None, None
                 )
-            info = replace(info, abstract_rewards=init.rewards, status=init.reason)
+            info = replace(
+                info,
+                abstract_rewards=init.rewards,
+                status=init.reason,
+                initial=getattr(init, "initial", None),
+            )
             if on_initial is not None:
                 on_initial(info)
 
@@ -810,6 +859,7 @@ def solve_cegar(
         row["initial_query_s"] = inner.initial_query_s
         row["initial_rewards"] = inner.initial_rewards
         row["returned_initial"] = inner.returned_initial
+        row["initial"] = inner.initial
         if it == 1 and not first:
             _note_first(abstract, inner.initial_query_s, inner.initial_play)
         _log(

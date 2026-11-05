@@ -7,9 +7,12 @@
 # too.  On four of the instances the collectively optimal initial play
 # gives every agent reward m, so the direct runs return it in iteration 0;
 # on 5x5-13 with 2 agents it does not (welfare 11 < 12), and without
-# symmetry reduction IBIS, S-IBIS and Q-IBIS improve it for 3 to 6
-# iterations, so the improvement loop and the certification of a play
-# other than the initial one are exercised as well.  It exercises the
+# symmetry reduction IBIS, S-IBIS and Q-IBIS improve it for a few
+# iterations (2 to 6 so far), so the improvement loop and the
+# certification of a play other than the initial one are exercised as well.
+# The orbit partition of 4x4 is coarse, so CEGAR-NE's inner calls start
+# from smt(F) of the abstract game there; that of 5x5-13 is discrete, so
+# its only inner call starts from smt(F, f) of M.  It exercises the
 # sweep, the certifier, the assets and the numbers report in a few
 # minutes; its numbers mean nothing.
 
@@ -23,6 +26,7 @@ max_iters = "none"
 initial = "collective"
 cegar_inner_max_iters = 30
 cegar_discrete_max_iters = "none"
+cegar_inner_initial = "satisfying"
 demand = 0
 seed = 0
 

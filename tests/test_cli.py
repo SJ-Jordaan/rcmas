@@ -302,6 +302,43 @@ class TestCliProtocol:
         )
         assert args.inner_max_iters == 30 and args.discrete_max_iters is None
 
+    def test_parse_inner_initial(self, tmp_path):
+        """--inner-initial: the coarse initial query of CEGAR-NE (default: --initial)."""
+        g = self._grid(tmp_path)
+        base = ["cegar", "--grid", g, "--agents", "2"]
+        assert _parse_args(base).inner_initial is ...
+        args = _parse_args(
+            base + ["--initial", "collective", "--inner-initial", "satisfying"]
+        )
+        assert args.initial == "collective" and args.inner_initial == "satisfying"
+        with pytest.raises(SystemExit):
+            _parse_args(base + ["--inner-initial", "best"])
+        with pytest.raises(SystemExit):  # a CEGAR-NE option only
+            _parse_args(
+                ["sibis", "--grid", g, "--agents", "2", "--inner-initial", "satisfying"]
+            )
+        assert _parse_args(["sibis", "--grid", g, "--agents", "2"]).inner_initial is ...
+
+    @pytest.mark.parametrize(
+        "extra, shown",
+        [
+            ([], "initial=collective inner_initial=collective"),
+            (
+                ["--inner-initial", "satisfying"],
+                "initial=collective inner_initial=satisfying",
+            ),
+        ],
+    )
+    def test_cegar_reports_both_initial_queries(self, tmp_path, capsys, extra, shown):
+        from rcmas.cli import main
+
+        g = self._grid(tmp_path, "....\n....\n")
+        code = main(
+            ["cegar", "--grid", g, "--agents", "2", "--initial", "collective", *extra]
+        )
+        out = capsys.readouterr().out
+        assert code == 0 and "outcome=ne" in out and shown in out
+
     @pytest.mark.parametrize("cmd", ["ibis", "sibis", "qibis", "cegar"])
     def test_runs_with_the_thesis_protocol(self, tmp_path, capsys, cmd):
         from rcmas.cli import main

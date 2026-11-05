@@ -1,7 +1,7 @@
 """Outputs of an earlier sweep in the results directory (used by ``reproduce.sh``).
 
 The sweeps of ``reproduce.sh`` resume their logs.  A log written under
-another synthesis protocol (iteration bounds or initial query) cannot be
+another synthesis protocol (iteration bounds or initial queries) cannot be
 resumed: the runner refuses it (:class:`experiments.runner.ProtocolMismatchError`).
 This happens to an author who ran the first protocol of the thesis
 evaluation (``N = 30``, initial play from ``smt(F)``) and now runs the
@@ -56,6 +56,7 @@ def is_first_protocol(protocol: dict[str, Any] | None) -> bool:
         and p.get("initial") == "satisfying"
         and p.get("cegar_inner_max_iters") == 30
         and p.get("cegar_discrete_max_iters") == 30
+        and p.get("cegar_inner_initial") == "satisfying"
     )
 
 
@@ -99,8 +100,9 @@ def _readme(dest: Path, moved: list[Path], logs: list[Path], config: str) -> str
             "",
             f"The revised protocol (`{config}`) replaced it: no iteration bound for",
             "the direct runs of IBIS, S-IBIS and Q-IBIS, the initial play from the",
-            "collectively optimal query smt(F, f), and for CEGAR-NE the bound 30 at a",
-            "coarse partition and no bound at the discrete partition. The first run",
+            "collectively optimal query smt(F, f), and for CEGAR-NE the bound 30 and",
+            "the initial play from smt(F) of the abstract game at a coarse partition,",
+            "and no bound and smt(F, f) at the discrete partition. The first run",
             "is kept for transparency; `experiments/thesis-eval-n30.toml` repeats its",
             "protocol, and the scripts of `experiments/` read these logs, for example",
             "`python -m experiments.thesis_numbers --results",

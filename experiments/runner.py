@@ -42,12 +42,14 @@ are appended.  A resumed session must use the same tool commit, the same uncommi
 changes (none, or the same ``git diff``), the same Z3 version,
 configuration file and protocol as the sessions already in the log, unless
 ``allow_mixed`` is set, so that one log never mixes two versions.  The
-synthesis protocol (the iteration bounds and the initial query, recorded in
-the session header and in every run record) must always be the same:
+synthesis protocol (the iteration bounds and the initial queries, recorded
+in the session header and in every run record) must always be the same:
 ``allow_mixed`` does not override it (:class:`ProtocolMismatchError`).
 Logs of the first run of the thesis evaluation record only ``max_iters``;
 their other fields are read as ``initial = "satisfying"`` and CEGAR-NE
-bounds equal to ``max_iters`` (:func:`experiments.config.normalise_protocol`).
+bounds equal to ``max_iters``, and a log without ``cegar_inner_initial``
+as one whose coarse inner calls posed ``initial``
+(:func:`experiments.config.normalise_protocol`).
 
 A run record also describes the initial play of the run: the time of the
 initial query (``initial_query_s``; for CEGAR-NE that of the first inner
@@ -56,7 +58,9 @@ call, with one entry per inner call in ``cegar_initial_queries`` and in
 (``initial_rewards``, for CEGAR-NE of the lift of the first inner call's
 initial play), their sum (``initial_welfare``), whether every reward is
 ``m`` (``initial_all_m``) and whether the run returned the initial play as
-its equilibrium (``initial_was_ne``).  The child reports the initial query
+its equilibrium (``initial_was_ne``).  The entries of
+``cegar_initial_queries`` and ``cegar_trace`` name the query of each inner
+call (``initial``: ``"satisfying"`` or ``"collective"``).  The child reports the initial query
 as soon as it is answered, so a run killed at the limit keeps these fields;
 ``initial_query_s`` is ``null`` on a timeout only if the initial query did
 not finish.
@@ -277,6 +281,7 @@ def _run_algorithm(
             inner_max_iters=protocol.cegar_inner_max_iters,
             discrete_max_iters=protocol.cegar_discrete_max_iters,
             initial=protocol.initial,
+            inner_initial=protocol.cegar_inner_initial,
             symmetry=sym,
             timeout_ms=timeout_ms,
             demands=demands,
@@ -311,6 +316,7 @@ def _run_algorithm(
                         None if it.initial_rewards is None else list(it.initial_rewards)
                     ),
                     "returned_initial": bool(it.returned_initial),
+                    "initial": it.initial,
                 }
                 for it in cres.trace
             ],
@@ -341,6 +347,7 @@ def _cegar_call(info: Any) -> dict[str, Any]:
     return {
         "iteration": int(info.iteration),
         "blocks": int(info.blocks),
+        "initial": getattr(info, "initial", None),
         "status": info.status,
         "initial_query_s": (
             None if info.query_s is None else round(float(info.query_s), 4)
@@ -553,6 +560,7 @@ def _base_record(
         "initial": protocol.initial,
         "cegar_inner_max_iters": protocol.cegar_inner_max_iters,
         "cegar_discrete_max_iters": protocol.cegar_discrete_max_iters,
+        "cegar_inner_initial": protocol.cegar_inner_initial,
         "seed": protocol.seed,
     }
 
@@ -724,7 +732,9 @@ def describe_protocol(protocol: Protocol | dict[str, Any]) -> str:
     return (
         f"N = {bound_text(d.get('max_iters'))}, initial {d.get('initial')}, "
         f"CEGAR-NE inner N = {bound_text(d.get('cegar_inner_max_iters'))} "
-        f"(coarse) / {bound_text(d.get('cegar_discrete_max_iters'))} (discrete)"
+        f"(coarse) / {bound_text(d.get('cegar_discrete_max_iters'))} (discrete), "
+        f"inner initial {d.get('cegar_inner_initial')} (coarse) / "
+        f"{d.get('initial')} (discrete)"
     )
 
 
@@ -735,8 +745,9 @@ class MixedLogError(RuntimeError):
 class ProtocolMismatchError(MixedLogError):
     """A resumed session has another synthesis protocol than the log.
 
-    The iteration bounds and the initial query change what the synthesisers
-    compute, so a log never mixes two of them, even with ``allow_mixed``.
+    The iteration bounds and the initial queries change what the
+    synthesisers compute, so a log never mixes two of them, even with
+    ``allow_mixed``.
     """
 
 
@@ -1216,7 +1227,7 @@ def _run_session(
         if check.status == "protocol":
             raise ProtocolMismatchError(
                 f"{out_path} was written with another synthesis protocol (iteration "
-                "bounds or initial query); resume would mix two protocols in one log, "
+                "bounds or initial queries); resume would mix two protocols in one log, "
                 "which --allow-mixed does not permit. Move the log away or use a new "
                 "output file.\n  " + "\n  ".join(check.problems)
             )

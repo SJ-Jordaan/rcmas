@@ -85,6 +85,7 @@ class TestConfig:
             initial="collective",
             cegar_inner_max_iters=30,
             cegar_discrete_max_iters=None,
+            cegar_inner_initial="satisfying",
         )
         scenarios = load_config(cfg)
         instances = {(s.grid_path, s.num_agents) for s in scenarios}
@@ -131,6 +132,7 @@ class TestConfig:
         assert load_protocol(n30) == Protocol(
             time_limit_s=900, runs=1, max_iters=30, demand=0, seed=0
         )
+        assert load_protocol(n30).cegar_inner_initial == "satisfying"
         new = load_config(ROOT / "experiments" / "thesis-eval.toml")
         old = load_config(n30)
 
@@ -167,6 +169,42 @@ class TestConfig:
             with pytest.raises(ValueError):
                 protocol_from_table(bad)
 
+    def test_cegar_inner_initial_in_toml(self, tmp_path: Path) -> None:
+        """A missing cegar_inner_initial takes the value of initial (as for the bounds)."""
+        from experiments.config import (
+            SYNTHESIS_FIELDS,
+            normalise_protocol,
+            protocol_from_table,
+        )
+
+        assert "cegar_inner_initial" in SYNTHESIS_FIELDS
+        for table, inner in (
+            ({}, "satisfying"),
+            ({"initial": "collective"}, "collective"),
+            (
+                {"initial": "collective", "cegar_inner_initial": "satisfying"},
+                "satisfying",
+            ),
+            ({"cegar_inner_initial": "collective"}, "collective"),
+        ):
+            p = protocol_from_table(table)
+            assert p.cegar_inner_initial == inner, table
+            assert p.synthesis()["cegar_inner_initial"] == inner
+        with pytest.raises(ValueError, match="cegar_inner_initial"):
+            protocol_from_table({"cegar_inner_initial": "optimal"})
+        cfg = tmp_path / "c.toml"
+        cfg.write_text('[protocol]\ninitial = "collective"\n')
+        assert load_protocol(cfg).cegar_inner_initial == "collective"
+        # Logs: the first run (no initial) and the earlier revised sweeps
+        # (initial collective at every partition) do not record the field.
+        assert normalise_protocol({"max_iters": 30})["cegar_inner_initial"] == (
+            "satisfying"
+        )
+        old = {"max_iters": None, "initial": "collective"}
+        assert normalise_protocol(old)["cegar_inner_initial"] == "collective"
+        new = dict(old, cegar_inner_initial="satisfying")
+        assert normalise_protocol(new)["cegar_inner_initial"] == "satisfying"
+
     def test_run_overrides(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--max-iters also sets the CEGAR-NE bounds that the configuration leaves unset."""
         from experiments.run import main
@@ -184,6 +222,38 @@ class TestConfig:
         assert (p["cegar_inner_max_iters"], p["cegar_discrete_max_iters"]) == (30, None)
         p = listed("--config", smoke, "--cegar-discrete-max-iters", "3")
         assert p["max_iters"] is None and p["cegar_discrete_max_iters"] == 3
+        assert p["initial"] == "collective" and p["cegar_inner_initial"] == "satisfying"
+        p = listed("--config", smoke, "--cegar-inner-initial", "collective")
+        assert p["cegar_inner_initial"] == "collective"
+        # --initial leaves a cegar_inner_initial of the configuration alone ...
+        p = listed("--config", smoke, "--initial", "satisfying")
+        assert p["initial"] == "satisfying" and p["cegar_inner_initial"] == "satisfying"
+
+    def test_run_initial_sets_an_unset_inner_initial(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """... and sets one that the configuration does not set, like --max-iters."""
+        import ast
+
+        from experiments.run import main
+
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            '[protocol]\ntime_limit_s = 5\n[[instances]]\ngrid = "symmetric/3x2.txt"\n'
+            'agents = [2]\n[parameters]\nalgorithms = ["cegar-sibis"]\n'
+        )
+        for args, inner in (
+            ([], "satisfying"),
+            (["--initial", "collective"], "collective"),
+            (
+                ["--initial", "collective", "--cegar-inner-initial", "satisfying"],
+                "satisfying",
+            ),
+        ):
+            assert main(["--list", "--config", str(cfg), *args]) == 0
+            last = capsys.readouterr().out.strip().splitlines()[-1]
+            p = ast.literal_eval(last.split("protocol ", 1)[1])
+            assert p["cegar_inner_initial"] == inner, args
 
     def test_unknown_protocol_key(self, tmp_path: Path) -> None:
         cfg = tmp_path / "c.toml"
@@ -595,6 +665,7 @@ SYNTHESIS_KEYS = (
     "initial",
     "cegar_inner_max_iters",
     "cegar_discrete_max_iters",
+    "cegar_inner_initial",
 )
 INITIAL_KEYS = (
     "initial_query_s",
@@ -659,9 +730,14 @@ class TestRevisedProtocol:
         cg = by["n_cegar"]
         assert cg["cegar_initial_queries"] and cg["cegar_trace"]
         assert len(cg["cegar_initial_queries"]) == len(cg["cegar_trace"])
+        assert cg["cegar_trace"][0]["blocks"] < cg["num_sectors"]  # the orbit partition
         for call, row in zip(cg["cegar_initial_queries"], cg["cegar_trace"]):
             assert call["blocks"] == row["blocks"]
             assert call["initial_query_s"] == row["initial_query_s"]
+            # smt(F_hat) at a coarse partition, smt(F, f) of M at the discrete one.
+            discrete = call["blocks"] == cg["num_sectors"]
+            assert call["initial"] == ("collective" if discrete else "satisfying")
+            assert row["initial"] == call["initial"]
         assert (
             cg["initial_query_s"] == cg["cegar_initial_queries"][0]["initial_query_s"]
         )
@@ -686,6 +762,7 @@ class TestRevisedProtocol:
             Protocol(time_limit_s=3),  # the first run: N = 30, smt(F)
             replace(NEW_PROTOCOL, cegar_discrete_max_iters=30),
             replace(NEW_PROTOCOL, initial="satisfying"),
+            replace(NEW_PROTOCOL, cegar_inner_initial="collective"),
         ):
             for allow in (False, True):
                 with pytest.raises(ProtocolMismatchError, match="synthesis protocol"):
@@ -709,6 +786,62 @@ class TestRevisedProtocol:
             config_path=cfg,
         )
         assert len(recs) == 4
+
+    def test_earlier_revised_log_is_refused(
+        self, sweep_new: tuple[Path, list[dict]], tmp_path: Path
+    ) -> None:
+        """A log of the revised protocol before cegar_inner_initial is not resumed.
+
+        Its header records initial = "collective" and no cegar_inner_initial:
+        its coarse inner calls posed smt(F_hat, f), so it reads as
+        cegar_inner_initial = "collective", and the smoke and thesis
+        protocols, which pose smt(F_hat) there, refuse it, even with
+        allow_mixed.
+        """
+        from dataclasses import replace
+
+        from experiments.runner import ProtocolMismatchError, check_resume
+
+        out, _ = sweep_new
+        lines = out.read_text().splitlines()
+        header = json.loads(lines[0])
+        header["protocol"].pop("cegar_inner_initial")
+        runs = [json.loads(x) for x in lines[1:]]
+        for r in runs:
+            r.pop("cegar_inner_initial", None)
+        old = tmp_path / "smoke-30.jsonl"
+        old.write_text("\n".join(json.dumps(x) for x in [header, *runs]) + "\n")
+        cfg = ROOT / "experiments" / "smoke.toml"
+        smoke = load_protocol(cfg)
+        check = check_resume(old, protocol=smoke, config_path=cfg)
+        assert check.status == "protocol"
+        assert "inner initial collective (coarse)" in check.problems[0]
+        assert "inner initial satisfying (coarse)" in check.problems[0]
+        assert (
+            check_resume(
+                old, protocol=load_protocol(ROOT / "experiments" / "thesis-eval.toml")
+            ).status
+            == "protocol"
+        )
+        sc = [_sc("n_sibis", "symmetric/3x2.txt", 2, "sibis")]
+        for allow in (False, True):
+            with pytest.raises(ProtocolMismatchError):
+                run_batch(
+                    sc,
+                    protocol=NEW_PROTOCOL,
+                    output_path=old,
+                    resume=True,
+                    progress=False,
+                    config_path=cfg,
+                    allow_mixed=allow,
+                )
+        # With the setting of that sweep the log reads as before.
+        before = replace(NEW_PROTOCOL, cegar_inner_initial="collective")
+        assert check_resume(old, protocol=before, config_path=cfg).status == "ok"
+        # The loaders read its records the same way.
+        assert (
+            load(old, run_number=None).protocol["cegar_inner_initial"] == "collective"
+        )
 
     def test_first_run_log_is_refused(
         self, sweep: tuple[Path, list[dict]], tmp_path: Path
@@ -803,6 +936,8 @@ class TestRevisedProtocol:
         new = load(sweep_new[0], run_number=None)
         assert old.max_iters == 30 and new.max_iters is None
         assert new.protocol["initial"] == "collective"
+        assert new.protocol["cegar_inner_initial"] == "satisfying"
+        assert old.protocol["cegar_inner_initial"] == "satisfying"
         assert not new.problems
         a_new, a_old = Analysis(new), Analysis(old)
         f = facts(a_new)
@@ -813,6 +948,14 @@ class TestRevisedProtocol:
         assert f["outcomes_by_reason"]["S-IBIS"] == {"ne": 1}
         report, _ = build_report(a_new, [], [], {"results": "new"})
         assert "direct runs N = none, initial play smt(F, f)" in report
+        assert (
+            "CEGAR-NE inner initial play smt(F) (satisfying) of the abstract game at "
+            "a coarse and smt(F, f) (collective) of M at the discrete partition"
+        ) in report
+        assert (
+            "At a coarse partition it is smt(F) (satisfying) of the abstract game"
+            in (report)
+        )
         assert "| S-IBIS | 1 of 1 | 1 | 1 of 1 |" in report
         f_old = facts(a_old)
         assert "outcomes_by_reason" in f_old
@@ -823,7 +966,11 @@ class TestRevisedProtocol:
         stripped = tmp_path / "first.jsonl"
         rows = [json.loads(x) for x in sweep[0].read_text().splitlines()]
         for r in rows:
-            for key in INITIAL_KEYS + ("initial", "cegar_inner_max_iters"):
+            for key in INITIAL_KEYS + (
+                "initial",
+                "cegar_inner_max_iters",
+                "cegar_inner_initial",
+            ):
                 r.pop(key, None)
         stripped.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         a_first = Analysis(load(stripped, run_number=None))
@@ -1043,6 +1190,15 @@ class TestPreviousSweep:
             "smoke-10.jsonl",
         ]
         assert rep.exists()
+
+    def test_first_protocol_needs_smt_F_at_every_partition(self) -> None:
+        from experiments.previous import is_first_protocol
+
+        first = {"max_iters": 30}
+        assert is_first_protocol(first)
+        assert is_first_protocol(dict(first, cegar_inner_initial="satisfying"))
+        assert not is_first_protocol(dict(first, cegar_inner_initial="collective"))
+        assert not is_first_protocol(dict(first, initial="collective"))
 
     def test_discard_for_the_smoke_test(
         self, sweep: tuple[Path, list[dict]], tmp_path: Path

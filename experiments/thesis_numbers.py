@@ -40,8 +40,9 @@ thesis from the examined log, see ``tests/test_experiments.py``):
 The report reads logs of both protocols of the evaluation: the first run
 (iteration bound ``N = 30`` everywhere, initial play from ``smt(F)``) and the
 revised protocol (no bound for the direct runs, initial play from
-``smt(F, f)``, CEGAR-NE inner bound 30 at a coarse and none at the discrete
-partition).  Besides the markers it reports the protocol of the log, the
+``smt(F, f)``; for the inner calls of CEGAR-NE the bound 30 and the initial
+play from ``smt(F)`` of the abstract game at a coarse partition, and no
+bound and ``smt(F, f)`` at the discrete partition).  Besides the markers it reports the protocol of the log, the
 share of returned equilibria in which every agent has reward ``m``, the
 runs that returned their initial play, the median time of the initial query
 per algorithm with and without symmetry reduction (a run whose initial query
@@ -307,13 +308,20 @@ def bound_text(n: int | None) -> str:
     return "none" if n is None else str(n)
 
 
+def _query_text(initial: Any) -> str:
+    return f"{'smt(F, f)' if initial == 'collective' else 'smt(F)'} ({initial})"
+
+
 def protocol_text(p: dict[str, Any]) -> str:
+    """The synthesis protocol of a log in one line (fields of ``Run.protocol``)."""
+    inner = p.get("cegar_inner_initial", p.get("initial"))
     return (
         f"direct runs N = {bound_text(p.get('max_iters'))}, initial play "
-        f"{'smt(F, f)' if p.get('initial') == 'collective' else 'smt(F)'} "
-        f"({p.get('initial')}), CEGAR-NE inner N = "
+        f"{_query_text(p.get('initial'))}, CEGAR-NE inner N = "
         f"{bound_text(p.get('cegar_inner_max_iters'))} at a coarse and "
-        f"{bound_text(p.get('cegar_discrete_max_iters'))} at the discrete partition"
+        f"{bound_text(p.get('cegar_discrete_max_iters'))} at the discrete partition, "
+        f"CEGAR-NE inner initial play {_query_text(inner)} of the abstract game at "
+        f"a coarse and {_query_text(p.get('initial'))} of M at the discrete partition"
     )
 
 
@@ -2036,12 +2044,17 @@ def _initial_section(a: Analysis) -> list[str]:
         )
     lines.append("")
     if any(alg.startswith("cegar") for alg in a.algs):
+        ps = a.d.protocols or [a.protocol]
+        coarse = sorted({_query_text(p.get("cegar_inner_initial")) for p in ps})
+        discrete = sorted({_query_text(p.get("initial")) for p in ps})
         lines.append(
             "For CEGAR-NE the initial query of a run is that of its first inner "
             "call, posed on the game of the initial partition: the abstract game, "
-            "with weighted rewards, unless that partition is discrete. It is not "
-            "smt(F, f) of M, and every later inner call poses an initial query of "
-            "its own (the totals per run are below)."
+            "with weighted rewards, unless that partition is discrete. At a coarse "
+            f"partition it is {' or '.join(coarse)} of the abstract game, at the "
+            f"discrete partition {' or '.join(discrete)} of M, and every later "
+            "inner call poses an initial query of its own (the totals per run are "
+            "below)."
         )
         lines.append("")
     lines.append(

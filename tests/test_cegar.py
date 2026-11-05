@@ -37,6 +37,7 @@ from rcmas.smt_solve import build_base_encoding  # noqa: E402
 from rcmas.strategy import Play, canonical_completion, default_action  # noqa: E402
 
 from .brute_force import best_deviation, is_equilibrium, random_play  # noqa: E402
+from .replay import QueryReplay, disable_skip  # noqa: E402
 
 GRID_4x2 = ["....", "...."]
 GRID_6x2 = ["......", "......"]
@@ -142,11 +143,13 @@ class TestVerifyNE:
             assert vr.status in ("verified", "counterexample")
             seen[vr.status] += 1
             assert (vr.status == "verified") == is_equilibrium(play, nbrs, demands)
+            # One query per agent below R_max = m, none for an agent at m.
+            below = [r[b] < base.max_reward for b in range(n)]
             if vr.status == "verified":
-                assert vr.queries == n
+                assert vr.queries == sum(below)
                 continue
             a = vr.agent
-            assert vr.queries == a + 1
+            assert below[a] and vr.queries == sum(below[: a + 1])
             # The agents before a cannot improve; a can, and its deviation is
             # an admissible run against the canonical completion.
             completion = canonical_completion(play)
@@ -163,17 +166,103 @@ class TestVerifyNE:
                             dev.states[t_], b
                         )
 
-    def test_known_equilibrium(self, territory_2x1: Territory) -> None:
+    def test_known_equilibrium(self, monkeypatch, territory_2x1: Territory) -> None:
+        """Both rewards are m = 1: verified without a query; posed, both are unsat."""
         base = build_base_encoding(territory=territory_2x1, num_agents=2, horizon=1)
+        vr = verify_ne(base, Play.from_actions(2, 2, [[0, 1]]))
+        assert vr.status == "verified" and vr.agent is None and vr.queries == 0
+        disable_skip(monkeypatch)
         vr = verify_ne(base, Play.from_actions(2, 2, [[0, 1]]))
         assert vr.status == "verified" and vr.agent is None and vr.queries == 2
 
     def test_unknown_is_not_unsat(self, monkeypatch, territory_2x2: Territory) -> None:
         base = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
-        play = Play.from_actions(4, 2, [[0, 1], [2, 3]])
+        play = Play.from_actions(4, 2, [[0, 1], [3, 2]])  # rewards (1, 1) < m = 2
         monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
         vr = verify_ne(base, play)
         assert vr.status == "unknown" and vr.agent == 0 and vr.queries == 1
+
+    def test_no_query_for_an_agent_at_the_bound(
+        self, monkeypatch, territory_2x2: Territory
+    ) -> None:
+        """r_a = R_max: F implies reward_a <= R_max, so VerifyNE poses no query for a."""
+        import rcmas.cegar as cegar_mod
+
+        t = _t(["...", "..."])
+        base = build_base_encoding(territory=t, num_agents=3, horizon=2)
+        nb = t.neighbor_map()
+        asked: list[int] = []
+        real = cegar_mod.check_improvement_from_base
+
+        def spy(b, **kw):
+            asked.append(kw["agent"])
+            return real(b, **kw)
+
+        monkeypatch.setattr(cegar_mod, "check_improvement_from_base", spy)
+        # Tool agent 1 holds the adjacent sectors 1 and 2 (reward m = 2);
+        # agents 0 and 2 hold two sectors that are not adjacent (reward 1).
+        play = Play.from_actions(6, 3, [[0, 1, 3], [4, 2, 5]])
+        assert play.rewards(nb) == (1, 2, 1)
+        vr = verify_ne(base, play)
+        assert vr.status in ("verified", "counterexample")
+        assert (vr.status == "verified") == is_equilibrium(play, nb)
+        assert 1 not in asked and asked == [0, 2][: vr.queries]
+        # Every agent at m: verified without a query, even if Z3 could not answer.
+        base2 = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
+        nb2 = territory_2x2.neighbor_map()
+        asked.clear()
+        monkeypatch.setattr(smt_solve, "_check", lambda solver, *a: z3.unknown)
+        top = Play.from_actions(4, 2, [[0, 1], [2, 3]])
+        assert top.rewards(nb2) == (2, 2) and is_equilibrium(top, nb2)
+        vr = verify_ne(base2, top)
+        assert vr.status == "verified" and vr.queries == 0 and asked == []
+
+    @pytest.mark.parametrize(
+        "rows, n, demands",
+        [
+            (["...", "..."], 3, None),
+            (["....", "...."], 2, None),
+            (["..#", "...", ".#."], 2, (1, 1)),
+            (["....", "...."], 4, None),
+        ],
+    )
+    def test_same_verdict_with_and_without_the_skip(
+        self, monkeypatch, rows, n, demands
+    ) -> None:
+        """The skip changes the number of queries only: same status, same agent."""
+        t = _t(rows)
+        nbrs = t.neighbor_map()
+        m = len(t) // n
+        base = build_base_encoding(
+            territory=t, num_agents=n, horizon=m, demands=demands
+        )
+        d = demands or (0,) * n
+        rng = random.Random(len(t) + 7 * n)
+        plays = []
+        while len(plays) < 12:
+            play = random_play(len(t), n, m, rng)
+            if all(x >= y for x, y in zip(play.rewards(nbrs), d)):
+                plays.append(play)
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = [verify_ne(base, p) for p in plays]
+        posed = replay.replay()
+        skipped = [verify_ne(base, p) for p in plays]
+        skips = 0
+        for p, a, b in zip(plays, full, skipped):
+            assert (a.status, a.agent) == (b.status, b.agent)
+            assert (b.status == "verified") == is_equilibrium(p, nbrs, demands)
+            r = p.rewards(nbrs)
+            stop = n if a.agent is None else a.agent + 1
+            assert a.queries == stop
+            assert b.queries == sum(r[x] < m for x in range(stop))
+            skips += a.queries - b.queries
+        # Every query the skip leaves out has reward_a > m and is unsatisfiable.
+        left_out = [k for k in posed if k not in replay.posed]
+        assert skips > 0 and len(left_out) == skips  # the skip is exercised
+        assert all(k[4] == m for k in left_out)
+        assert all(not replay.answers[k].is_sat for k in left_out)
 
     def test_wrong_game_rejected(self, territory_2x2: Territory) -> None:
         base = build_base_encoding(territory=territory_2x2, num_agents=2, horizon=2)
@@ -272,7 +361,24 @@ class TestExamples:
         claims = {res.play.claims_of(0), res.play.claims_of(1)}
         assert claims == {(0, 1, 4, 5), (2, 3, 6, 7)}
         assert res.trace[0].abstract_rewards == (4, 4)
-        assert res.trace[0].verify_queries == 2
+        # Both agents have reward m = 4, so VerifyNE poses no query (both
+        # queries reward_a > 4 are unsatisfiable, since F implies reward_a <= 4).
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 0
+
+    def test_example_6_3_2_iteration_1_with_every_verify_query(
+        self, monkeypatch
+    ) -> None:
+        """Example 6.3.2 as written: VerifyNE poses both queries, both unsatisfiable."""
+        disable_skip(monkeypatch)
+        t = _t(GRID_4x2)
+        halves = Partition.from_blocks([{0, 1, 4, 5}, {2, 3, 6, 7}], 8)
+        res = solve_cegar(
+            territory=t, num_agents=2, initial_partition=halves, demands=(1, 1)
+        )
+        _check_run(res, t, 2, (1, 1))
+        assert res.outcome == "ne" and res.iterations == 1
+        assert res.payoff_by_agent == (4, 4)
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 2
 
     def test_example_6_3_2_alternative_scenario(self) -> None:
         """Example 6.3.2: m_hat = 0, no satisfying abstract strategy, bisect {1,2,3,7,8,9}."""
@@ -625,6 +731,7 @@ class TestLimitsAndParameters:
         """Options of the named synthesisers are refused with a callable (review-9)."""
         for kw in (
             {"initial": "collective"},
+            {"inner_initial": "satisfying"},
             {"discrete_max_iters": None},
             {"inner_max_iters": 30},
             {"max_iters": None},
@@ -656,7 +763,20 @@ class TestLimitsAndParameters:
         )
         _check_run(res, territory_2x2, 2, None)
         assert res.outcome == "ne" and res.at_discrete and res.reason == "ne"
-        assert res.trace[0].verify_queries == 2
+        assert res.trace[0].check == "verified"
+        r = res.trace[0].lifted_rewards
+        assert res.trace[0].verify_queries == sum(x < 2 for x in r)
+
+    def test_discrete_partition_is_verified_with_every_query(
+        self, monkeypatch, territory_2x2
+    ) -> None:
+        disable_skip(monkeypatch)
+        res = solve_cegar(
+            territory=territory_2x2, num_agents=2, initial_partition="discrete"
+        )
+        _check_run(res, territory_2x2, 2, None)
+        assert res.outcome == "ne" and res.at_discrete
+        assert res.trace[0].check == "verified" and res.trace[0].verify_queries == 2
 
 
 # ---------------------------------------------------------------------------
@@ -830,3 +950,212 @@ class TestProtocolBounds:
             solve_cegar(territory=territory_2x2, num_agents=2, discrete_max_iters=-1)
         with pytest.raises(ValueError, match="initial"):
             solve_cegar(territory=territory_2x2, num_agents=2, initial="best")
+        with pytest.raises(ValueError, match="inner_initial"):
+            solve_cegar(territory=territory_2x2, num_agents=2, inner_initial="best")
+        with pytest.raises(ValueError, match="inner_initial"):
+            make_synthesiser("sibis", inner_initial="best")
+
+
+# ---------------------------------------------------------------------------
+# The initial query of an inner call: smt(F_hat) coarse, smt(F, f) discrete
+# ---------------------------------------------------------------------------
+
+
+def _spy_initial_queries(monkeypatch) -> list[tuple[bool, str]]:
+    """Record (on M?, query) of every initial query that an inner IBIS/S-IBIS/Q-IBIS poses."""
+    import rcmas.ibis as ibis_mod
+
+    calls: list[tuple[bool, str]] = []
+    real = ibis_mod.initial_from_base
+
+    def spy(base, **kw):
+        calls.append((base.variables.weights is None, kw["initial"]))
+        return real(base, **kw)
+
+    monkeypatch.setattr(ibis_mod, "initial_from_base", spy)
+    return calls
+
+
+class TestInnerInitial:
+    def test_coarse_satisfying_discrete_collective(self, monkeypatch) -> None:
+        """Every coarse call poses smt(F_hat), the call at P_bot smt(F, f) of M.
+
+        Every coarse run ends at its bound, so CEGAR-NE bisects from the
+        trivial partition down to the discrete one (Theorem 6.4.2).
+        """
+        inner = _spy_inner(monkeypatch, fail_coarse=True)
+        posed = _spy_initial_queries(monkeypatch)
+        seen = []
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            initial_partition="trivial",
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+            on_initial=seen.append,
+        )
+        _check_run(res, t, 2, None)
+        assert [c for c, _, _ in inner] == [False] * (len(t) - 1) + [True]
+        assert [q for *_, q in inner] == ["satisfying"] * (len(t) - 1) + ["collective"]
+        assert posed == [(c, q) for c, _, q in inner]  # one query per call, on its game
+        assert [row.initial for row in res.trace] == [q for _, q in posed]
+        assert [info.initial for info in seen] == [q for _, q in posed]
+        assert [info.blocks for info in seen] == [row.blocks for row in res.trace]
+        assert res.trace[-1].blocks == len(t) and res.at_discrete == res.found_ne
+
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_orbit_partition_of_the_thesis_protocol(self, monkeypatch, symmetry):
+        """The protocol of Chapter 7 on 4x2: coarse calls from smt(F_hat), with symmetry too."""
+        posed = _spy_initial_queries(monkeypatch)
+        t = _t(GRID_4x2)
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            symmetry=symmetry,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+        )
+        _check_run(res, t, 2, None)
+        _sound_inner(res)
+        assert len(posed) == len(res.trace) and res.trace[0].blocks < len(t)
+        for (concrete, q), row in zip(posed, res.trace):
+            assert concrete == (row.blocks == len(t))
+            assert q == ("collective" if concrete else "satisfying") == row.initial
+
+    def test_discrete_orbit_partition_starts_from_smt_F_f(self, monkeypatch) -> None:
+        """When P_0 is discrete the only call is a direct run on M, from smt(F, f)."""
+        posed = _spy_initial_queries(monkeypatch)
+        t = _t(["..#", "...", ".#."])  # asymmetric: every orbit is one sector
+        res = solve_cegar(
+            territory=t,
+            num_agents=2,
+            discrete_max_iters=None,
+            initial="collective",
+            inner_initial="satisfying",
+        )
+        _check_run(res, t, 2, None)
+        assert res.initial_partition_size == len(t)
+        assert posed == [(True, "collective")] and res.trace[0].initial == "collective"
+
+    def test_default_and_reversed(self, monkeypatch) -> None:
+        """inner_initial defaults to initial; each applies to its own partitions."""
+        inner = _spy_inner(monkeypatch, fail_coarse=True)
+        t = _t(GRID_4x2)
+        kw = dict(territory=t, num_agents=2, initial_partition="trivial")
+        solve_cegar(**kw, initial="collective")
+        assert {q for *_, q in inner} == {"collective"}
+        inner.clear()
+        solve_cegar(**kw, initial="satisfying", inner_initial="collective")
+        assert {q for c, _, q in inner if not c} == {"collective"}
+        assert [q for c, _, q in inner if c] == ["satisfying"]
+
+    @pytest.mark.parametrize("name", ["ibis", "sibis", "qibis"])
+    def test_make_synthesiser(self, monkeypatch, name) -> None:
+        """make_synthesiser passes inner_initial at a coarse and initial at P_bot."""
+        import rcmas.ibis as ibis_mod
+        import rcmas.qibis as qibis_mod
+
+        used: list[tuple[bool, str]] = []
+
+        def fake_direct(**kw):
+            used.append((kw["weights"] is None, kw["initial"]))
+            raise StopIteration
+
+        def fake_qibis(**kw):
+            used.append((kw["weights"] is None, kw["cfg"].initial))
+            raise StopIteration
+
+        monkeypatch.setattr(ibis_mod, "solve_ibis", fake_direct)
+        monkeypatch.setattr(ibis_mod, "solve_sibis", fake_direct)
+        monkeypatch.setattr(qibis_mod, "solve_qibis", fake_qibis)
+        t = _t(GRID_4x2)
+        coarse = synthesis_game(build_abstract_rcmas(t, 2, orbit_partition(t)))
+        fine = synthesis_game(build_abstract_rcmas(t, 2, discrete_partition(t)))
+        assert not coarse.is_concrete and fine.is_concrete
+        synth = make_synthesiser(name, initial="collective", inner_initial="satisfying")
+        default = make_synthesiser(name, initial="collective")
+        for s, game in ((synth, coarse), (synth, fine), (default, coarse)):
+            with pytest.raises(StopIteration):
+                s(game)
+        assert used == [
+            (False, "satisfying"),
+            (True, "collective"),
+            (False, "collective"),
+        ]
+
+
+class TestRewardBoundInCegar:
+    @pytest.mark.parametrize(
+        "rows, n, demands, initial",
+        [
+            (GRID_4x2, 2, None, "collective"),
+            (GRID_3x3, 3, None, "satisfying"),
+            (["..#", "...", ".#."], 2, (1, 1), "satisfying"),
+            (["...", "..."], 3, None, "collective"),
+        ],
+    )
+    def test_same_run_with_and_without_the_skip(
+        self, monkeypatch, rows, n, demands, initial
+    ) -> None:
+        """Skipping the queries of agents at R_max (inner runs, VerifyNE) changes no run.
+
+        The run without the skip poses every query, and the run with it is
+        answered from that record (``tests/replay.py``).
+        """
+        t = _t(rows)
+        kw = dict(
+            territory=t,
+            num_agents=n,
+            demands=demands,
+            symmetry=True,
+            inner_max_iters=30,
+            discrete_max_iters=None,
+            initial=initial,
+            inner_initial="satisfying",
+        )
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = solve_cegar(**kw)
+        recorded = replay.replay()
+        fast = solve_cegar(**kw)
+        _check_run(fast, t, n, demands)
+
+        def rows_of(res):
+            return [
+                (
+                    r.blocks,
+                    r.synthesis,
+                    r.inner_iterations,
+                    r.abstract_rewards,
+                    r.lifted_rewards,
+                    r.check,
+                    r.agent,
+                    r.deviation_size,
+                    r.refinement,
+                    r.blocks_after,
+                    r.initial,
+                )
+                for r in res.trace
+            ]
+
+        assert (fast.outcome, fast.reason, fast.iterations) == (
+            full.outcome,
+            full.reason,
+            full.iterations,
+        )
+        assert fast.play == full.play and fast.rewards == full.rewards
+        assert rows_of(fast) == rows_of(full)
+        left_out = [k for k in replay.best_responses(recorded) if k not in replay.posed]
+        assert left_out, "the case must exercise the skip"
+        m = len(t) // n
+        verify = [k for k in left_out if k[0] == "verify"]
+        assert all(k[4] == m and not replay.answers[k].is_sat for k in verify)
+        assert sum(r.verify_queries for r in full.trace) - sum(
+            r.verify_queries for r in fast.trace
+        ) == len(verify)

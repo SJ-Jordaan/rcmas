@@ -26,6 +26,12 @@ play that has not occurred before.
 IBIS computes each best response with the optimisation query
 ``smt(G_a(pi^i), reward_a)``; S-IBIS uses the feasibility filter and binary
 search of Algorithm 2, which give the same potentials (Theorem 4.8.1).
+Neither poses a query for an agent whose reward is already ``R_max``
+(``m``, or the largest total weight of ``m`` sectors in an abstract game):
+``F`` implies ``reward_a <= R_max``, so its potential is 0
+(:func:`at_reward_bound`).  This changes only the number of queries; from
+an initial play in which every agent has reward ``m`` a run returns in
+iteration 0 without a best-response query.
 When Z3 answers a query with unknown, the initial query included, the run
 stops with outcome ``"unk"`` (Section 7.1).
 
@@ -291,12 +297,27 @@ def iteration_indices(max_iters: int | None) -> Iterable[int]:
 # ---------------------------------------------------------------------------
 
 
+def at_reward_bound(base: BaseEncoding, current: tuple[int, ...], agent: int) -> bool:
+    """``r_a(pi) = R_max``: *agent* cannot improve, so no query is needed.
+
+    ``F`` implies ``reward_a <= R_max`` (every agent controls exactly ``m``
+    sectors of a collision-free final state, Lemma 3.10.1, and the witness
+    region lies among them, Lemma 4.3.1), so ``BR_a(pi) <= R_max`` and the
+    improvement potential of an agent at the bound is 0.  An agent with
+    potential 0 is never the one updated, so skipping its query leaves the
+    run unchanged apart from the number of queries.
+    """
+    return current[agent] >= base.max_reward
+
+
 def smt_best_response(
     base: BaseEncoding, timeout_ms: int | None = None
 ) -> BestResponseFn:
     """IBIS best response: the optimisation query ``smt(G_a(pi), reward_a)`` (line 9)."""
 
     def br(play: Play, agent: int, current: tuple[int, ...]) -> BestResponse:
+        if at_reward_bound(base, current, agent):
+            return BestResponse("ok", current[agent], None, None, 0)
         sol = best_response_from_base(base, play, agent, timeout_ms=timeout_ms)
         if sol.reason == "unknown":
             return BestResponse("unknown", current[agent], None, None, 1)
@@ -316,6 +337,8 @@ def binsearch_best_response(
     """S-IBIS best response: feasibility filter and binary search (lines 11-24 of Algorithm 2)."""
 
     def br(play: Play, agent: int, current: tuple[int, ...]) -> BestResponse:
+        if at_reward_bound(base, current, agent):
+            return BestResponse("ok", current[agent], None, None, 0)
         res = best_response_binsearch_from_base(
             base, play, agent, current_reward=current[agent], timeout_ms=timeout_ms
         )

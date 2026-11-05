@@ -39,15 +39,15 @@ results depend on the solver version.
 | `smt_constraints.py` | Secs 4.2-4.7, Ch5 | `[Init]`, `[Evol]`, `[Prot]`, `[Dom]`, `[Wit]`, `[Rew]`, `[phi_sat]`, implied bound `reward_a <= R_max`, opponent constraint `[Fix^a_pi]` (Def 4.7.1), `[Cand]`; symmetry constraints (`symmetry_plan_constraint`; the local constraint restricts agent 1's first action only) |
 | `smt_objectives.py` | Secs 4.6, 4.7 | `collective_objective` (Def 4.6.1), `individual_objective` |
 | `smt_solve.py` | Ch4, Sec 7.1 | Cached formula F (`build_base_encoding`, no symmetry inside), `find_feasible_from_base`, initial query `initial_from_base` (`satisfying` smt(F) or `collective` smt(F, f)), BR query `best_response_from_base`, `check_improvement_from_base`, S-IBIS binary search, `symmetry_constraints` (initial queries only); Z3 unknown -> reason `unknown` |
-| `ibis.py` | Algs 1, 2 (Secs 4.7, 4.8) | IBIS / S-IBIS on a single play; `run_ibis_loop` (`max_iters=None`: no bound, stops at recurrence); `initial_play_of` / `InitialPlay` (initial query, its time, `on_initial` hook); outcomes `ne`/`n/c`/`unk`/`uns` |
+| `ibis.py` | Algs 1, 2 (Secs 4.7, 4.8) | IBIS / S-IBIS on a single play; `run_ibis_loop` (`max_iters=None`: no bound, stops at recurrence); `initial_play_of` / `InitialPlay` (initial query, its time, `on_initial` hook); `at_reward_bound` (no BR query for an agent with `r_a = R_max`, also in Q-IBIS and VerifyNE); outcomes `ne`/`n/c`/`unk`/`uns` |
 | `qlearning.py` | Secs 2.4, 4.9 | Q-IBIS learner (index-based TrainQ, shaped reward, epsilon-greedy, TopK) + self-play trainer for `rcmas train` |
 | `qibis.py` | Alg 3 (Sec 4.9) | Q-IBIS: restricted queries plus a certification round; `QibisConfig` holds the RL hyperparameters and seed |
 | `symmetry.py` | Ch5 (Defs 5.1.1-5.2.3, Thm 5.3.2) | `H_geo` (geometric subgroup, not Aut(T)), orbits/Reps, local `BP(H_R)`, component copy classes and group H, `SymmetryBreaking` plan (`symmetry_breaking_plan`, `.admits`) |
 | `abstraction.py` | Defs 6.1.1-6.3.3, Sec 6.5 | `Partition`, `orbit_partition` (orbits of the group the Ch5 constraints use), `AbstractRCMAS` (block weights/adjacency, `rewards_of`), weighted-graph symmetry, `lift_play`, deviation set, `refine_partition`, `bfs_bisect` |
-| `cegar.py` | Alg 4 (Ch6) | CEGAR-NE: SynthesiseNE (bounds `inner_max_iters` at a coarse, `discrete_max_iters` at the discrete partition; `...` = `max_iters`, `None` = no bound; a callable synthesiser refuses these, `initial` and `seed`), lift, satisfaction check, `verify_ne` (one query per agent, no symmetry), refine |
+| `cegar.py` | Alg 4 (Ch6) | CEGAR-NE: SynthesiseNE (bounds `inner_max_iters` at a coarse, `discrete_max_iters` at the discrete partition; `...` = `max_iters`, `None` = no bound; initial query `inner_initial` at a coarse, `initial` at the discrete partition; `...` = `initial`; a callable synthesiser refuses these and `seed`), lift, satisfaction check, `verify_ne` (one query per agent below `R_max`, no symmetry), refine |
 | `certify.py` | Sec 7.5 | Independent pure-Python certifier (own replay, phi_sat, rewards and canonical completion, memoised BR search); `rcmas certify --results` |
 | `cli.py` | Sec 7.1 | CLI: co, ibis, sibis, qibis, cegar, train, certify |
-| `experiments/config.py` | Sec 7.2 | TOML configs; `Protocol` (`max_iters`, `initial`, `cegar_inner_max_iters`, `cegar_discrete_max_iters`; bound `"none"` in TOML = `None`) |
+| `experiments/config.py` | Sec 7.2 | TOML configs; `Protocol` (`max_iters`, `initial`, `cegar_inner_max_iters`, `cegar_discrete_max_iters`, `cegar_inner_initial`; bound `"none"` in TOML = `None`; a missing `cegar_inner_initial` = `initial`) |
 | `experiments/runner.py` | Sec 7.2 | One fresh spawned process per run, wall-clock limit enforced by the parent, inline certification, provenance header, resumable JSONL; records protocol and `initial_*` fields; refuses to resume across synthesis protocols (`check_resume`) |
 | `experiments/previous.py` | Sec 7.2 | `reproduce.sh` helper: logs of another protocol -> message, `--archive` moves only those logs (with their certificates; encoding/assets/numbers only with the main log) to `results/first-run-n30/`, `--discard` for smoke |
 | `experiments/thesis_assets.py` | Table 7.1, Figs 7.2-7.3, Table A.1 | Generates the `.tex` files the thesis inputs |
@@ -104,7 +104,7 @@ satisfying) picks smt(F) or smt(F, f) for the initial play. Exit code 0 only for
 | `rcmas ibis` | IBIS (Algorithm 1) | `--symmetry`, `--max-iters`, `--initial`, `--timeout-ms`, `--progress`, `--timing`, `--render` |
 | `rcmas sibis` | S-IBIS (Algorithm 2) | Same as ibis |
 | `rcmas qibis` | Q-IBIS (Algorithm 3) | Same as ibis, plus `--seed`, `--top-k`; other RL hyperparameters live in `QibisConfig` |
-| `rcmas cegar` | CEGAR-NE (Algorithm 4) | `--partition` (default orbit), `--synthesiser` (default sibis), `--max-iters` = inner N, `--inner-max-iters`, `--discrete-max-iters`, `--initial`, `--seed`, `--symmetry` |
+| `rcmas cegar` | CEGAR-NE (Algorithm 4) | `--partition` (default orbit), `--synthesiser` (default sibis), `--max-iters` = inner N, `--inner-max-iters`, `--discrete-max-iters`, `--initial` (discrete partition), `--inner-initial` (coarse; default `--initial`), `--seed`, `--symmetry` |
 | `rcmas train` | Q-learning self-play | Hard-coded: 2000 episodes |
 | `rcmas certify` | Re-check logged equilibria without SMT | `--results LOG.jsonl`, `--grid-root`, `--timeout`, `--output`, `--verbose` |
 
@@ -117,8 +117,8 @@ satisfying) picks smt(F) or smt(F, f) for the initial play. Exit code 0 only for
 ```
 
 Benchmark: `experiments/thesis-eval.toml` (revised protocol: `max_iters = "none"`, `initial = "collective"`,
-CEGAR-NE inner bound 30 coarse / none discrete); `experiments/thesis-eval-n30.toml` = protocol of the first run
-(N = 30 everywhere, smt(F)); with `--config` of a suite other than thesis-eval, reproduce.sh names the derived outputs
+CEGAR-NE inner bound 30 coarse / none discrete, `cegar_inner_initial = "satisfying"`, i.e. smt(F_hat) coarse /
+smt(F, f) discrete); `experiments/thesis-eval-n30.toml` = protocol of the first run (N = 30 and smt(F) everywhere); with `--config` of a suite other than thesis-eval, reproduce.sh names the derived outputs
 `SUITE-encoding-build.jsonl`, `SUITE-assets/`, `SUITE-numbers.md` and refuses `--thesis-dir`. Logs of the examined thesis: `results/examined/` (no plays, so
 not certifiable; read with `--no-certificate-required`); older pre-revision logs in `results/examined/legacy/`.
 

@@ -20,6 +20,7 @@ from rcmas.model import Territory, rewards_from_owner
 from rcmas.strategy import CanonicalCompletion, Play
 
 from .brute_force import best_deviation, is_equilibrium, max_welfare
+from .replay import QueryReplay, disable_skip
 
 z3 = pytest.importorskip("z3")
 
@@ -122,18 +123,33 @@ class TestExample471:
         assert res.trace[0].chosen == 0
         assert res.rewards is not None and res.rewards[0] == 3
 
-    def test_smt_sibis_iteration_0_four_checks(self):
-        """Example 4.8.1: four satisfiability checks in iteration 0."""
+    def test_smt_sibis_iteration_0_four_checks(self, monkeypatch):
+        """Example 4.8.1: four satisfiability checks in iteration 0.
+
+        Agents b and c have reward m = 4, so the tool poses no query for
+        them (``at_reward_bound``): two checks for a.  With the skip
+        disabled it poses the four checks of the example, the filters of b
+        and c among them, which are unsatisfiable.
+        """
         t = Territory.from_ascii(RUNNING)
-        res = solve_sibis(
-            territory=t,
-            num_agents=3,
-            demands=(2, 2, 2),
-            initial_play=_fig_3_1_play(),
-            max_iters=0,
-        )
+
+        def run():
+            return solve_sibis(
+                territory=t,
+                num_agents=3,
+                demands=(2, 2, 2),
+                initial_play=_fig_3_1_play(),
+                max_iters=0,
+            )
+
+        res = run()
+        assert res.trace[0].rewards == (2, 4, 4)
         assert res.trace[0].improvement == (1, 0, 0)
-        assert res.trace[0].checks == 4
+        assert res.trace[0].checks == 2
+        disable_skip(monkeypatch)
+        full = run()
+        assert full.trace[0].improvement == (1, 0, 0)
+        assert full.trace[0].checks == 4
 
 
 # ===================================================================
@@ -311,19 +327,28 @@ class TestOutcomes:
         assert res.outcome == "unk" and res.reason == "unknown"
 
     @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
-    def test_unknown_in_best_response_stops(self, monkeypatch, solver):
+    @pytest.mark.parametrize("call", [1, 2])
+    def test_unknown_in_best_response_stops(self, monkeypatch, solver, call):
+        """An unknown best-response check stops the run with ``unk``.
+
+        The initial play is given, with rewards (1, 1) below m = 4, so that
+        both agents are queried in iteration 0 (an agent at m is not) and
+        the first two checks are best-response checks.
+        """
         real = smt_solve._check
         calls = {"n": 0}
 
-        def third_unknown(s, *a):
+        def nth_unknown(s, *a):
             calls["n"] += 1
-            return z3.unknown if calls["n"] == 3 else real(s, *a)
+            return z3.unknown if calls["n"] == call else real(s, *a)
 
-        monkeypatch.setattr(smt_solve, "_check", third_unknown)
+        monkeypatch.setattr(smt_solve, "_check", nth_unknown)
         t = Territory.from_ascii(["...", "...", "..."])
-        res = solver(territory=t, num_agents=2)
+        play = Play.from_actions(9, 2, [[0, 1], [2, 3], [4, 5], [6, 7]])
+        assert play.rewards(t.neighbor_map()) == (1, 1)
+        res = solver(territory=t, num_agents=2, initial_play=play)
         assert res.outcome == "unk" and not res.found_ne
-        assert res.play is not None
+        assert res.play == play and res.iterations == 0 and calls["n"] == call
 
     def test_symmetry_only_in_initial_query(self, monkeypatch):
         calls = {"n": 0}
@@ -622,3 +647,146 @@ def test_collective_start_on_benchmark_grids(grid, n):
         )
         assert res.initial_rewards is not None
         assert sum(res.initial_rewards) == best, (grid, n, symmetry)
+
+
+# ===================================================================
+# No best-response query for an agent at R_max (at_reward_bound)
+# ===================================================================
+
+
+def _count_checks(monkeypatch) -> list:
+    """Record every solver check (every query of a run goes through smt_solve._check)."""
+    calls: list = []
+    real = smt_solve._check
+
+    def counting(solver, *a):
+        calls.append(solver)
+        return real(solver, *a)
+
+    monkeypatch.setattr(smt_solve, "_check", counting)
+    return calls
+
+
+ALL_M_CASES = [
+    (["...", "..."], 2),
+    (["...", "..."], 3),
+    (["..#..", "..#.."], 2),
+    (["....", "...."], 2),
+    (["....", "...."], 4),
+]
+
+
+class TestRewardBound:
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    @pytest.mark.parametrize("grid,n", ALL_M_CASES)
+    @pytest.mark.parametrize("symmetry", [False, True])
+    def test_all_m_start_poses_no_best_response_query(
+        self, monkeypatch, solver, grid, n, symmetry
+    ):
+        """From a collectively optimal play with every reward m, no query but smt(F, f)."""
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        assert max_welfare(len(t), n, m, nb) == n * m
+        checks = _count_checks(monkeypatch)
+        res = solver(
+            territory=t,
+            num_agents=n,
+            initial="collective",
+            max_iters=None,
+            symmetry=symmetry,
+        )
+        assert res.initial_rewards == (m,) * n
+        assert res.outcome == "ne" and res.iterations == 0 and res.returned_initial
+        assert res.trace[0].improvement == (0,) * n and res.trace[0].checks == 0
+        assert len(checks) == 1  # the initial query smt(F, f) and nothing else
+        assert is_equilibrium(res.play, nb)
+
+    def test_best_response_functions_skip_only_at_the_bound(self, monkeypatch):
+        """The best responses answer at R_max without a query, below it with one."""
+        from rcmas.ibis import binsearch_best_response, smt_best_response
+        from rcmas.smt_solve import build_base_encoding
+
+        t = Territory.from_ascii(["...", "..."])
+        base = build_base_encoding(territory=t, num_agents=3, horizon=2)
+        play = Play.from_actions(6, 3, [[0, 1, 3], [4, 2, 5]])
+        current = play.rewards(t.neighbor_map())
+        assert current == (1, 2, 1) and base.max_reward == 2
+        for make in (smt_best_response, binsearch_best_response):
+            br = make(base)
+            checks = _count_checks(monkeypatch)
+            at = br(play, 1, current)
+            assert (at.status, at.reward, at.play, at.checks) == ("ok", 2, None, 0)
+            assert checks == []
+            below = br(play, 0, current)
+            assert below.status == "ok" and below.checks >= 1 and len(checks) >= 1
+            assert (
+                below.reward
+                == best_deviation(CanonicalCompletion(play), 0, t.neighbor_map(), None)[
+                    0
+                ]
+            )
+
+    @pytest.mark.parametrize("solver", [solve_ibis, solve_sibis])
+    @pytest.mark.parametrize(
+        "grid,n,demands,start",
+        [
+            (RUNNING, 3, (2, 2, 2), "fig_3_1"),
+            (["....", "...."], 4, None, "satisfying"),
+            (["..#", "...", ".#."], 2, (1, 1), "satisfying"),
+            ([".....", "....."], 3, None, "satisfying"),
+            (["....", "...", "..#."], 3, None, "satisfying"),
+            (RUNNING, 3, None, "collective"),
+        ],
+    )
+    def test_same_run_with_and_without_the_skip(
+        self, monkeypatch, solver, grid, n, demands, start
+    ):
+        """The skip removes queries only: same plays, potentials and outcome.
+
+        The run without the skip poses every query and the run with it is
+        answered from that record (``tests/replay.py``), since Z3's models
+        depend on process-wide state.  Every query the skip leaves out is
+        that of an agent at R_max, with potential 0.
+        """
+        t = Territory.from_ascii(grid)
+        nb = t.neighbor_map()
+        m = len(t) // n
+        kw = dict(territory=t, num_agents=n, demands=demands, max_iters=None)
+        if start == "fig_3_1":
+            kw["initial_play"] = _fig_3_1_play()
+        else:
+            kw["initial"] = start
+        replay = QueryReplay(monkeypatch)
+        with monkeypatch.context() as mp:
+            disable_skip(mp)
+            full = solver(**kw)
+        recorded = replay.replay()
+        fast = solver(**kw)
+        assert (fast.outcome, fast.reason, fast.iterations) == (
+            full.outcome,
+            full.reason,
+            full.iterations,
+        )
+        assert fast.play == full.play and fast.rewards == full.rewards
+        assert fast.initial_play == full.initial_play
+        assert [
+            (it.index, it.rewards, it.improvement, it.chosen) for it in fast.trace
+        ] == [(it.index, it.rewards, it.improvement, it.chosen) for it in full.trace]
+        # The left-out queries: one per (iteration, agent at m), each with IP 0.
+        at_bound = [
+            (it.index, a)
+            for it in full.trace
+            for a in range(n)
+            if it.improvement and it.rewards[a] == m
+        ]
+        assert at_bound, "the case must exercise the skip"
+        assert all(full.trace[i].improvement[a] == 0 for i, a in at_bound)
+        assert len(replay.best_responses(recorded)) - len(
+            replay.best_responses()
+        ) == len(at_bound)
+        assert sum(it.checks for it in full.trace) - sum(
+            it.checks for it in fast.trace
+        ) == len(at_bound)
+        if fast.outcome == "ne":
+            assert is_equilibrium(fast.play, nb, demands)

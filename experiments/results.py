@@ -105,14 +105,20 @@ class Run:
     # -- protocol and initial play (logs of the revised runner) ---------
     @property
     def protocol(self) -> dict[str, Any]:
-        """The synthesis protocol of the run (older records: that of the first run)."""
+        """The synthesis protocol of the run (older records: that of the first run).
+
+        A record without ``cegar_inner_initial`` posed ``initial`` at every
+        partition (:func:`experiments.config.normalise_protocol`).
+        """
         d = self.raw
         n = d.get("max_iters", 30)
+        initial = d.get("initial", "satisfying")
         return {
             "max_iters": n,
-            "initial": d.get("initial", "satisfying"),
+            "initial": initial,
             "cegar_inner_max_iters": d.get("cegar_inner_max_iters", n),
             "cegar_discrete_max_iters": d.get("cegar_discrete_max_iters", n),
+            "cegar_inner_initial": d.get("cegar_inner_initial", initial),
         }
 
     @property
@@ -266,6 +272,7 @@ class Results:
                 "initial": "satisfying",
                 "cegar_inner_max_iters": 30,
                 "cegar_discrete_max_iters": 30,
+                "cegar_inner_initial": "satisfying",
             }
         )
 

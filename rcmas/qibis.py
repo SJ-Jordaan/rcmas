@@ -38,7 +38,10 @@ before it returns it:
 
 In every query the opponents of the deviating agent follow the canonical
 completion of the current play, through the opponent constraint
-``[Fix^a_pi]`` (Remark 4.9.1).  No query except the initial one contains
+``[Fix^a_pi]`` (Remark 4.9.1).  Neither the restricted nor the
+certification query is posed for an agent whose reward is already
+``R_max``, whose potential is 0 since ``F`` implies ``reward_a <= R_max``
+(:func:`~rcmas.ibis.at_reward_bound`).  No query except the initial one contains
 symmetry-breaking constraints.  When Z3 answers a query with unknown, the
 run stops with outcome ``"unk"`` and never reads the answer as the absence
 of an improvement (Section 7.1).
@@ -67,6 +70,7 @@ from .ibis import (
     BestResponse,
     BestResponseFn,
     InitialHook,
+    at_reward_bound,
     failed_initial,
     initial_play_of,
     iteration_indices,
@@ -360,6 +364,8 @@ def restricted_smt_best_response(
     def br(
         play: Play, agent: int, current: tuple[int, ...], cand: SectorCandidates
     ) -> BestResponse:
+        if at_reward_bound(base, current, agent):
+            return BestResponse("ok", current[agent], None, None, 0)
         coords: ActionCandidates = {
             s: tuple(sectors[j] for j in js) for s, js in cand.items()
         }

@@ -43,7 +43,11 @@ plays. For `cegar`, `--max-iters` is the bound of the inner synthesiser,
 and `--inner-max-iters` and `--discrete-max-iters` set it separately at a
 coarse and at the discrete partition. `--initial collective` takes the
 initial play from the collectively optimal query `smt(F, f)` of Definition
-4.6.1 instead of `smt(F)` (`--initial satisfying`, the default). A
+4.6.1 instead of `smt(F)` (`--initial satisfying`, the default). For
+`cegar`, `--initial` is the initial query of the inner synthesiser at the
+discrete partition, and `--inner-initial` that at a coarse partition, posed
+on the abstract game with weighted rewards (default: the value of
+`--initial`). A
 synthesis command prints its outcome (`ne`, `n/c`, `unk`, `uns`, or for
 CEGAR-NE also `fail`), the rewards, the time and rewards of the initial
 play, and the play, with agents and sectors numbered from 1 as in the
@@ -71,9 +75,9 @@ rcmas qibis --grid grids/symmetric/3x3.txt --agents 3 --seed 0 --top-k 3
 # the orbit partition as the initial partition
 rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --progress
 rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --partition balanced --synthesiser ibis
-# ... with the inner bounds and the initial query of the Chapter 7 protocol
+# ... with the inner bounds and the initial queries of the Chapter 7 protocol
 rcmas cegar --grid grids/symmetric/4x2.txt --agents 2 --inner-max-iters 30 \
-    --discrete-max-iters none --initial collective
+    --discrete-max-iters none --inner-initial satisfying --initial collective
 
 # Q-learning self-play
 rcmas train --grid grids/symmetric/4x4.txt --agents 2
@@ -142,12 +146,14 @@ It runs these stages, and stops at the first error:
    with symmetry reduction, demand 0, Q-IBIS seed 0, one run per
    configuration with a wall-clock limit of 900 s: 560 runs. The direct
    runs of IBIS, S-IBIS and Q-IBIS have no iteration bound: a run stops at
-   an equilibrium, at the first play that recurs, or at the limit. Every
-   synthesis call takes its initial play from the collectively optimal
-   query `smt(F, f)`, with the symmetry-breaking constraints when symmetry
+   an equilibrium, at the first play that recurs, or at the limit, and
+   they take their initial play from the collectively optimal query
+   `smt(F, f)`, with the symmetry-breaking constraints when symmetry
    reduction is on. The inner S-IBIS of CEGAR-NE has the bound 30 at a
-   coarse partition, after which CEGAR-NE refines, and no bound at the
-   discrete partition. Each run gets its own fresh process, and every
+   coarse partition, after which CEGAR-NE refines, and takes its initial
+   play there from `smt(F)` of the weighted abstract game; at the discrete
+   partition it runs like a direct run on `M`, without a bound and from
+   `smt(F, f)`. Each run gets its own fresh process, and every
    equilibrium is checked by the certifier as soon as it is returned; a run
    counts as solved only if the certifier accepts it. Output:
    `results/thesis-eval-900.jsonl`.
@@ -186,21 +192,25 @@ runs and of the inner run at the discrete partition, and starts from
 the initial play is the play of a model of `F`, which a collectively
 optimal model is, and an unbounded run still terminates. If every agent has
 reward `m` in the collectively optimal play, it is an equilibrium under any
-completion, and the run returns it in iteration 0. S-IBIS then returns at
-once, since its feasibility filter `reward_a > m` is refuted immediately by
-the implied bound `reward_a <= m`. IBIS and Q-IBIS still pose one
-optimisation query `smt(G_a(pi), reward_a)` per agent in that iteration,
-which has to construct a deviation with reward `m`: on `6x4` with 3 agents
-one such query took 296 s, against 0.11 s for each check of S-IBIS, so such
-runs of IBIS and Q-IBIS can still reach the limit. In CEGAR-NE the initial
-query of an inner call at a coarse partition is the collectively optimal
-query of the weighted abstract game, which can be much harder than
-`smt(F, f)` on `M`: at the orbit partition of `5x5-shaped` with 2 agents
-and of `8x8-34` with 2 and 3 agents it was not answered within 900 s, with
-or without symmetry reduction, while `smt(F, f)` on `M` takes 6 to 7 s
-there. CEGAR-NE therefore reaches the limit on these instances; in the
-first run it solved `8x8-34` with 2 agents in 426 s (570 s with symmetry
-reduction).
+completion, and the run returns it in iteration 0. No synthesiser poses a
+best-response query for an agent whose reward is already `R_max` (`m`, or
+the largest total weight of `m_hat` blocks in an abstract game), and
+VerifyNE poses none for an agent with reward `m`: `F` implies
+`reward_a <= R_max`, so the improvement potential of such an agent is 0, and
+an agent with potential 0 is never the one that is updated, so the runs are
+the same apart from the number of queries. From an initial play in which
+every reward is `m`, IBIS, S-IBIS and Q-IBIS therefore return without a
+best-response query. Without this, IBIS and Q-IBIS posed the optimisation
+query `smt(G_a(pi), reward_a)` for every agent, which has to construct a
+deviation with reward `m`: on `6x4` with 3 agents one such query took
+296 s. In CEGAR-NE the inner call at a coarse partition takes its initial
+play from `smt(F)` of the weighted abstract game (`cegar_inner_initial =
+"satisfying"`), and the call at the discrete partition from `smt(F, f)` of
+`M`, so that there CEGAR-NE runs like a direct run. The collectively optimal
+query of the weighted abstract game can be much harder than `smt(F, f)` of
+`M`: at the orbit partition of `5x5-shaped` with 2 agents and of `8x8-34`
+with 2 and 3 agents it was not answered within 900 s, with or without
+symmetry reduction, while `smt(F, f)` of `M` takes 6 to 9 s there.
 `experiments/thesis-eval-n30.toml` holds the protocol of the first run:
 `./reproduce.sh --config experiments/thesis-eval-n30.toml` reruns it into
 `results/thesis-eval-n30-900.jsonl`, and its other outputs are named after
@@ -256,9 +266,10 @@ by another commit of the tool or with other uncommitted changes, another Z3
 version, another configuration file or another protocol, so one log never
 mixes two setups; use a new `--results-dir` instead. The session header and
 every run record hold the protocol (`max_iters`, `initial`,
-`cegar_inner_max_iters`, `cegar_discrete_max_iters`; a bound of `null`
-means no bound), and a log of another synthesis protocol is refused even
-with `--allow-mixed`.
+`cegar_inner_max_iters`, `cegar_discrete_max_iters`, `cegar_inner_initial`;
+a bound of `null` means no bound, and a log without `cegar_inner_initial`
+posed `initial` at every partition), and a log of another synthesis
+protocol is refused even with `--allow-mixed`.
 
 **Hardware.** Each run is one Python process with one Z3 instance on one
 core. Chapter 7 compares times, so use at most the number of physical cores:
@@ -301,7 +312,8 @@ line. Every run record repeats the commit and the Z3 version and gives the
 grid path relative to the tool. It also describes the initial play: the
 time and answer of the initial query (`initial_query_s`,
 `initial_query_status`; for CEGAR-NE those of the first inner call, with
-one entry per inner call in `cegar_initial_queries` and `cegar_trace`), the
+one entry per inner call, naming its query, in `cegar_initial_queries` and
+`cegar_trace`), the
 rewards in `M` of the initial play (`initial_rewards`, `initial_welfare`;
 for CEGAR-NE of the lift of the first inner call's initial play), whether
 every reward is `m` (`initial_all_m`) and whether the run returned the
